@@ -1,0 +1,49 @@
+[project]
+name = "analytics-agent"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Jason-Handerhan", email = "jmhlax4@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "fastmcp>=4.0.3",
+    "google-cloud-bigquery>=3.45.0",
+    "google-cloud-firestore>=2.30.0",
+    "google-cloud-secret-manager>=2.30.0",
+    "google-cloud-storage>=3.14.1",
+    "langchain-anthropic>=1.7.2",
+    "langchain-core>=1.6.3",
+    "langchain-google-genai>=4.4.0",
+    "langchain-mcp-adapters>=0.3.1",
+    "langchain-openai>=1.6.2",
+    "langgraph>=1.2.11",
+    "matplotlib>=3.11.2",
+    "mistune>=3.3.4",
+    "msal>=1.38.0",
+    "numpy>=2.5.3",
+    "pandas>=3.0.5",
+    "pydantic>=2.13.5",
+    "pyjwt[crypto]>=2.14.0",
+    "pysbd>=0.3.4",
+    "requests>=2.34.2",
+    "seaborn>=0.13.2",
+    "unstructured[md]>=0.27.5",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[project.scripts]
+analytics-agent = "analytics_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

@@ -9,3 +9,7 @@ __pycache__/
 github-deployer-key.json
 *.png
 !docs/**/*.png
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
