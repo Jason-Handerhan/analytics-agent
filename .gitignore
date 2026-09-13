@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+.DS_Store
+.pytest_cache/
+*-key.json
+github-deployer-key.json
+*.png
+!docs/**/*.png

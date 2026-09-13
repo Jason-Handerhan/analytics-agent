@@ -1,0 +1,683 @@
+---
+paths:
+  - 'app/orchestrator/**'
+  - 'app/exceptions.py'
+  - 'tests/test_guardrails.py'
+  - 'tests/test_e2e.py'
+  - 'tests/test_approval_e2e.py'
+---
+
+# Orchestrator: verification contract + guardrails
+
+> **Deep dives:** `docs/testing.md` for how these checks get tested (the
+> composition test is the important one). Read `docs/approval-workflow.md`
+> before building the cost tiers or `/ask/respond`.
+
+## The verification contract — implement exactly
+
+```python
+class Claim(BaseModel):
+    text: str
+    numeric_value: float | None = None
+    source_tool_call_id: str | None = None
+
+class AgentResponse(BaseModel):
+    answer_markdown: str
+    sources: list[str]
+    needs_approval: bool = False
+    chart_url: str | None = None
+    claims: list[Claim] = []
+    suggested_follow_ups: list[str] = []
+    iteration_cap_hit: bool = False   # see "Hitting max_iterations" below
+    pending_query: str | None = None   # set ONLY when needs_approval is True.
+                                       # SINGULAR: the one query shown on the
+                                       # card. The cache holds pending_queries
+                                       # (plural) — every query to execute.
+    estimated_cost: str | None = None  # display dollars; set with pending_query
+                                       # or cost_cap_exceeded
+    cost_cap_exceeded: bool = False    # hard decline — mutually exclusive with
+                                       # needs_approval; no approval offered
+```
+
+## Graph state — what flows between nodes
+
+`AgentResponse` is the wire format the gateway returns. `AgentState` is the
+superset carried *through* the graph — scratchpad included.
+
+```python
+from typing import Annotated, TypedDict
+from datetime import datetime
+from langchain_core.messages import BaseMessage
+
+class ToolCallRecord(TypedDict):
+    id: str              # what Claim.source_tool_call_id points at — without
+                         # this, verify_claim_value has nothing to resolve
+    name: str
+    args: dict            # the query lives HERE — {"query": "SELECT ..."} or
+                          # {"dax": "EVALUATE ..."}. No separate queries list:
+                          # `name` distinguishes SQL from DAX, and a second
+                          # copy could drift from this one.
+    result: list[dict] | str   # query tools: one dict per ROW, native Python
+                               # types (no serialization in state). Other tools
+                               # return their own shape. FastMCP JSON-encodes
+                               # whatever the tool returns for the model.
+    success: bool
+    error: str | None    # WHICH failure — agent retry behavior distinguishes
+                         # ToolError from ToolTimeoutError; `success` alone loses that
+    started_at: datetime
+    completed_at: datetime
+
+class TimestampedMessage(TypedDict):
+    message: BaseMessage      # the LangChain object, unmodified
+    timestamp: datetime
+
+class TurnError(TypedDict):
+    stage: str                # a node name: "execute_approved" | "agent" |
+                              # "call_tool" | "check_length" | "verify"
+    error_type: str
+    message: str
+    occurred_at: datetime
+
+def append_list(existing: list, new: list) -> list:
+    """Accumulate across supersteps instead of last-write-wins.
+
+    Required on every field a node appends to across MULTIPLE loop iterations.
+    Without it, batch 2's `call_tool_node` return REPLACES batch 1's records:
+    a claim citing an earlier call fails verification, `generate_chart` can't
+    resolve an earlier `source_tool_call_id`, and telemetry loses all but the
+    final batch. Also replaces LangGraph's `add_messages`, whose dedup-by-id
+    and update-in-place behavior is for chat UIs that edit messages — this
+    graph only appends forward.
+    """
+    return existing + new
+
+class AgentState(TypedDict):
+    # Set once, at invocation
+    question: str
+    conversation_id: str
+    filter_context: list[dict]
+    active_page: str | None      # from report.getActivePage().displayName;
+                                 # NOT a filter — feeds get_page_info only
+    image_base64: str | None
+    conversation_history: list[dict]   # prior turns, read from Firestore before
+                                       # the graph starts. NOT `messages` below.
+
+    # Accumulated during the loop
+    messages: Annotated[list[TimestampedMessage], append_list]
+    tool_calls: Annotated[list[ToolCallRecord], append_list]
+    iteration_count: int
+
+    # Separate retry budgets — verification and length fail for different
+    # reasons; one shared counter lets length failures burn verification's budget
+    verification_retry_count: int
+    length_retry_count: int
+
+    claims: Annotated[list[Claim], append_list]
+    verified: bool               # set by verify_node; the routing condition
+                                 # out of it. Not on AgentResponse — callers
+                                 # get a verified answer or an honest decline,
+                                 # never a flag to interpret.
+
+    # Resource accumulators — must be summed live; per-call figures are gone
+    # by the time telemetry writes
+    bytes_consumed: int          # Cumulative across EVERY tool loop this turn,
+                                 # and carried through an approval pause. The
+                                 # absolute cap compares against this; the
+                                 # per-batch BIG_QUERY_THRESHOLD does not.
+    prompt_tokens: int
+    completion_tokens: int
+    llm_calls: int
+
+    # Turn-level failures — distinct from ToolCallRecord.error, which is scoped
+    # to a single tool call. Covers LLM call failures, verification exhaustion,
+    # chart failures, and anything unexpected in a node. A LIST: a turn can
+    # survive one failure and hit another; the first is often more diagnostic.
+    errors: Annotated[list[TurnError], append_list]
+
+    # Written mid-run by a node that finds the Firestore cancel flag set —
+    # never at invocation, where it would always be False. See "Cancellation".
+    cancelled: bool
+
+    # Guardrail outcomes
+    needs_approval: bool
+    pending_queries: list[str]     # plural — every BigQuery query to run on
+                                   # approve. Also the route_entry branch:
+                                   # non-empty means this is a resumed turn.
+    deferred_dax: list[str]        # DAX deferred at the pause (its results
+                                   # would otherwise sit in Firestore).
+                                   # Seeded from PendingApproval on resume.
+    estimated_cost: str | None
+    cost_cap_exceeded: bool
+    iteration_cap_hit: bool
+
+    # Building toward AgentResponse
+    answer_markdown: str
+    chart_url: str | None
+    sources: list[str]
+```
+
+**`cancelled` is written by nodes, not set at invocation.** The flag lives in
+Firestore (the gateway and the running turn are separate requests, possibly on
+separate instances). A node reads it live and returns it as an ordinary state
+update, which is what gives the telemetry writer a source for the `cancelled`
+field. `conversation_id` in state is all a node or tool needs for
+that lookup. See "Cancellation" below.
+
+**`conversation_history` vs `messages`** — cross-turn history read from
+Firestore, versus this turn's own tool-calling scratchpad. Different
+lifetimes, different consumers.
+
+**Two `AgentResponse` fields have no state counterpart — produce them when
+building the response:**
+- **`pending_query`** — state holds `pending_queries` (plural, all of them).
+  Display **the most expensive one**: it's the figure the human is actually
+  being asked to approve, and showing a cheaper one understates the decision.
+- **`suggested_follow_ups`** — generated fresh when the answer is written,
+  not accumulated during the loop. Nothing carries it in state.
+
+**Three deterministic checks — plain Python, never another LLM call.**
+
+```python
+def citation_check(claim: Claim, tool_names: dict[str, str]) -> bool:
+    """A numeric claim must cite a tool call from THIS turn that isn't
+    search_docs. tool_names maps this turn's tool_call ids -> tool name."""
+    if claim.numeric_value is None:
+        return True                       # non-numeric claims pass vacuously
+    tool = tool_names.get(claim.source_tool_call_id)
+    return tool is not None and tool != "search_docs"
+
+def coverage_check(answer_markdown: str, claims: list[Claim]) -> bool:
+    """Every number in the prose must be backed by some claim. Catches a
+    number stated with no claim object at all."""
+    claimed = {c.numeric_value for c in claims if c.numeric_value is not None}
+    for token in extract_numeric_tokens(answer_markdown):
+        if not any(abs(token - v) < 0.01 for v in claimed):
+            return False
+    return True
+
+def verify_claim_value(claim: Claim, tool_call_results: dict[str, Any]) -> bool:
+    """The cited value must actually appear in that tool call's raw result."""
+    if claim.numeric_value is None:
+        return True
+    raw = tool_call_results.get(claim.source_tool_call_id)
+    return raw is not None and value_appears_in_result(
+        claim.numeric_value, raw, tolerance=0.01)
+```
+
+**Composition is load-bearing — none is sufficient alone:**
+
+```python
+def verify_response(response, tool_names, tool_call_results) -> tuple[bool, str | None]:
+    for claim in response.claims:                     # EVERY claim, not just some
+        if not citation_check(claim, tool_names):
+            return False, f"Claim {claim.text!r} has no valid non-docs citation."
+        if not verify_claim_value(claim, tool_call_results):
+            return False, f"Value {claim.numeric_value} not in its cited result."
+    if not coverage_check(response.answer_markdown, response.claims):
+        return False, "A number in the answer has no backing claim."
+    return True, None
+```
+
+`coverage_check` alone passes a claim with `source_tool_call_id=None` — the
+number *is* in a claim. Only the per-claim `citation_check` loop closes that.
+Skip the loop and uncited numbers pass silently.
+
+On failure: retry with a corrective message, **max 1–2**, then return an honest
+"no verified figure for that." Never emit the number.
+
+**Known limitation, don't solve now:** multi-row results mean value matching
+confirms the number appears *somewhere*, not that it's from the right row.
+
+**No `is_projection` field — deliberately not carried.** The Phase 7
+`run_projection` tool (§11) would need one, because a
+projected number has no live tool result to cite and would have to be
+*exempt* from citation/coverage. Add the field **with** that feature, not
+before: a field nothing sets and nothing reads is one more thing to keep in
+sync across `AgentResponse`, `AgentState`, and telemetry for no current
+benefit.
+
+**Scope rule (Phase 3+):** decline forecast/projection questions outright.
+*"This system answers from historical/current data and existing model outputs.
+It does not generate forecasts or projections."*
+
+**Two helpers you'll need to write** (both pure functions, both worth their own
+Layer-1 tests — see `docs/testing.md`):
+- `extract_numeric_tokens(text) -> list[float]` — **called by
+  `coverage_check`.** Normalizes commas, `%`, currency out of prose numbers.
+  **The year/version/index rule is undecided** — scanning prose for numbers
+  false-positives on things that aren't data: *"the Q3 2024 model"* yields
+  `2024`, *"version 2.1"* yields `2.1`, and neither is a claim needing a
+  citation. Propose a rule with accept/reject examples and confirm it before
+  locking a test around it.
+- `value_appears_in_result(value, raw_result, tolerance) -> bool` — **called by
+  `verify_claim_value`.** Walks nested dicts/lists; True if any numeric leaf
+  is within tolerance. Handles both BigQuery row dicts and
+  `executeQueries`' `results[0].tables[0].rows` shape, where keys are fully
+  qualified (`Table[Column]`) — it matches on values, not keys, so the
+  qualified naming doesn't matter.
+
+## Constrained decoding — `strict=True` on every structured call
+
+**A layer *below* verification, not overlapping it.** Every guardrail here
+assumes a well-formed tool call or response already arrived, then checks
+whether its *content* is acceptable. Constrained decoding stops the sampler
+from emitting a shape that doesn't match the schema at all — a different
+failure class, currently unguarded.
+
+Apply it in both places: **tool-call argument schemas** and the final
+**`AgentResponse`** structured-output call.
+
+**It eliminates a failure class rather than speeding up recovery from one.**
+If an invalid structure can't be sampled, "malformed output" stops being an
+outcome to retry from. **But structural only** — it can guarantee valid JSON,
+a real `tool_name`, required fields present. It cannot guarantee the SQL is
+right or a claim is backed. The verification retry loop is unchanged; this is
+a cheap deterministic filter in front of it.
+
+**Confirm at build time — this is provider-specific, which matters here given
+model-swappability:** OpenAI's `strict: true` carries real schema constraints
+(every field in `required`, optionality as nullable types, `additionalProperties:
+false`), so enabling it may mean *reshaping* a schema, not just flipping a
+flag. Gemini has an equivalent enforced JSON-schema mode, but its exact
+parameter surface through the LangChain wrapper — and how closely its
+guarantees match OpenAI's — needs verifying, not assuming. Same category as
+`query_job.result()`'s param name.
+
+## Shared exceptions
+
+`ToolError` and `ToolTimeoutError` are referenced throughout these docs but
+aren't defined anywhere yet. Define them once in a shared module (e.g.
+`app/exceptions.py`) rather than per-tool — the agent's retry behavior depends
+on distinguishing "recoverable, fix your input" from "timed out, try
+narrowing." Confirm the module location before creating it.
+
+## `sources` — ordered provenance badges, built in `finalize`
+
+`AgentResponse.sources` is what the UI renders as badges under the answer
+(`docs/frontend.md`). Contract: **friendly labels, in dispatch order, consecutive runs
+collapsed with a count.**
+
+```python
+from itertools import groupby
+
+# Separate from FRIENDLY_TOOL_NAMES (.claude/rules/gateway.md): those are
+# present-tense progress messages, these are past-tense badges. No tool jargon
+# — the reader is field-operations staff. "Model fields" is the SEMANTIC
+# model's, not BigQuery's.
+SOURCE_LABELS = {
+    "run_bigquery_sql": "Queried warehouse",
+    "run_dax_query":    "Queried dashboard data",
+    "get_measure_dax":  "Looked up a measure",
+    "get_page_info":    "Read dashboard page",
+    "list_repo_files":  "Browsed project code",
+    "read_repo_file":   "Read project code",
+    "search_docs":      "Searched documentation",
+    "generate_chart":   "Created chart",
+}
+
+def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
+    """Ordered source labels, consecutive runs collapsed with a count.
+
+    -> ["Looked up model fields", "Queried warehouse (3)", "Created chart"]
+
+    Consecutive, not global: schema → query → schema → query stays four
+    entries in order, rather than collapsing to two and losing the sequence.
+    groupby() groups adjacent equal items, which is exactly that.
+    """
+    names = [SOURCE_LABELS.get(tc["name"], tc["name"])
+             for tc in tool_calls if tc["success"]]
+    return [f"{name} ({n})" if (n := len(list(grp))) > 1 else name
+            for name, grp in groupby(names)]
+```
+
+**Failed calls are excluded** — a call that errored and was retried isn't a
+source the answer rests on. Every attempt is still in `agent_telemetry`.
+
+**Built in `finalize`**, where `tool_calls` is complete and ordered.
+
+## Guardrails
+
+| Guard | Bounds | Notes |
+|---|---|---|
+| Dry-run → `BIG_QUERY_THRESHOLD` → approval | Summed bytes of **this batch** | In `call_tool_node`, not the tool — only the node sees the batch |
+| **Absolute byte cap** → hard decline | `AgentState.bytes_consumed`, **cumulative across every loop** and carried through a pause | No approval offered above this |
+| BigQuery row cap (`max_results`) | Rows returned | Orthogonal to cost |
+| DAX row cap (`TOPN` + count check) | Rows returned | Different mechanism than BigQuery |
+| Answer-length check | Chars in `answer_markdown` | Separate from verification |
+| Question-length cap | Chars in the incoming `question` | Gateway request validation, not a turn guard |
+| `max_iterations` (12 tool calls) | Loop count | Conditional edge |
+| Per-tool timeout (40s) | One slow call | Recoverable — agent retries narrower. Sized to leave room under the ~90s gateway budget for retries + synthesis; a long query isn't inherently a wrong one |
+| Gateway timeout (~90s) | Whole turn | Enforced in `app/gateway/` |
+
+Each is detailed below.
+
+### Row caps — orthogonal to cost, not covered by it
+
+`LIMIT` does **not** reduce BigQuery bytes scanned (engine scans full columns
+first), so a cheap query can still return tens of thousands of rows with
+nothing in the cost gate to catch it. Two tools, two mechanisms —
+implementation in `.claude/rules/mcp-tools.md`:
+
+- **BigQuery:** `query_job.result(max_results=1000)` — caps the *fetch*, no
+  query-text rewriting.
+- **DAX:** no client-side fetch cap exists. Steer generated DAX toward `TOPN`
+  **plus** a deterministic post-fetch row-count check as the real guarantee.
+  Power BI's own 100,000-row/15MB ceiling is far too generous to rely on.
+- **On exceeding either:** actionable tool error — *"Query returned 1,000+
+  rows. Add a filter or aggregate to narrow it."* **Never silently truncate.**
+
+### Answer-length check — display feasibility, not numeric trust
+
+Row caps protect the *tool result*. Nothing stops the model writing a giant
+markdown table into `answer_markdown` anyway — and the Power Apps HTML control
+has a hard **16,384-character limit** (HTML inflates markdown tables
+significantly). Kept separate from `verify_response` on purpose.
+
+```python
+MAX_ANSWER_CHARS = 6000  # real margin below 16,384 — HTML inflation + card chrome
+
+# Separate budgets, deliberately: a length failure must not consume
+# verification's retries. Both are the graph's routing conditions.
+MAX_LENGTH_RETRIES = 2
+MAX_VERIFY_RETRIES = 2
+
+def check_answer_length(answer_markdown: str) -> bool:
+    return len(answer_markdown) <= MAX_ANSWER_CHARS
+```
+
+1. **Steering:** many rows → summarize (top N, key stats) and/or offer a chart
+   via `generate_chart`.
+2. **Backstop:** on failure, loop back — **same retry pattern and 1–2 cap as
+   verification** — *"Your answer is too long to display. Summarize the key
+   findings concisely, or generate a chart instead of listing rows."* Never
+   truncate silently; that can cut off a partial-answer caveat mid-sentence.
+
+### Question-length cap — bounded at the gateway, not here
+
+Answer-length is bounded here; the incoming `question` is bounded as
+**gateway request validation** before a turn starts. Implementation lives in
+`.claude/rules/gateway.md` — it isn't a turn guardrail.
+
+### Cost tiers and the approval pause
+
+Three tiers, the byte-vs-dollar decision rule, and the full pause/resume
+design are in `docs/approval-workflow.md` — single source, read it before
+touching `call_tool_node`'s cost logic.
+
+**Three things that are easy to get wrong — full design in
+`docs/approval-workflow.md`, read it before building this:**
+1. **The cost gate is in `call_tool_node`, not in the tool.** Three phases:
+   dry-run every BigQuery call, decide once on the **summed** bytes, then
+   execute. Per-tool gating can't see the batch — three individually-cheap
+   queries would each pass while blowing the cap together. Phase 3's
+   `asyncio.gather()` is also the join point: never inspect results as they
+   arrive and return early, or a finished sibling's result is abandoned and
+   the resumed turn re-runs it.
+2. **The pause caches the whole turn, not just the query.** A compound
+   question may have already run `search_docs`; caching only the pending query
+   would discard it. Cached in `live_turns/{conversation_id}` in Firestore
+   — **not process memory**, which wouldn't survive Cloud Run's multiple
+   concurrent instances (`.claude/rules/gateway.md`). Telemetry is never
+   read back for this.
+3. **On approve, don't re-run the agent loop** — execute the cached queries,
+   then one LLM call synthesizes across old + new results. On reject, reuse
+   the `iteration_cap_hit` partial-answer machinery.
+
+**12 is a calibration starting point, not a tuned value.** Exhaustion degrades
+to a partial answer (below), so a high cap costs nothing — it just reveals how
+many iterations real questions need. `iteration_count` is logged per turn for
+exactly this (`.claude/rules/telemetry.md`): set the real cap above the 95th
+percentile of *successful* turns, not the average — the DAX-heavy tail is what
+a low cap truncates.
+
+### Hitting `max_iterations` — partial answer, not a blanket refusal
+
+Different failure mode from verification exhaustion: the model ran out of
+budget, possibly mid-progress. Already-verified claims stay valid.
+
+1. Synthesize `answer_markdown` from whatever `claims` verified — normal
+   `AgentResponse` assembly with partial state, not a refusal path.
+2. **The model must state plainly that the answer is partial** and name what
+   wasn't reached. System prompt: *"If you're stopped by the iteration limit
+   before fully answering, state clearly that this is a partial answer and
+   specify what you weren't able to address."*
+3. Set `iteration_cap_hit: True` — lets the UI render it distinctly rather
+   than relying on the prose being read carefully.
+4. **Verification still applies normally** to whatever claims exist — cap
+   exhaustion never bypasses citation/coverage/value checks.
+
+### DAX grounding — structural, with no pre-call requirement
+
+**No "search before query" rule.** The table schema and measure registry are
+in static context on every turn (`.claude/rules/gateway.md`), so the model
+composes DAX against a schema it can already see. There's no retrieval step
+to require first, and nothing to reject on.
+
+**Do NOT block on measure-name validation.** Validating every `[Bracket]`
+rejects valid novel compositions — the agent must stay free to build new logic
+from real parts (`DIVIDE([Hits], [Total])`), and a regex can't separate a
+*consumed* reference from one *defined* inline (`SUMMARIZECOLUMNS(..., "Avg
+Recall", ...)`, `DEFINE MEASURE`, `VAR`). The engine already rejects
+nonexistent measures. Instead, on engine failure append a fuzzy-match hint:
+*"Measure `[Recall@5]` not found. Closest: `[Recall at 5]`"*. Advisory only.
+
+### Batch ordering — stop `generate_chart` running before its data exists
+
+`generate_chart`'s spec classes, required fields, and rendering contract are
+in `docs/chart-tool.md`; what matters here is only *when* it may be dispatched.
+
+LangGraph dispatches a batch concurrently, so a data-fetch call and a
+`generate_chart` referencing it in the *same* batch would race.
+
+```python
+def check_batch_ordering(tool_calls: list[dict]) -> None:
+    ids = {tc["id"] for tc in tool_calls}
+    for tc in tool_calls:
+        ref = tc.get("args", {}).get("source_tool_call_id")
+        if ref and ref in ids:
+            raise ToolError(
+                f"{tc['name']} references '{ref}' from this same batch. "
+                "Fetch first, wait for the result, then call it in a follow-up step."
+            )
+```
+
+### Cancellation — two levels, because stopping and killing are different
+
+`POST /ask/cancel` writes `cancel_requested: true` to
+`live_turns/{conversation_id}` and returns immediately. It's a separate,
+concurrent request — Firestore is the mailbox between it and the running
+turn, and it has to be Firestore rather than memory because the two requests
+may land on different Cloud Run instances.
+
+**Level 1 — a gate at the top of each node.** Stops the graph advancing into
+further work. **Set state and let the conditional edge route — don't raise,
+and don't return `Command`.** Raising unwinds the graph, forcing the
+gateway's handler to reconstruct whatever `tool_calls`, tokens, and
+`bytes_consumed` were accumulated; a plain state update keeps it intact so
+telemetry writes the real picture.
+
+**Do not add `Command(goto=...)` to a node that already has a conditional
+edge.** LangChain's docs are explicit — use dynamic routing *or* static
+edges per node, never both — and when both exist, *both* destinations
+execute. The conditional edge below already tests `cancelled`, so the node
+only needs to set it.
+
+```python
+async def call_tool_node(state: AgentState) -> dict:
+    if await is_cancelled(state["conversation_id"]):
+        return {"cancelled": True}      # the conditional edge routes to finalize
+    ...
+
+async def is_cancelled(conversation_id: str) -> bool:
+    doc = await firestore_client.collection("live_turns").document(conversation_id).get()
+    return doc.exists and doc.to_dict().get("cancel_requested", False)
+```
+
+**Level 2 — inside `run_bigquery_sql`.** Node-level checks can't help once
+execution is already *inside* a node awaiting a query. Only this level can
+kill a live BigQuery job, and the `cancel_job()` machinery already exists for
+timeouts — this widens what triggers it.
+
+```python
+async def run_bigquery_sql(query: str, conversation_id: str):
+    # maximum_bytes_billed is the hard fail-safe: BigQuery kills the job
+    # server-side if it exceeds this, independent of anything below.
+    job = client.query(query, job_config=QueryJobConfig(
+        maximum_bytes_billed=ABSOLUTE_CAP))
+    query_task  = asyncio.create_task(job.result_async())
+    cancel_task = asyncio.create_task(watch_for_cancel(conversation_id))
+
+    done, pending = await asyncio.wait(
+        {query_task, cancel_task}, timeout=40,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+
+    # Success wins even if a cancel landed on the same tick — the job already
+    # completed and was already paid for; discarding a ready result to report
+    # "cancelled" is the wrong outcome.
+    if query_task in done:
+        return query_task.result()
+
+    # asyncio cancellation alone won't stop the job — but this call can itself
+    # fail (transient API error). Swallow and log: an unhandled exception here
+    # would mask the real ToolTimeoutError AND leave the job running. Worst
+    # case the scan completes unread, bounded by maximum_bytes_billed.
+    try:
+        client.cancel_job(job.job_id)
+    except Exception as e:
+        logger.warning("cancel_job failed for %s: %s", job.job_id, e)
+
+    raise TurnCancelledError() if cancel_task in done else ToolTimeoutError(
+        "Query exceeded 40s. If the question genuinely needs this much data, "
+        "narrow the date range or aggregate further; otherwise check for a "
+        "missing filter or join condition.")
+```
+
+**Race, don't poll inside the await.** Polling Firestore every second *inside*
+the query's own await path would tax every successful query on the hot path
+to catch a cancel that rarely comes. `watch_for_cancel` still polls
+internally (Firestore listeners are the alternative, with their own
+complexity), but a 2–3s interval is plenty for a human clicking a button, and
+it's cancelled the instant the query wins.
+
+**`run_dax_query` is best-effort only** — the Power BI REST path has no
+server-side cancellation, so closing the connection is the only lever and the
+query may keep running regardless (XMLA, the documented backup, would
+support real cancellation — component reference §8). Real for BigQuery, best-effort for
+DAX; document it, don't skip it.
+
+**`TurnCancelledError` lives in `app/exceptions.py`** beside `ToolError` and
+`ToolTimeoutError`. A cancelled turn still writes telemetry — `cancelled:
+True` plus whatever `tool_calls` completed (`.claude/rules/telemetry.md`).
+
+**Confirm at build time:** whether breaking out of `astream` propagates
+cancellation into an in-flight node, or only takes effect at the next
+inter-node checkpoint.
+
+### The graph — seven nodes
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+g = StateGraph(AgentState)
+g.add_node("route_entry",      route_entry_node)
+g.add_node("execute_approved", execute_approved_node)
+g.add_node("agent",            agent_node)
+g.add_node("call_tool",        call_tool_node)
+g.add_node("check_length",     check_length_node)
+g.add_node("verify",           verify_node)
+g.add_node("finalize",         finalize_node)
+
+g.add_edge(START, "route_entry")
+g.add_conditional_edges("route_entry", lambda s:
+    "execute_approved" if s["pending_queries"] else "agent")
+g.add_edge("execute_approved", "agent")   # even on failure — the agent sees
+                                          # the error and can respond to it
+
+g.add_conditional_edges("agent", lambda s:
+    "call_tool" if s["messages"][-1]["message"].tool_calls else "check_length")
+
+g.add_conditional_edges("call_tool", lambda s:
+    "finalize" if (s["cancelled"] or s["needs_approval"]
+                   or s["cost_cap_exceeded"] or s["iteration_cap_hit"])
+    else "agent")
+
+g.add_conditional_edges("check_length", lambda s:
+    "verify"   if check_answer_length(s["answer_markdown"])
+    else "agent" if s["length_retry_count"] < MAX_LENGTH_RETRIES
+    else "finalize")
+
+g.add_conditional_edges("verify", lambda s:
+    "finalize" if s["verified"]
+    else "agent" if s["verification_retry_count"] < MAX_VERIFY_RETRIES
+    else "finalize")
+
+g.add_edge("finalize", END)
+graph = g.compile()
+```
+
+| Node | Role |
+|---|---|
+| `route_entry` | Branches on `pending_queries`. Pure routing, no work |
+| `execute_approved` | Runs each `pending_queries` entry directly in Python — no LLM |
+| `agent` | The LLM call. Emits tool calls, or writes the answer |
+| `call_tool` | Dispatches tools, checks cancel, increments `iteration_count` |
+| `check_length` | Owns `length_retry_count` |
+| `verify` | `verify_response()`. Owns `verification_retry_count` |
+| `finalize` | Builds `AgentResponse`, writes telemetry, clears `live_turns` |
+
+- `route_entry` branches on `pending_queries` — a fresh turn's is empty.
+- **Cost gating is not a node** — it lives inside `run_bigquery_sql`, which
+  dry-runs the exact SQL immediately before executing it. `call_tool` routes
+  on what the tool reports back.
+- `check_length` before `verify` — cheap check first; no point walking every
+  claim on an answer that can't be displayed regardless.
+- `finalize` is the **single exit**: five paths end a turn (success, cancel,
+  approval pause, cost cap, iteration cap) and one place writes telemetry.
+
+### Node names are a design decision, and status depends on them
+
+The gateway consumes this graph with **`astream`, not `ainvoke`** (see
+`.claude/rules/gateway.md`) so it can report per-node progress. That means
+**node names are part of the contract**, not throwaway labels: the status
+mapping matches on them. Rename a node and the gateway's status mapping must
+change in the same step.
+
+### Smaller, easy to miss
+
+- **Cancellation must be explicit** — `asyncio` cancellation alone doesn't
+  stop a running BigQuery job. Call `client.cancel_job(job.job_id)` in the
+  timeout handler.
+- **Trim tool outputs between turns** — after a turn verifies, keep
+  `answer_markdown` and `claims`; drop raw `ToolMessage` contents. Otherwise
+  each later turn carries a growing pile of past raw results.
+- **Confirm parallel dispatch isn't accidentally serialized** — LangGraph runs
+  multiple tool calls concurrently by default. A free win, not something to
+  build.
+
+### Why flat tool-calling, not sub-agents
+
+More LLM round-trips work against the 5–15s target, and citation granularity
+gets murky once a result comes from a sub-agent. If DAX quality becomes a
+problem, escalate in order: more DAX few-shots → richer tool descriptions →
+forced tool choice → *then* sub-agents. Decide from eval metrics, not feel.
+
+## LangSmith tracing — local and deployed
+
+`LANGSMITH_TRACING`/`LANGSMITH_API_KEY` give a per-turn trace of the agent
+loop: every LLM call, tool call, and iteration, nested in order. Set them
+locally and in the Cloud Run deploy command.
+
+**`LANGCHAIN_CALLBACKS_BACKGROUND=false` is required wherever it's deployed.**
+Trace uploads go through a background callback by default; Cloud Run freezes
+CPU the instant the response is sent, so the upload is lost — the same trap
+already solved for telemetry writes.
+
+**Separate from `agent_telemetry`, not a replacement**
+(`.claude/rules/telemetry.md`). Traces are a per-turn debugging view; the
+BigQuery table is the queryable record that feeds the judge. Different jobs.
+
+Setup: `local-dev-environment-setup.md` Step 17. Why tracing runs in
+production here rather than Cloud Trace: component reference §3.

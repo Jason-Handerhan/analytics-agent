@@ -1,0 +1,330 @@
+# Build Order
+
+## Current status — update this as we go
+
+**Phase: 0 (not started)**
+
+_Last updated: initial plan, nothing built yet._
+
+**Keep this block current.** It's the only place that records where we
+actually are — everything below is the static plan. When a phase completes,
+update the line above and note anything that turned out differently from the
+plan (a step that was skipped, a decision that changed). If you finish a step
+and this block is stale, say so rather than guessing what's done.
+
+---
+
+One phase at a time, in order. Within a phase, items are dependency-sequenced.
+
+**Tests aren't listed as separate steps — that's deliberate, not an
+omission.** Every step ships with its own **Layer 1** tests; a step isn't
+finished until they exist and pass (`CLAUDE.md`, "How we work"). Layer 2
+needs real credentials and runs manually. `docs/testing.md` is the source of
+truth for what each piece needs, and `docs/success-criteria.md` holds both
+the coverage matrix and the manual gates.
+
+**Repo layout isn't documented here** — it's whatever actually exists on disk
+in the repo, plus the canonical version in `local-dev-environment-setup.md`
+Step 6 for setting it up the first time. Look at the filesystem rather than
+trusting a static tree that could drift from it.
+
+---
+
+## Phase 0 — Foundations (console/CLI, little code)
+
+1. Licensing: Power BI Pro sufficient; Power Apps Premium needed **now** (try
+   the free Developer Plan first).
+2. Confirm Instacart reuse — BigQuery project, gold tables, GCS bucket.
+3. Enable GCP APIs (`run`, `cloudbuild`, `artifactregistry`, `secretmanager`,
+   `bigquery`, `aiplatform`, `cloudscheduler`). Cloud Run services are created
+   *by* the first deploy, not provisioned ahead.
+4. Create the three BigQuery datasets — `agent_safe`, `vector_db`, `staging`
+   (setup guide Step 13). **Empty datasets only**; the tables inside them are
+   built as one Dataform pass at the start of Phase 3, where the chunking
+   script that feeds `vector_db` also lives. `agent-sa`'s `dataViewer` grant
+   below needs the dataset to exist, not its contents.
+5. Two Entra app registrations — full walkthrough in the setup guide Step 14:
+   - **Power BI service principal** — client secret, security group, two tenant
+     settings, **Contributor** on the workspace.
+   - **Connector app** — Application ID URI + scope + secret. Its redirect URI
+     can't be set until Phase 1 creates the connector; that's expected.
+6. Create `agent-sa` + IAM (needs #4 first — `dataViewer` targets `agent_safe`).
+7. **Secret Manager — all eight, one setup step** (setup guide Step 15),
+   even though several aren't needed until later phases: `power-bi-sp-client-id`,
+   `power-bi-sp-client-secret`, `azure-tenant-id`, `entra-client-secret`,
+   `gateway-api-key`, `anthropic-api-key` (first used in Phase 3's graph
+   skeleton), `github-read-token` (Phase 3's code tools), and
+   `langsmith-api-key` (Phase 3, once there's a loop worth tracing — optional). One creation pass
+   and one grant loop beats revisiting Secret Manager every phase.
+8. GCP Budget alert (setup guide Step 12), if the reused project doesn't
+   already have one.
+
+**Longest-lead item:** the Power BI tenant settings in #5 need Fabric/Power BI
+admin rights. If you don't hold them, that's an external request — flag it
+early rather than letting it block Phase 1.
+
+## Phase 1 — Live end-to-end pipe
+
+1. Echo gateway: `POST /ask` returns a canned answer — **with real auth
+   validation built now**, not stubbed. Proving the auth flow end-to-end is
+   this phase's job.
+2. `POST /conversation` + the **ownership check** on every endpoint taking a
+   `conversation_id` (`.claude/rules/gateway.md`). Build both now: the client
+   needs an ID before it can poll anything, and the check is awkward to
+   retrofit once four endpoints exist.
+3. `Dockerfile` + deploy to Cloud Run with `--service-account=agent-sa
+   --allow-unauthenticated`. The real first deployment, not a test.
+4. Custom connector from the deployed gateway's OpenAPI; Entra OAuth.
+5. Basic Power Apps canvas app wired to the connector — including
+   `App.OnStart` calling `POST /conversation` with `IfError` handling, and
+   the **New chat** button that re-runs it (`docs/frontend.md`).
+6. Confirm a real message round-trips.
+7. **`agent_telemetry` table + writer** (`.claude/rules/telemetry.md`) —
+   schema defined fully now, populated over time. Landing it here means every
+   turn has a row from the first one, and the write path is proven before any
+   tool complexity exists. `tool_calls` is simply empty until Phase 3 fills
+   it — that's what "defined now, populated later" means in practice.
+8. *In parallel:* prove `executeQueries` from a plain script; prove a trivial
+   FastMCP server + one tool called from a local LangGraph script.
+
+## Phase 2 — The MCP server
+
+1. **Stand up the real FastMCP server** — `streamable_http` transport,
+   localhost co-located (`.claude/rules/mcp-tools.md`). Phase 1's server was
+   a disposable proof; this is the one that carries forward. **Confirm the
+   exact `MultiServerMCPClient`/FastMCP parameter names here** — the first
+   real dependency on them, not something to assume from Phase 1's trivial
+   version.
+2. **Prove it end-to-end with a trivial tool** — something that returns a
+   fixed string, registered with `@mcp.tool()` and called through a
+   single-node LangGraph over MCP. **Deliberately not a real tool:**
+   `run_bigquery_sql` lands in Phase 3 with its full guardrail set, and
+   building a half-guardrailed version here means either throwing it away or
+   carrying it forward ungated.
+
+## Phase 3 — The tool-calling loop and its guardrails
+
+**Three ordering rules, and each saves real time.** **Build all three data
+sources first** — the static context bundle is assembled from what they
+produce, so nothing downstream works until they exist. **Stand the graph up before the tools**, so each
+tool can be tested against a live LLM the moment it exists rather than after
+all eight do. **Build guardrails with the first tool** — tool-scoped ones
+where they belong, and the global loop caps too, since `max_iterations` and
+the timeouts protect every test run from that point on.
+
+Tools land in priority order: `run_bigquery_sql`, `run_dax_query`,
+`generate_chart`. Those three answer the questions this project exists for;
+everything after is supporting cast. **The approval pause and cancellation
+come last** — both *interrupt* a working loop, and debugging an early-exit
+path on top of tools that don't reliably work yet means never knowing which
+layer failed.
+
+1. **Data prep — all three sources, before any tool.** Two of the three are
+   `.sqlx` in the same Dataform repository, so setting Dataform up twice is
+   wasted effort (`docs/data-pipeline.md`):
+   - **`agent_safe` enrichment tables** — dimension joins, `type: "table"`,
+     with `columns:` descriptions written properly. Those descriptions *are*
+     the agent's schema grounding, read live from `INFORMATION_SCHEMA`.
+   - **`vector_db.chunks_docs`** — run `scripts/build_vector_db.py` locally
+     first to populate `staging.doc_chunks`, then execute the `vector_db`
+     tag. **Always that order:** the model reads a staging table the script
+     creates, and a stale one builds a stale index with no error. **One
+     table**, docs only. **Exclude** the orientation content — it's served
+     statically, so indexing it wastes a retrieval slot. Also excluded:
+     page-info HTML (`get_page_info` reads it whole) and code (search is
+     agentic, `docs/code-search.md`).
+   - **`context/schema/model_schema.json`** — run
+     `scripts/build_model_context.py` and **commit the result**. Not a
+     BigQuery table and not embedded: it's parsed from the `.pbip` and read
+     into static context at startup. This is what makes the semantic model
+     deterministic to query rather than retrieved.
+
+   **This has to precede the static context bundle**, not just the tools:
+   four of its seven components (`TABLE_REGISTRY`, `MEASURE_REGISTRY`,
+   `RELATIONSHIPS`/`PARAMETERS`,
+   `bigquery_schema`) are built from what lands here.
+
+2. **Everything the connector sends about dashboard state, in one pass —
+   not just the obvious filters.** This is **authoritative for dashboard
+   state** (`docs/frontend.md`), so `run_dax_query` answers semantic-model
+   questions *against the user's current filters*. Building and testing the
+   DAX tool against an incomplete capture means re-verifying later anyway.
+   Three things, and the first two are easy to build partially without
+   noticing:
+   - **`report.getFilters()` + `page.getFilters()`** — report- and
+     page-level filters.
+   - **Slicer state — its own call, not covered by the above.**
+     `getFilters()` does not return slicer selections at any scope.
+     `page.getSlicers()` + `getSlicerState()` per slicer, or a sensitivity
+     slider silently vanishes: not a wrong value, an *absent* one, and the
+     agent answers against the wrong scenario with nothing to signal it.
+   - **`report.getActivePage().displayName`, as its own field — not part of
+     `filter_context`.** A page name isn't a filter; it feeds `get_page_info`,
+     not `run_dax_query`.
+
+   The **screenshot** half of the multimodal prompt stays in Phase 4 — it's
+   layout/attention only, never load-bearing for correctness.
+3. **Assemble the static context bundle** (`.claude/rules/gateway.md`) — the
+   always-present block sent every turn, never vector-searched. **Seven
+   components**, in a fixed order (a cache hit needs a byte-identical
+   prefix), of which the first is itself a bundle of three:
+   1. **Orientation bundle** — one file, one-time manual extraction, not a
+      script. Three pieces inside it: Executive Summary + Project
+      Navigator + the architecture diagram. **Draw a simple ASCII version of
+      the diagram** — the styled HTML in the README stays there, for humans.
+      Static context holds semantic content, never presentation: the model
+      needs the boxes and arrows, and `style='...'` attributes are pure token
+      cost.
+   2. **`TABLE_REGISTRY`** — every table with columns, types, and
+      descriptions, rendered from step 1's `model_schema.json`. Covers
+      disconnected tables that relationships can't.
+   3. **`MEASURE_REGISTRY`** — every measure's name and description, same
+      source. **Names and descriptions only, never the DAX bodies.**
+   4. **`RELATIONSHIPS` + `PARAMETERS`** — join paths and what-if/field
+      parameters, from the same artifact. Structural facts needed on nearly
+      every DAX composition; never retrieved.
+   5. **`bigquery_schema`** — read once at startup into a module constant,
+      not per-request (`.claude/rules/mcp-tools.md`).
+   6. **System instructions.**
+   7. **The few-shot examples** (`.claude/rules/gateway.md`).
+
+   Components 2 and 3 are what make the semantic model *deterministic* to
+   query — the model can't fail to find a measure, or invent one. The
+   `_render_*` split is in `.claude/rules/gateway.md`.
+
+   Then wire `build_static_context(model, static_text)` — the caching
+   dispatch (`.claude/rules/gateway.md`). It takes the **model name**, so a
+   model swap stays a one-line config change.
+4. **The graph skeleton, before any tool exists.** Five nodes — `agent`,
+   `call_tool`, `check_length`, `verify`, `finalize` — wired with an empty
+   tool list (`.claude/rules/orchestrator.md`). `route_entry` and
+   `execute_approved` are approval-specific and land with #11.
+   **Consume with `astream`, not `ainvoke`, from the start** — status
+   updates depend on it, and switching invocation style later means touching
+   every call site (`.claude/rules/gateway.md`). Status *strings* land in
+   Phase 4; the *plumbing* has to be right now. Standing this up first is
+   what lets every tool below be tested end-to-end the moment it's written.
+5. **`bigquery_schema` MCP resource + TTL cache**, then **`run_bigquery_sql`
+   with every guardrail — tool-scoped *and* global — in the same step.**
+   Debugging a tool-calling loop against ungated BigQuery is how you generate
+   an expensive surprise, and the loop-level caps protect every test run from
+   here on, not just this tool:
+   - **Tool-scoped:** the dry-run cost gate and three tiers,
+     `maximum_bytes_billed`, the 1,000-row cap, the 40s timeout with explicit
+     `client.cancel_job()`.
+   - **Global, and cheap to build now** (`.claude/rules/orchestrator.md`):
+     `max_iterations` with partial-answer handling — the one that stops a
+     runaway loop burning tokens — plus the ~90s gateway timeout, the
+     answer-length check, and tool-output trimming between turns. All simple;
+     none benefits from waiting.
+
+   The schema resource comes first because it's what grounds the SQL.
+6. **Verification** (`.claude/rules/orchestrator.md`) —
+   `citation_check`, `coverage_check`, `verify_claim_value`, and the
+   honest-decline path. Global rather than tool-scoped, but it exists
+   *because* of numeric claims, so it lands as soon as the first tool that
+   produces them does.
+7. **`run_dax_query` with its guardrails**, plus `get_measure_dax`
+   (`.claude/rules/mcp-tools.md`). Grounding is already structural — the
+   registries landed in step 3 — so there's no search-before-query pairing
+   to build. DAX's own guardrails land here: `TOPN` steering plus the
+   deterministic post-fetch row check, and best-effort cancellation.
+8. **`generate_chart`** — the third critical tool, and it must come after
+   both query tools since it renders their output.
+   **`bar`, `line`, and `concentration` only** (`docs/chart-tool.md`); the
+   remaining specs are cheap to add later and none is on the critical path.
+   The **batch-ordering guard** lands here — it only becomes testable once a
+   query tool and a chart tool both exist.
+9. **The remaining tools, in descending criticality.** `search_docs` first,
+   and with it **`vector-search-sa` + impersonation** — it's the only tool
+   that reads `vector_db`, and this is what keeps `run_bigquery_sql` scoped
+   to `agent_safe` (`docs/data-pipeline.md`). Then `get_page_info`, then
+   `list_repo_files` / `read_repo_file` with the `github-read-token` secret
+   and the hand-written `FILE_DESCRIPTIONS` map (`docs/code-search.md`). The
+   code tools are genuinely least critical — build them last.
+10. **Firestore conversation state** (`.claude/rules/gateway.md`) — the
+   `live_turns` document (status, cancel flag, pending approval) and the
+   `sessions` document (last 5 turns with their queries and filter context,
+   `user_id`, `last_activity_at`).
+   **Not an optimization — an in-memory dict breaks under Cloud Run's
+   ordinary multi-instance scaling.** Also wire short-term chat history into
+   the prompt here.
+11. **The approval workflow** (`docs/approval-workflow.md`) — the pause,
+   `PendingApproval` caching, `POST /ask/respond`, `route_entry` and
+   `execute_approved`, and the hard-decline tier. Depends on #5's cost tiers
+   and #10's Firestore state. The UI half (approve/reject buttons) lands in
+   Phase 4. **Verify it here anyway, via curl/script against
+   `/ask/respond`** — same pattern as Phase 1's `executeQueries` smoke test.
+   The resume logic shouldn't sit a whole phase untested just because its
+   buttons don't exist yet.
+12. **User cancellation** — `POST /ask/cancel/{conversation_id}` writing the
+   `cancel_requested` flag, and the node-level checks that route to
+   `finalize`. The per-tool cancellation mechanism already shipped with
+   `run_bigquery_sql` in #5; this is the turn-level path on top of it. The
+   Power Apps button lands in Phase 4.
+
+## Phase 4 — Multimodal grounding & response formatting
+
+1. Screenshot upload through the connector (filters, slicers, and active page
+   already landed in Phase 3). The image is layout/attention only — **never** a source of
+   numeric values.
+2. Response formatting: HTML, source badges, approval cards (incl. the
+   approve/reject buttons for Phase 3's workflow), chart display.
+3. **The cancel button** — a Power Apps button firing
+   `POST /ask/cancel/{conversation_id}` (`docs/frontend.md`). The endpoint and
+   cancellation path shipped in Phase 3; this is the UI half, alongside the
+   approve/reject buttons above.
+4. Progress indication, sample questions, follow-up chips.
+5. The remaining `generate_chart` spec types beyond Phase 3's three
+   (`docs/chart-tool.md`) — add as real questions call for them.
+
+## Phase 5 — Skipped
+
+XMLA is a documented backup only. REST is the plan.
+
+## Phase 6 — Evaluation & polish
+
+1. Judge Cloud Run Job + Cloud Scheduler (`docs/llm-judge.md`) — consumes
+   the `agent_telemetry` table already logging since Phase 1.
+2. Golden dataset regression suite (`docs/golden-dataset.md`) — a separate,
+   event-triggered mechanism, **not** a subset of #1. Mostly hand-curation;
+   Claude Code's part is `scripts/run_golden_tests.py`, the comparison
+   runner.
+3. CI/CD slice: create `github-deployer` (separate from `agent-sa`), add its key
+   as a GitHub repo secret plus `PROD_SERVICE_ACCOUNT`/`PROD_REGION` as repo
+   *variables*, then write `.github/workflows/ci.yml` with a `test` job and a
+   `deploy` job gated by `needs: test`. **The deploy job is two steps** — build
+   a `${{ github.sha }}`-tagged image, then deploy *that image* (`docs/ci-cd.md`), not the `--source .` command used manually through Phases
+   1–5.
+4. Share the Power Apps app — the one auth step that's neither code nor IAM.
+5. Demo video + business-first README.
+
+## Phase 7 — Optional (no strong ordering)
+
+- User-forced tool choice (dropdown, `forced_tools` field, ~30–45 min).
+- Preset layout modes (2–3 fixed width ratios, ~20 min). Skip drag-to-resize.
+- **Replace LangSmith with Cloud Trace — building the production path for
+  real.** The shipped design keeps LangSmith on in production as a stated
+  trade-off (component reference §3): tool inputs and outputs, real
+  `agent_safe` results, reach a third-party cloud through a path the IAM
+  design doesn't cover. Cloud Trace is the GCP-native answer — nothing leaves
+  the boundary. **Optional, and if it isn't built the trade-off simply
+  stands** as documented rather than becoming an unacknowledged gap. If it
+  is built, update §3 and drop `langsmith-api-key` from Secret Manager.
+- `run_projection` — a plain deterministic tool (no LLM or sandbox inside),
+  `is_projection` response field, distinct "unverified" card. Default stays
+  "decline forecasts outright."
+- **Narrate the sensitivity assumption** — have the answer state the
+  field-parameter value it used (*"$5M at a 10% adoption assumption"*)
+  rather than applying it silently. A bare number reads as more certain
+  than a scenario output is. Core behavior already returns the right
+  number (`docs/frontend.md`); this is presentation only.
+- **DLP image pre-check** — scan uploaded images for PII *before* they reach
+  the LLM. Redact everything flagged; on scan failure drop the **image**,
+  not the turn. Full design and its honest limits are in the component reference.
+- **User-requested assumption override** — let *"what if adoption were 15%
+  instead?"* build a query with a different parameter value than the one
+  on screen. Genuinely more than a display change: the agent would be
+  choosing a value rather than mirroring dashboard state, so it needs its
+  own design pass (how the value is validated, how the answer signals it
+  diverges from what's displayed).
