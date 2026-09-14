@@ -685,16 +685,19 @@ instead of failing on a missing API you then have to go enable and re-run.
      --member="serviceAccount:$CONN_SA" --role="roles/aiplatform.user"
    ```
 
-6. **Create the chart bucket — and configure it for public reads now**, because
-   the failure mode later is confusing. `generate_chart` writes PNGs here and
-   returns a public `https://` URL that Power Apps fetches directly (a decided
-   trade-off — see the `docs/chart-tool.md`). That fetch carries none of
-   your auth, so the objects must be anonymously readable:
+6. **Create the chart bucket.** `generate_chart` writes PNGs here and returns
+   a **signed** `https://` URL that Power Apps fetches directly (decided
+   2026-09-13 — see `docs/chart-tool.md`). The original plan was a public
+   bucket with `blob.make_public()`, which needs uniform bucket-level access
+   turned *off*; that's blocked here by an org policy enforcing it, with no
+   override available on a personal, org-less GCP account (no Organization or
+   Folder resource exists to grant `roles/orgpolicy.policyAdmin` against —
+   not a permissions bug, there's genuinely no node in the hierarchy that
+   holds the override). Signed URLs sidestep the whole problem: they don't
+   depend on object ACLs, so the bucket can just take Cloud Storage's normal
+   default (uniform bucket-level access **on**):
    ```bash
-   # Create WITHOUT uniform bucket-level access, so per-object ACLs work
-   gcloud storage buckets create gs://YOUR_CHART_BUCKET \
-     --location=YOUR_REGION \
-     --no-uniform-bucket-level-access
+   gcloud storage buckets create gs://YOUR_CHART_BUCKET --location=YOUR_REGION
    ```
    **`agent-sa` needs write access — it's the identity `generate_chart` runs
    as.** Without this the tool fails at first chart, not at deploy:
@@ -703,22 +706,21 @@ instead of failing on a missing API you then have to go enable and re-run.
      --member="serviceAccount:agent-sa@YOUR_PROJECT.iam.gserviceaccount.com" \
      --role="roles/storage.objectAdmin"
    ```
-   `objectAdmin` rather than `objectCreator` because `blob.make_public()`
-   modifies an object's ACL after writing it — creating isn't enough.
 
-   **If `blob.make_public()` fails later, this is almost always why.** Two
-   bucket settings break it, both common defaults:
-   - **Uniform bucket-level access** — disables the per-object ACLs
-     `make_public()` relies on.
-   - **Public access prevention** — blocks anonymous reads outright, often
-     inherited from an org policy rather than set on the bucket.
-
-   The resulting error reads like a code permissions bug, not a bucket
-   setting, which is what makes it eat an afternoon. Verify with
-   `gcloud storage buckets describe gs://YOUR_CHART_BUCKET` before writing any
-   chart code. (If an org policy enforces public access prevention and you
-   can't change it, that forces the signed-URL approach instead — a design
-   change worth raising rather than working around.)
+   **Also required — a grant most people miss because it's self-referential.**
+   Cloud Run's attached service-account credentials have no private key file,
+   so `blob.generate_signed_url()` signs via the IAM Credentials API's
+   `signBlob` instead, which means `agent-sa` needs
+   `roles/iam.serviceAccountTokenCreator` **on itself** — every other grant in
+   this doc names a *different* identity as the member, so it's easy to skip
+   this one by pattern-matching. Without it, signing fails at first chart, not
+   at deploy:
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding \
+     agent-sa@YOUR_PROJECT.iam.gserviceaccount.com \
+     --member="serviceAccount:agent-sa@YOUR_PROJECT.iam.gserviceaccount.com" \
+     --role="roles/iam.serviceAccountTokenCreator"
+   ```
 
    Also worth setting a lifecycle rule so charts don't accumulate forever —
    every chart request writes a new object nothing cleans up:
@@ -961,6 +963,10 @@ risk of forgetting to change something before deploying.
    echo -n "sk-ant-..." | gcloud secrets create anthropic-api-key --data-file=-
    # LangSmith tracing — runs in the deployed service too (Step 17)
    echo -n "lsv2_..."  | gcloud secrets create langsmith-api-key --data-file=-
+   # Alternate providers, for model swapability — build_static_context
+   # (.claude/rules/gateway.md) already branches on model name for all three.
+   echo -n "AIza..." | gcloud secrets create gemini-api-key --data-file=-
+   echo -n "sk-..."  | gcloud secrets create openai-api-key --data-file=-
    ```
    You'll also need a `gateway-api-key` — this one you invent rather than copy
    from Microsoft; it's the shared secret between the custom connector and your
@@ -975,7 +981,8 @@ risk of forgetting to change something before deploying.
    ```bash
    for S in gateway-api-key anthropic-api-key github-read-token \
             azure-tenant-id entra-client-secret langsmith-api-key \
-            power-bi-sp-client-id power-bi-sp-client-secret; do
+            power-bi-sp-client-id power-bi-sp-client-secret \
+            gemini-api-key openai-api-key; do
      gcloud secrets add-iam-policy-binding "$S" \
        --member="serviceAccount:agent-sa@YOUR_PROJECT.iam.gserviceaccount.com" \
        --role="roles/secretmanager.secretAccessor"
@@ -984,19 +991,20 @@ risk of forgetting to change something before deploying.
        --role="roles/secretmanager.secretAccessor"
    done
    ```
-   *(Run after item 1 has created all eight.)*
-3. **Confirm all eight exist and are readable** before moving on — a typo in a
+   *(Run after item 1 has created all ten.)*
+3. **Confirm all ten exist and are readable** before moving on — a typo in a
    secret name creates nothing and fails silently until Phase 1's first
    request:
    ```bash
    for S in gateway-api-key anthropic-api-key github-read-token \
             azure-tenant-id entra-client-secret langsmith-api-key \
-            power-bi-sp-client-id power-bi-sp-client-secret; do
+            power-bi-sp-client-id power-bi-sp-client-secret \
+            gemini-api-key openai-api-key; do
      gcloud secrets versions access latest --secret="$S" >/dev/null \
        && echo "OK   $S" || echo "FAIL $S"
    done
    ```
-   Eight `OK` lines and you're done. This proves *your* access; `agent-sa`'s
+   Ten `OK` lines and you're done. This proves *your* access; `agent-sa`'s
    comes from the same loop in item 2, so a failure there means re-running it.
 4. Read it from Python — a small helper you'll reuse everywhere you need a secret:
    ```python
@@ -1052,6 +1060,13 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT \
   --member="serviceAccount:github-deployer@YOUR_PROJECT.iam.gserviceaccount.com" \
   --role="roles/run.admin"
 
+# Needed for `gcloud builds submit` in the deploy job (docs/ci-cd.md) — easy
+# to miss since it's not part of the "obvious" deploy-permissions set, and
+# without it the build step fails in Phase 6, not here.
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:github-deployer@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/cloudbuild.builds.editor"
+
 # Lets the deployer attach agent-sa to the service it deploys.
 # Without this, deploys fail with a confusing permissions error.
 gcloud iam service-accounts add-iam-policy-binding \
@@ -1062,101 +1077,119 @@ gcloud iam service-accounts add-iam-policy-binding \
 
 *(`agent-sa` was created in Step 13, so the last command works as written.)*
 
-**2. Generate a key and store it as a GitHub secret.**
+**2. Set up Workload Identity Federation — not a JSON key.**
+
+**Decided (2026-09-13): WIF from the start, not the deferred upgrade.** The
+original plan here was a JSON key for `github-deployer`, with WIF documented
+as a later upgrade (`docs/ci-cd.md`). That plan didn't survive contact with
+this GCP account: `gcloud iam service-accounts keys create` failed with
+`FAILED_PRECONDITION: constraints/iam.disableServiceAccountKeyCreation` — an
+org policy that, like the storage bucket constraint in Step 13 item 6, has no
+override available on a personal, org-less account (no Organization/Folder
+resource exists to hold `roles/orgpolicy.policyAdmin` against). The Console
+UI hits the identical backend restriction, so this isn't a CLI-only problem
+either. Net effect: the "upgrade later" path never opens, so WIF happens now.
 
 ```bash
-gcloud iam service-accounts keys create github-deployer-key.json \
-  --iam-account=github-deployer@YOUR_PROJECT.iam.gserviceaccount.com
+# One pool holds all your external (non-Google) trusted identities.
+gcloud iam workload-identity-pools create "github-pool" \
+  --location="global" --display-name="GitHub Actions Pool"
+
+# The provider trusts GitHub's OIDC token issuer. attribute-condition is
+# the important part — without it, ANY GitHub repo could impersonate
+# github-deployer, not just yours.
+gcloud iam workload-identity-pools providers create-oidc "github-provider" \
+  --location="global" --workload-identity-pool="github-pool" \
+  --display-name="GitHub Provider" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="assertion.repository=='YOUR_GITHUB_OWNER/YOUR_REPO'" \
+  --issuer-uri="https://token.actions.githubusercontent.com"
+
+# Lets THAT repo (and only that repo) impersonate github-deployer — a trust
+# relationship, not a credential. Needs the numeric project number, not the
+# project ID: `gcloud projects describe YOUR_PROJECT --format="value(projectNumber)"`
+gcloud iam service-accounts add-iam-policy-binding \
+  github-deployer@YOUR_PROJECT.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/projects/YOUR_PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/YOUR_GITHUB_OWNER/YOUR_REPO"
+
+# The value the workflow's auth step needs — save what this prints.
+gcloud iam workload-identity-pools providers describe "github-provider" \
+  --location="global" --workload-identity-pool="github-pool" \
+  --format="value(name)"
 ```
 
 Then: your repo on github.com → **Settings** → **Secrets and variables** →
-**Actions** → **New repository secret**. Name it `GCP_DEPLOYER_KEY`, paste the
-**entire contents** of the JSON file as the value.
+**Actions** → **Variables** tab (not Secrets — none of this is sensitive; a
+provider path and an SA email grant nothing without a token actually issued
+by your repo's own Actions runner). Add three:
+- `WIF_PROVIDER` — the full resource name the last command printed
+  (`projects/.../workloadIdentityPools/github-pool/providers/github-provider`)
+- `PROD_SERVICE_ACCOUNT` — `agent-sa@YOUR_PROJECT.iam.gserviceaccount.com`
+- `PROD_REGION` — your region
 
-**Same page, but the "Variables" tab, not "Secrets"** — these two aren't
-sensitive, just environment-specific, so they don't belong in Secret Manager
-or as GitHub secrets. Add `PROD_SERVICE_ACCOUNT`
-(`agent-sa@YOUR_PROJECT.iam.gserviceaccount.com`) and `PROD_REGION` (your
-region). Referenced as `vars.PROD_SERVICE_ACCOUNT`/`vars.PROD_REGION` in the
-deploy step (`docs/ci-cd.md`) — named this way specifically so a
-future `deploy-staging` job needs only its own `STAGING_*` variables, never a
-change to the workflow file itself.
+Referenced as `vars.WIF_PROVIDER`/`vars.PROD_SERVICE_ACCOUNT`/`vars.PROD_REGION`
+in the deploy job's `auth@v2` step (`docs/ci-cd.md`) — same naming pattern as
+before, so a future `deploy-staging` job needs only its own `STAGING_*`
+variables, never a workflow file change.
 
-```bash
-# Delete the local key file immediately after pasting — it's a live credential
-# and your .gitignore won't save you if you accidentally commit it from
-# somewhere else.
-rm github-deployer-key.json
-```
+**No `GCP_DEPLOYER_KEY` secret, no key file to create or delete.** That's the
+actual payoff of WIF: there's no long-lived credential sitting in GitHub's
+secret store at all, and nothing to rotate or revoke if it leaks.
 
-> **A JSON key is the deliberate starting point, not the end state** —
-> Workload Identity Federation is the upgrade, and why it's deferred is in
-> `docs/ci-cd.md`. Don't let it become the finished design by default.
+**3. Nothing to add to `.gitignore`** for this step — `*-key.json` and
+`github-deployer-key.json` are already covered from Step 7, which still
+matters for other service-account keys elsewhere in this project, even
+though `github-deployer` itself no longer produces one.
 
-**3. Nothing to add to `.gitignore`** — Step 7 already covers
-`*-key.json` and `github-deployer-key.json`, deliberately, so a regenerated
-key is ignored even if you forget to delete it. Confirm they're still there
-rather than adding them twice.
-
-**4. Nothing to write yet.** `.github/workflows/ci.yml` gets written in Phase
-6, when there are tests to run and a service to deploy to. The point of doing
-steps 1–3 now is that Phase 6 becomes a single focused task instead of a
-tangle of IAM debugging.
+**4. Nothing to write yet.** `.github/workflows/ci.yml` still gets written in
+Phase 6, when there are tests to run and a service to deploy to — the deploy
+job's `auth@v2` step there uses `workload_identity_provider: ${{ vars.WIF_PROVIDER }}`
+and `service_account: ${{ vars.PROD_SERVICE_ACCOUNT }}` instead of
+`credentials_json`, plus `permissions: id-token: write` on the job. The point
+of doing steps 1–2 now is the same as before: Phase 6 becomes "write the
+YAML," not "write the YAML and also untangle IAM."
 
 ## Step 17 — LangSmith tracing
 
-**What this is for:** a rich, per-turn execution trace of the LangGraph agent
-loop — every LLM call, tool call, input/output, latency, rendered in a UI.
-Genuinely useful once Phase 3's tool-calling loop exists, for watching
-whether it gets stuck, loops, or calls the wrong tool — not something you
-need working yet, but worth setting up now while you're already doing
-account/credential setup for everything else.
+**What this is for:** a per-turn execution trace of the LangGraph agent loop
+(LLM calls, tool calls, latency), useful once Phase 3's loop exists for
+spotting stuck/looping/wrong-tool behavior. Optional — skip if you'd rather
+set it up in Phase 3, when it starts being useful.
 
-**This is not a replacement for `agent_telemetry`** (the BigQuery table from
-Phase 1) — that one is structured, queryable, and feeds the judge pipeline;
-this one is a rich debugging view, mostly useful while building. A generic
-tracing tool has no way to know what "citation compliance" means for this
-schema. Add one alongside the other, not instead of it.
+**Done now:**
+1. Sign up at smith.langchain.com, create an API key.
+2. Secret created + granted to `agent-sa` and your account — Step 15.
 
-**The specific payoff, beyond generic observability:** each iteration of the
-tool-calling loop appears as its own step in the trace tree, in order — so
-you can *watch* whether the loop got stuck, looped, or called the wrong tool.
-That's directly useful for two things already flagged as needing real data:
-calibrating `max_iterations`, and checking whether DAX questions
-disproportionately exhaust the budget compared to BigQuery ones. Both are
-observable during development, well before there's enough production volume
-for the judge's aggregate stats to mean anything.
+**Deferred to Phase 1/3 code — nothing to run now:**
+- `LANGSMITH_API_KEY` — fetch via `get_secret("langsmith-api-key",
+  GCP_PROJECT_ID)`, same as every other secret.
+- `LANGSMITH_TRACING` / `LANGCHAIN_CALLBACKS_BACKGROUND` — literals in
+  `app/config.py` (already added), since both are identical in every
+  environment. `CALLBACKS_BACKGROUND` must be `"false"`: Cloud Run freezes
+  CPU right after the response is sent, dropping a background trace upload
+  otherwise.
+- At startup, **before any LangChain/LangGraph import**, push all three into
+  `os.environ` — the SDK reads its config from there directly, not from
+  arguments:
+  ```python
+  import os
+  from app.config import GCP_PROJECT_ID, LANGSMITH_TRACING, LANGCHAIN_CALLBACKS_BACKGROUND
+  from app.secrets import get_secret   # or wherever Phase 1 puts it
 
-1. **Sign up** at smith.langchain.com if you don't have an account, and
-   create an API key from the settings page.
-2. **Set two environment variables on your local machine** — the same
-   shell-export pattern already used for non-secret config values
-   (`config.py` reads via `os.environ`), not something to add to
-   `pyproject.toml` or Secret Manager:
-   ```bash
-   export LANGSMITH_TRACING=true
-   export LANGSMITH_API_KEY="lsv2_..."   # the key from item 1
-   ```
-3. **Also set them in the Cloud Run deploy command, plus one more flag:**
-   ```bash
-   --set-env-vars=LANGSMITH_TRACING=true,LANGCHAIN_CALLBACKS_BACKGROUND=false
-   ```
-   **`LANGCHAIN_CALLBACKS_BACKGROUND=false` is not optional.** Trace uploads
-   go through a background callback by default, and Cloud Run freezes CPU the
-   instant the response is sent — the upload is lost, the same way an
-   unawaited telemetry write would be.
+  os.environ["LANGSMITH_TRACING"] = LANGSMITH_TRACING
+  os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = LANGCHAIN_CALLBACKS_BACKGROUND
+  os.environ["LANGSMITH_API_KEY"] = get_secret("langsmith-api-key", GCP_PROJECT_ID)
+  ```
+  (Rejected alternative: an explicit `langsmith.Client`/`LangChainTracer`
+  passed as a callback per call — avoids `os.environ`, but must be wired
+  into every call site individually and silently misses any that forget it.)
+- No deploy flags needed for any of the three — same `config.py` code runs
+  locally and deployed.
 
-   **Know what this sends:** tool inputs and outputs — real `agent_safe`
-   query results — go to LangChain's third-party cloud, through a path the
-   IAM design doesn't cover. That's an accepted trade-off for a portfolio
-   build, where showing the trace is the point (component reference §3), not
-   what a production deployment would do.
-4. **`LANGSMITH_API_KEY` goes in Secret Manager** like every other deployed
-   credential, now that it runs in the deployed service — not a plain env
-   var in the deploy command.
-
-**Skip this step for now if you'd rather come back to it in Phase 3** — it
-adds no value until the agent loop actually exists to trace.
+**Note for later:** once live, tool inputs/outputs (real `agent_safe`
+results) go to LangChain's cloud — accepted trade-off for this build
+(component reference §3).
 
 ## Step 18 — Verify everything works end to end
 
@@ -1170,22 +1203,53 @@ Create a throwaway file `verify_setup.py`:
 # Core service clients — proves GCP auth works. All four are provisioned in
 # Step 13; a missing grant or wrong project surfaces here, not in Phase 3.
 from google.cloud import bigquery, secretmanager, storage, firestore
+from app.config import GCP_PROJECT_ID, GCS_CHART_BUCKET   # set in Step 13
 
-client = bigquery.Client()
-print("BigQuery client created for project:", client.project)
+bq_client = bigquery.Client(project=GCP_PROJECT_ID)
+print("BigQuery client created for project:", bq_client.project)
 secretmanager.SecretManagerServiceClient()
-storage.Client()
-firestore.Client()
+storage_client = storage.Client(project=GCP_PROJECT_ID)
+firestore.Client(project=GCP_PROJECT_ID)
 print("Secret Manager + Storage + Firestore clients created OK")
 
-# Agent framework
-import langgraph, fastmcp, langchain_anthropic
-print("LangGraph version:", langgraph.__version__)
+# Auth working isn't the same as the resources existing — Step 13 created
+# three datasets and a bucket by exact name; a typo surfaces here, not as a
+# confusing "not found" mid-Phase-1.
+for dataset in ("agent_safe", "vector_db", "staging"):
+    bq_client.get_dataset(f"{GCP_PROJECT_ID}.{dataset}")
+print("BigQuery datasets agent_safe/vector_db/staging all exist")
+
+storage_client.get_bucket(GCS_CHART_BUCKET)
+print(f"Chart bucket gs://{GCS_CHART_BUCKET} exists")
+
+# Web framework
+import fastapi, uvicorn
+print("fastapi + uvicorn OK")
+
+# Agent framework — all three model providers `build_static_context`
+# branches on (.claude/rules/gateway.md), not just the one you're starting
+# with, plus the MCP adapter layer and langchain-core itself.
+import importlib.metadata
+import langgraph, fastmcp
+import langchain_core, langchain_anthropic, langchain_openai, langchain_google_genai
+import langchain_mcp_adapters
+print("LangGraph version:", importlib.metadata.version("langgraph"))  # no __version__ attr
+print("LangChain (core + anthropic + openai + google-genai) + MCP adapters OK")
 
 # unstructured pulls native deps and is the most likely install to have
-# silently half-failed — importing the md partitioner proves the extra landed.
+# silently half-failed — importing both partitioners proves it landed.
+# partition_html has no separate extra of its own — it's covered by
+# unstructured[md] already (confirmed 2026-09-13) — but docs/data-pipeline.md
+# depends on it just as much for the docs vector index (*.html alongside *.md),
+# so it gets its own check rather than being assumed to come along for free.
 from unstructured.partition.md import partition_md
-print("unstructured[md] OK")
+from unstructured.partition.html import partition_html
+print("unstructured[md] + partition_html OK")
+
+# Everything else in pyproject.toml with no gotcha worth a dedicated check —
+# a plain import is enough to catch a broken/missing install.
+import numpy, pandas, pydantic, pysbd, requests, mistune
+print("numpy + pandas + pydantic + pysbd + requests + mistune OK")
 
 # Microsoft-side auth libraries
 import msal
@@ -1223,6 +1287,77 @@ If it prints your project ID and versions with no errors, Python, the venv,
 your packages, and your GCP authentication (BigQuery, Secret Manager, Storage,
 and Firestore) are all correctly wired together. Delete `verify_setup.py` once confirmed — it was
 just a smoke test.
+
+### Also check: IAM bindings from Steps 13/15/16
+
+Auth working proves *a* grant exists, not that the *specific* one each
+identity needs does — a wrong role or wrong member name on any binding from
+Steps 13/15/16 stays invisible until the exact code path that needs it runs,
+often mid-Phase-3. This checks the bindings directly instead of waiting for
+that. (Secret Manager's ten grants already have their own check — Step 15
+item 3 — not repeated here.)
+
+```bash
+PROJECT_ID="YOUR_PROJECT"
+AGENT_SA="agent-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+VECTOR_SA="vector-search-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+DEPLOYER_SA="github-deployer@${PROJECT_ID}.iam.gserviceaccount.com"
+YOUR_EMAIL="your-email@example.com"
+CHART_BUCKET="YOUR_CHART_BUCKET"
+
+check() {  # kind resource role member label
+  local kind="$1" resource="$2" role="$3" member="$4" label="$5" hit=""
+  case "$kind" in
+    project) hit=$(gcloud projects get-iam-policy "$resource" --flatten="bindings[].members" \
+              --filter="bindings.role=$role AND bindings.members:$member" --format="value(bindings.members)") ;;
+    sa)      hit=$(gcloud iam service-accounts get-iam-policy "$resource" --flatten="bindings[].members" \
+              --filter="bindings.role=$role AND bindings.members:$member" --format="value(bindings.members)") ;;
+    bucket)  hit=$(gcloud storage buckets get-iam-policy "gs://$resource" --flatten="bindings[].members" \
+              --filter="bindings.role=$role AND bindings.members:$member" --format="value(bindings.members)") ;;
+    dataset) hit=$(bq get-iam-policy --format=json "$resource" | python -c \
+              "import json,sys;p=json.load(sys.stdin);print('x' if any(b['role']=='$role' and '$member' in b.get('members',[]) for b in p.get('bindings',[])) else '')") ;;
+  esac
+  [ -n "$hit" ] && echo "OK   $label" || echo "FAIL $label"
+}
+
+# Project-level
+check project "$PROJECT_ID" roles/bigquery.jobUser "serviceAccount:$AGENT_SA" "agent-sa: bigquery.jobUser"
+check project "$PROJECT_ID" roles/bigquery.jobUser "serviceAccount:$VECTOR_SA" "vector-search-sa: bigquery.jobUser"
+check project "$PROJECT_ID" roles/datastore.user "serviceAccount:$AGENT_SA" "agent-sa: datastore.user"
+check project "$PROJECT_ID" roles/run.admin "serviceAccount:$DEPLOYER_SA" "github-deployer: run.admin"
+check project "$PROJECT_ID" roles/cloudbuild.builds.editor "serviceAccount:$DEPLOYER_SA" "github-deployer: cloudbuild.builds.editor"
+
+# vertex_conn's auto-generated SA — looked up the same way Step 13 created the grant
+CONN_SA=$(bq show --format=prettyjson --connection "$PROJECT_ID.YOUR_REGION.vertex_conn" \
+  | python -c "import json,sys; print(json.load(sys.stdin)['cloudResource']['serviceAccountId'])")
+check project "$PROJECT_ID" roles/aiplatform.user "serviceAccount:$CONN_SA" "vertex_conn SA: aiplatform.user"
+
+# Service-account-level (the grant lives ON the SA passed as $resource)
+check sa "$VECTOR_SA" roles/iam.serviceAccountTokenCreator "serviceAccount:$AGENT_SA" "agent-sa can impersonate vector-search-sa"
+check sa "$AGENT_SA" roles/iam.serviceAccountUser "user:$YOUR_EMAIL" "you can deploy as agent-sa"
+check sa "$AGENT_SA" roles/iam.serviceAccountTokenCreator "serviceAccount:$AGENT_SA" "agent-sa can sign as itself (chart URLs)"
+check sa "$AGENT_SA" roles/iam.serviceAccountUser "serviceAccount:$DEPLOYER_SA" "github-deployer can attach agent-sa"
+
+# Only if Step 16's WIF setup is done — needs the project number + your repo
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+WIF_MEMBER="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/attribute.repository/YOUR_GITHUB_OWNER/YOUR_REPO"
+check sa "$DEPLOYER_SA" roles/iam.workloadIdentityUser "$WIF_MEMBER" "GitHub repo can impersonate github-deployer"
+
+# Dataset-level
+check dataset "$PROJECT_ID:agent_safe" roles/bigquery.dataViewer "serviceAccount:$AGENT_SA" "agent-sa: dataViewer on agent_safe"
+check dataset "$PROJECT_ID:vector_db" roles/bigquery.dataViewer "serviceAccount:$VECTOR_SA" "vector-search-sa: dataViewer on vector_db"
+check dataset "$PROJECT_ID:staging" roles/bigquery.dataViewer "serviceAccount:$VECTOR_SA" "vector-search-sa: dataViewer on staging"
+
+# Bucket-level
+check bucket "$CHART_BUCKET" roles/storage.objectAdmin "serviceAccount:$AGENT_SA" "agent-sa: objectAdmin on chart bucket"
+```
+
+Fifteen `OK` lines and every grant from Steps 13/15/16 is confirmed in place.
+**What this can't check:** whether a permission actually *works* end to end
+(e.g., `agent-sa` really can query `agent_safe`) — only that the binding
+exists. Exercising it would mean impersonating `agent-sa`, which nothing here
+grants your own account, and isn't worth adding just for this check. That
+gap closes naturally in Phase 1 when the code itself runs as `agent-sa`.
 
 ---
 

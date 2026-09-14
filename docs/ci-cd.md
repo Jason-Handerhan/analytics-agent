@@ -73,11 +73,17 @@ jobs:
     needs: test                    # <- the quality gate; won't start if test failed
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write              # required for WIF — this is what lets
+                                    # GitHub mint the OIDC token auth@v2 trades
+                                    # for a short-lived GCP credential
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_DEPLOYER_KEY }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PROD_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v2
       - name: Build and push image
         run: |
@@ -117,7 +123,9 @@ dependency. If `test` fails, `deploy` never starts.
 ## Two service accounts, not one — the part that's easy to get wrong
 
 `agent-sa` runs the **application**; `github-deployer` runs the **pipeline**.
-Deliberately non-overlapping: the deployer gets `run.admin` and
+Deliberately non-overlapping: the deployer gets `run.admin`,
+`cloudbuild.builds.editor` (needed to run `gcloud builds submit` below —
+easy to miss since it's not in the "obvious" deploy-permissions set), and
 `iam.serviceAccountUser` on `agent-sa`, and **no** BigQuery or Secret Manager
 access at all.
 
@@ -133,17 +141,29 @@ service account to a Cloud Run service is itself a permissioned action.
 Commands and the GitHub secret setup: `local-dev-environment-setup.md`
 Step 16.
 
-## Credential strategy — start simple, upgrade deliberately
+## Credential strategy — Workload Identity Federation from the start
 
-**Phase 6 starts key-based:** a JSON key for `github-deployer` in the
-`GCP_DEPLOYER_KEY` repo secret. The honest downside is a long-lived
-credential in GitHub's secret store, valid until manually revoked.
+**Decided (2026-09-13): WIF, not a key.** The original plan was to start
+key-based — a JSON key for `github-deployer` in a `GCP_DEPLOYER_KEY` repo
+secret — and treat Workload Identity Federation as a later upgrade once the
+long-lived-credential downside started to bother us. That plan assumed key
+creation was available at all. On this GCP account it isn't:
+`gcloud iam service-accounts keys create` fails outright with
+`constraints/iam.disableServiceAccountKeyCreation`, an org policy with no
+override on a personal, org-less project (same shape of wall as the chart
+bucket's uniform-bucket-level-access constraint — no Organization/Folder
+resource exists to hold the override). The Console UI hits the identical
+restriction, so there was never a "just create it by hand" fallback either.
 
-**The upgrade is Workload Identity Federation** — no stored key at all.
-GitHub presents a short-lived signed token proving *"this is a run of your
-repo's workflow"* and GCP exchanges it for a temporary credential. More setup
-(a trust relationship between GCP and GitHub), which is why starting
-key-based and migrating is reasonable rather than lazy.
+**So WIF happens in Step 16, not as a future migration.** GitHub presents a
+short-lived signed token proving *"this is a run of your repo's workflow"*,
+scoped by an attribute condition to this repo specifically, and GCP exchanges
+it for a temporary credential via a Workload Identity Pool + OIDC provider.
+No stored secret, nothing to rotate or revoke if leaked — arguably a better
+end state than the original plan, just arrived at earlier than intended and
+for a different reason (a platform constraint, not a deliberate choice to do
+the harder thing first). Full commands: `local-dev-environment-setup.md`
+Step 16.
 
 ## Daily workflow once this exists
 

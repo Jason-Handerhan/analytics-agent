@@ -558,7 +558,20 @@ def generate_chart(args: GenerateChartArgs,
 
 ## Delivery — a URL, never image bytes
 
+**Decided (2026-09-13): signed URLs, not a public bucket.** The original plan
+was `blob.make_public()` on an anonymously-readable bucket — acceptable for
+public Kaggle data, since nothing here is sensitive. It turned out not to be
+available: this project's GCP project enforces **uniform bucket-level
+access** via org policy, and — because it's a personal, org-less account —
+there's no Organization or Folder resource where `roles/orgpolicy.policyAdmin`
+can be granted to override it. Not a permissions gap to fix; there is no
+resource in the hierarchy that holds the override. Signed URLs work fine
+under enforced uniform bucket-level access because they don't depend on
+per-object ACLs at all.
+
 ```python
+import datetime
+
 def render_and_upload(fig: plt.Figure) -> str:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=DPI, bbox_inches="tight")
@@ -566,25 +579,35 @@ def render_and_upload(fig: plt.Figure) -> str:
     buf.seek(0)
     blob = storage_client.bucket(GCS_CHART_BUCKET).blob(f"charts/{uuid.uuid4()}.png")
     blob.upload_from_file(buf, content_type="image/png")
-    blob.make_public()             # decided trade-off — see below
-    return blob.public_url         # https://... — NOT the gs:// form
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=datetime.timedelta(hours=1),   # proposed — revisit if a
+                                                    # chart needs to stay live
+                                                    # longer than one sitting
+        method="GET",
+    )
 ```
 
 The `https://` URL goes into `chart_url` as a plain JSON string; a Power Apps
 **Image control** binds to it and fetches the image itself, like a browser
-loading `<img src>`. **Return `blob.public_url`, never a `gs://` URI** — only
-Google's SDKs understand `gs://`; Power Apps would show a broken image.
+loading `<img src>`. Same as before — return the `https://` signed URL, never
+a `gs://` URI.
 
-**Why public:** that fetch is made by Power Apps / the user's browser, carrying
-none of our auth. The object must be anonymously readable or no image appears.
-`uuid4()` makes it unguessable, but **unguessable is not access-controlled** —
-anyone with the URL has permanent access. Acceptable for public Kaggle data;
-the production answer is `blob.generate_signed_url(...)` with an expiry.
-**Don't "fix" this to signed URLs without asking** — it's a documented decision.
+**Cloud Run gotcha: V4 signing needs an extra grant.** `agent-sa` runs on
+attached service-account credentials with no private key file, and
+`generate_signed_url()` needs one to sign locally — without it, it falls back
+to the IAM Credentials API's `signBlob`, which requires `agent-sa` to hold
+`roles/iam.serviceAccountTokenCreator` **on itself** (a self-referential
+binding, easy to miss since every other grant in this project names a
+*different* identity as the member). Without this, signing fails at first
+chart, not at deploy. Setup command lives in
+`local-dev-environment-setup.md` Step 13 item 6.
 
-**If `make_public()` fails, check the bucket first:** it errors when **uniform
-bucket-level access** or **public access prevention** is enabled. Both are
-common defaults, and the error reads like a code permissions bug.
+**Trade-off now baked in:** a chart link expires. That's fine for a chat
+answer read in the same sitting; it means a saved/shared chart link goes dead
+after the expiry window, which the anonymous-bucket approach wouldn't have
+had. Acceptable here since nothing currently persists chart URLs beyond the
+conversation.
 
 **`plt.close(fig)` after saving** — figures aren't garbage-collected on return
 and leak memory across requests on a long-running instance. Won't show up in a

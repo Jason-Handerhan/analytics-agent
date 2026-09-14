@@ -205,8 +205,18 @@ gcloud run deploy analytics-gateway \
   --service-account=agent-sa@YOUR_PROJECT.iam.gserviceaccount.com \
   --allow-unauthenticated \
   --region=YOUR_REGION \
-  --set-env-vars=GCP_PROJECT_ID=...,GCP_REGION=...,TENANT_ID=...,EXPECTED_AUDIENCE=...,GCS_CHART_BUCKET=...,POWER_BI_DATASET_ID=...,MODEL=claude-sonnet-5-...,LANGSMITH_TRACING=true,LANGCHAIN_CALLBACKS_BACKGROUND=false
+  --set-env-vars=GCP_PROJECT_ID=...,GCP_REGION=...,TENANT_ID=...,EXPECTED_AUDIENCE=...,GCS_CHART_BUCKET=...,POWER_BI_DATASET_ID=...,MODEL=claude-sonnet-5-...
 ```
+
+**No `--set-secrets` flag, and `LANGSMITH_TRACING`/`LANGCHAIN_CALLBACKS_BACKGROUND`
+aren't deploy flags either.** `LANGSMITH_API_KEY` is fetched via `get_secret()`
+at startup exactly like every other secret — no Cloud-Run-native secret
+mounting needed for it specifically. The two LangSmith flags are literals in
+`app/config.py` instead, since they're identical in every environment rather
+than genuinely deploy-time config. One remaining wrinkle: the LangSmith SDK
+itself only reads these three off `os.environ`, so app startup pushes all
+three there once, before any LangChain/LangGraph import
+(`local-dev-environment-setup.md` Step 17).
 
 **Config values I provide — never invent these:** `GCP_PROJECT_ID`,
 `GCP_REGION`, `TENANT_ID`, `EXPECTED_AUDIENCE`, `GCS_CHART_BUCKET`,
