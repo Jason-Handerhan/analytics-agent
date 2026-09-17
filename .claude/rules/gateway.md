@@ -55,7 +55,7 @@ def validate_entra_token(authorization: str) -> dict:
         return jwt.decode(
             token, signing_key.key, algorithms=["RS256"],
             audience=EXPECTED_AUDIENCE,
-            issuer=f"https://login.microsoftonline.com/{TENANT_ID}/v2.0",
+            issuer=f"https://sts.windows.net/{TENANT_ID}/",
         )
     except jwt.PyJWTError as e:
         raise HTTPException(401, f"Invalid token: {e}")
@@ -72,6 +72,12 @@ def validate_api_key(x_api_key: str) -> None:
 # monkeypatch get_db()/get_gateway_api_key() directly, which works
 # identically either way.
 ```
+
+**Issuer is the v1 endpoint format (`sts.windows.net`), not v2** — Power
+Platform's "Azure Active Directory" connector auth provider issues v1
+tokens regardless of anything configured on our side, confirmed empirically
+(2026-09-16) against a real token. JWKS signing keys are shared across
+v1/v2, so the discovery URL is unaffected.
 
 The API key proves *knows a shared secret*; the JWT proves *is this person,
 right now* (~1h expiry, revocable per account). `claims["oid"]` feeds

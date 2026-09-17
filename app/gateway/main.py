@@ -42,13 +42,9 @@ def validate_entra_token(authorization: str) -> dict:
         return jwt.decode(
             token, signing_key.key, algorithms=["RS256"],
             audience=EXPECTED_AUDIENCE,
-            issuer=f"https://login.microsoftonline.com/{TENANT_ID}/v2.0",
+            issuer=f"https://sts.windows.net/{TENANT_ID}/",
         )
     except jwt.PyJWTError as e:
-        # PyJWT's errors (e.g. InvalidIssuerError) carry no dynamic detail —
-        # surface the actual claims to make this actionable. Safe to echo:
-        # the caller already holds this token and can decode its own
-        # unencrypted payload without us.
         unverified = jwt.decode(token, options={"verify_signature": False})
         raise HTTPException(
             401,

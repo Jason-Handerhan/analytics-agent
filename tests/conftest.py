@@ -7,7 +7,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from app.config import EXPECTED_AUDIENCE, TENANT_ID
 
-_REAL_ISSUER = f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
+# v1 endpoint issuer — matches what validate_entra_token actually checks
+# (app/gateway/main.py), since Power Platform's OAuth provider issues v1
+# tokens regardless of our own config.
+_REAL_ISSUER = f"https://sts.windows.net/{TENANT_ID}/"
 
 
 @pytest.fixture(scope="session")
