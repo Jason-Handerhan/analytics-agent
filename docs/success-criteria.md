@@ -195,7 +195,7 @@ A phase isn't done because the code runs — it's done when the guarantee holds.
 - [ ] **Exercise `POST /ask/respond` directly with curl or a script** — the
       approve/reject buttons don't exist until Phase 4, but the resume
       logic is built now and shouldn't go a whole phase untested. Same
-      pattern as Phase 1's `executeQueries` smoke test. Using a
+      pattern as Phase 0's `executeQueries` smoke test. Using a
       `conversation_id` from a real paused turn, confirm:
       - **approve** executes *every* pending query (not just the displayed
         one) and the answer covers **both** halves of a compound question

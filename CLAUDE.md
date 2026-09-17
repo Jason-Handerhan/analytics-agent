@@ -39,6 +39,9 @@ progress automatically.
 - **Explain non-obvious choices briefly as you go** — a LangGraph pattern, an
   async construct, a Pydantic behavior. The explanation is part of the
   deliverable.
+- **Doc and rule edits: concise, not exhaustive.** State the decision, and
+  only if it's genuinely non-obvious, one line of why. Skip restating
+  context already established elsewhere, hedging, or narrating the fix.
 - **I write and modify code too.** Re-read files before editing.
 - **Correct me directly when I'm wrong**, not quietly around it.
 - **Offer to let me try first** on self-contained pieces.
@@ -155,13 +158,15 @@ than the task needs.
 
 ## Known-unverified — flag if you depend on these
 
-- Power BI **Contributor** role clears `executeQueries`' "Read + Build".
-- Power Apps **Developer Plan** permits custom connectors.
 - Power Platform's sync-call ceiling (~120s for Power Automate; unconfirmed for
   a direct canvas-app connector call).
 - Whether aborting an `executeQueries` REST connection stops the server-side
   query (no confirmed REST equivalent to `cancel_job`).
 - Which HTML tags the Power Apps HTML text control renders reliably.
+  **Confirmed it does NOT render `<iframe>`** (tested directly, even with a
+  plain non-Power-BI URL — `docs/frontend.md`); still open for the actual
+  answer-rendering tags this control needs to handle (headers, lists, code
+  blocks, tables).
 - Whether `CUSTOMDATA()`/`customData` ever ships on `executeQueries` — absent
   today (Premium/Fabric-only API). Not needed: the model writes the DAX.
 - Prompt-caching minimums are **model-specific and move** — Sonnet is 1,024
@@ -218,10 +223,15 @@ itself only reads these three off `os.environ`, so app startup pushes all
 three there once, before any LangChain/LangGraph import
 (`local-dev-environment-setup.md` Step 17).
 
+**Deployed gateway URL:** `https://analytics-gateway-551802026956.us-central1.run.app`
+— not app config, `config.py` has no reason to know its own address; this is
+purely for the Power Apps connector's Host setting and manual curl tests.
+Stable across redeploys (Cloud Run URLs are per-service, not per-revision).
+
 **Config values I provide — never invent these:** `GCP_PROJECT_ID`,
 `GCP_REGION`, `TENANT_ID`, `EXPECTED_AUDIENCE`, `GCS_CHART_BUCKET`,
 `POWER_BI_DATASET_ID`. All non-secret, all read from env vars in
 `app/config.py`. Secrets live in Secret Manager: `power-bi-sp-client-id`,
 `power-bi-sp-client-secret`, `azure-tenant-id`, `entra-client-secret`,
 `gateway-api-key`, `github-read-token`, `anthropic-api-key`,
-`langsmith-api-key`.
+`langsmith-api-key`, `gemini-api-key`, `openai-api-key`.

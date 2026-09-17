@@ -1,0 +1,93 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "Analytics Agent",
+    "description": "Gateway for the conversational analytics agent",
+    "version": "1.0"
+  },
+  "host": "analytics-gateway-551802026956.us-central1.run.app",
+  "basePath": "/",
+  "schemes": ["https"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "paths": {
+    "/conversation": {
+      "post": {
+        "summary": "Start a new conversation",
+        "operationId": "PostConversation",
+        "parameters": [
+          { "name": "Authorization", "in": "header", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/ConversationResponse" }
+          }
+        }
+      }
+    },
+    "/ask": {
+      "post": {
+        "summary": "Ask a question",
+        "operationId": "PostAsk",
+        "parameters": [
+          { "name": "Authorization", "in": "header", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" },
+          { "name": "body", "in": "body", "required": true, "schema": { "$ref": "#/definitions/AskRequest" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/AgentResponse" }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "AskRequest": {
+      "type": "object",
+      "required": ["question", "conversation_id"],
+      "properties": {
+        "question": { "type": "string" },
+        "image_base64": { "type": "string" },
+        "filter_context": { "type": "array", "items": { "type": "object" } },
+        "active_page": { "type": "string" },
+        "conversation_id": { "type": "string" }
+      }
+    },
+    "ConversationResponse": {
+      "type": "object",
+      "required": ["conversation_id"],
+      "properties": {
+        "conversation_id": { "type": "string" }
+      }
+    },
+    "Claim": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "numeric_value": { "type": "number" },
+        "source_tool_call_id": { "type": "string" }
+      }
+    },
+    "AgentResponse": {
+      "type": "object",
+      "required": ["answer_markdown", "sources"],
+      "properties": {
+        "answer_markdown": { "type": "string" },
+        "sources": { "type": "array", "items": { "type": "string" } },
+        "needs_approval": { "type": "boolean" },
+        "chart_url": { "type": "string" },
+        "claims": { "type": "array", "items": { "$ref": "#/definitions/Claim" } },
+        "suggested_follow_ups": { "type": "array", "items": { "type": "string" } },
+        "iteration_cap_hit": { "type": "boolean" },
+        "pending_query": { "type": "string" },
+        "estimated_cost": { "type": "string" },
+        "cost_cap_exceeded": { "type": "boolean" }
+      }
+    }
+  }
+}

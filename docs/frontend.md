@@ -6,22 +6,64 @@
 > The request contract itself is in `.claude/rules/gateway.md`; the connector
 > that carries it is in `docs/auth.md`.
 
-**License: Power Apps Premium is required, unconditionally, from Phase 1.**
-Power Apps classifies *every* custom connector as Premium regardless of what
-it wraps — even a connector calling a plain REST endpoint. This is a Phase 0
-blocker, not something deferred like the Power BI licensing question. Try the
-free **Power Apps Developer Plan** first (an individual build/test
-environment); fall back to a paid Premium seat (~$20/user/month — the cheaper
-per-app tier was discontinued January 2026) only if the free plan doesn't
-support custom connectors in practice (documented sources disagree; verify
-empirically).
+**License: no Power Apps Premium purchase needed. Confirmed empirically
+(2026-09-13) — the free Power Apps Developer Plan fully supports custom
+connectors, creation and live use both.** Power Apps classifies *every*
+custom connector as Premium regardless of what it wraps, even a connector
+calling a plain REST endpoint — but the Developer Plan's feature table
+already listed "Use premium connectors" and "Create custom connectors" as
+included, and a real test proved it: created a connector from blank
+(no-auth GET) inside a Dataverse solution (path: **Solutions** → **+ New**
+→ **Automation** → **Custom connector** — not the plain Connections page,
+which doesn't surface it), and **Test operation** against a real endpoint
+(`api.github.com/zen`) returned a genuine `200`, with Microsoft's own
+`x-ms-environment-id`/`x-ms-tenant-id`/`x-ms-dlp-re` headers on the response
+confirming the call actually transited Power Platform's connector gateway —
+no licensing or DLP prompt anywhere in the flow.
+
+**One caveat, not yet tested and worth confirming when Phase 1 builds the
+real connector:** this proved a **No authentication** connector. The real
+connector needs **OAuth 2.0** (delegated) plus a static `x-api-key` header —
+a different security configuration, untested here. No specific reason to
+expect the auth type itself to be Premium-gated when a no-auth connector
+wasn't, but don't assume; confirm it when it's actually built.
+
+**Second caveat, a licensing-terms question rather than a technical one:**
+Microsoft's Developer Plan FAQ frames the environment as for "development
+and test," with a paid plan required for genuine "production" use — a
+distinction about intent/terms, not something enforced by the environment
+itself as far as this test showed. Worth being aware of for how this project
+is described (a portfolio/demo build run inside the developer environment,
+not a commercial product with paying customers), rather than a blocker to
+building anything.
 
 ## Layout & controls
 
 **App type:** Canvas app — needed for layout control alongside an embedded
 report.
 
-- **Power BI report control** (embedded).
+- **Power BI report embedding — via the `Power BI tile` control's `TileUrl`
+  property override, not the standard Workspace/Dashboard/Tile dropdowns and
+  not an `HTML text` control.** Confirmed empirically (2026-09-13):
+  - **The Workspace/Dashboard/Tile dropdown path only works for actual
+    Dashboard objects** (Power BI's pinned-tile-board artifact type) — it
+    can't target a Report (the interactive, multi-page artifact people
+    usually mean by "dashboard"). If the dropdown's Dashboard list is empty,
+    that's why — check the content's actual type in Power BI first.
+  - **An `HTML text` control with a raw `<iframe>` does not work** — tested
+    directly (a plain `<iframe src="https://example.com">` also rendered
+    blank), confirming the control doesn't render iframes at all, not a
+    Power-BI-specific auth failure. Don't reach for this approach again.
+  - **The fix: drop a `Power BI tile` control, but don't touch its
+    Workspace/Dashboard/Tile properties.** In the formula bar's property
+    dropdown (top-left, not the right-hand pane), select **`TileUrl`** and
+    set it directly to the report's secure embed link — from the report in
+    Power BI Service: **File → Embed report → Website or portal**, copy
+    the plain link (**not** the `<iframe>` HTML, and never "Publish to
+    web," which is unauthenticated and would make the data public). This
+    renders the full interactive report through a native control, still
+    respecting RLS and view permissions, with no PCF custom component
+    needed.
 - **`TextInput` + send `Button` + `Gallery`**, the Gallery bound to a
   `colChat` collection.
 - **Custom connector call on send:**

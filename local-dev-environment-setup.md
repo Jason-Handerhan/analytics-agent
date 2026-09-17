@@ -842,8 +842,9 @@ app registration name) as **Contributor**.
 
 Contributor is the minimum role that satisfies `executeQueries`' documented
 "Read + Build" requirement, while still having no Write/Reshare permission on
-the dataset. (Confirm empirically in Phase 1 — see the component reference's
-known-unverified list.)
+the dataset. **Confirmed empirically (2026-09-13)** — the "Verify A worked"
+script below returned 200 with the service principal at exactly this role,
+ahead of schedule (Phase 0, not Phase 1).
 
 ---
 
@@ -897,9 +898,11 @@ stored — don't paste them into a file in the meantime.
 
 ### Verify A worked (worth doing before you build anything on it)
 
-Once Step 15 has the secrets stored, this is the "prove `executeQueries` from a
-plain script" task from Phase 1 — and it isolates Microsoft-side auth from all
-your application code, so a failure here is unambiguous:
+Once Step 15 has the secrets stored, this is worth doing now rather than
+deferring — it isolates Microsoft-side auth from all your application code,
+so a failure here is unambiguous, and it means Phase 1 doesn't need a
+separate step to prove the same thing (`docs/build-order.md`, Phase 1's
+"dropped" note):
 
 ```python
 # throwaway script — delete after it passes

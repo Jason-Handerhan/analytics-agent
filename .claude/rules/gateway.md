@@ -46,7 +46,7 @@ _jwks_client = PyJWKClient(
     f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
 )
 
-def validate_entra_token(authorization: str = Header(...)) -> dict:
+def validate_entra_token(authorization: str) -> dict:
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing bearer token")
     token = authorization.removeprefix("Bearer ")
@@ -60,15 +60,40 @@ def validate_entra_token(authorization: str = Header(...)) -> dict:
     except jwt.PyJWTError as e:
         raise HTTPException(401, f"Invalid token: {e}")
 
-def validate_api_key(x_api_key: str = Header(...)) -> None:
-    if x_api_key != get_secret("gateway-api-key", GCP_PROJECT_ID):
+def validate_api_key(x_api_key: str) -> None:
+    if x_api_key != get_gateway_api_key():
         raise HTTPException(401, "Invalid API key")
+
+# Route handlers extract headers via `= Header(...)` and call these two
+# directly with the resulting strings — not `Depends(validate_entra_token)`.
+# Decided (2026-09-15): plain function calls read the same to anyone who
+# knows Python; Depends() only means something if you already know
+# FastAPI's DI model. Not needed for testability either — tests
+# monkeypatch get_db()/get_gateway_api_key() directly, which works
+# identically either way.
 ```
 
 The API key proves *knows a shared secret*; the JWT proves *is this person,
 right now* (~1h expiry, revocable per account). `claims["oid"]` feeds
-telemetry. `jwt.decode()` is local cryptography with **no network call per request** —
-`PyJWKClient` caches Entra's public keys, re-fetching only on rotation. Wider chain: `docs/auth.md`.
+telemetry. `jwt.decode()` is local cryptography — `PyJWKClient` caches
+Entra's public keys, but only for 5 minutes (its default `lifespan`), so
+it re-fetches on that schedule too, not just on an actual key rotation.
+Wider chain: `docs/auth.md`.
+
+That re-fetch is a blocking call (no async JWKS client in PyJWT) —
+accepted as-is, roughly every 5 minutes on a warm instance, not just cold
+starts or real rotations.
+
+**Deviation from the snippet above:** don't call `get_secret(...)` inline on
+every request as shown — wrap it (and any other module-level GCP client,
+e.g. Firestore) in an `@lru_cache`-decorated getter instead, called lazily
+on first use. Two reasons: it avoids a live Secret Manager round-trip per
+request, and — the real forcing reason — `firestore.AsyncClient()`
+constructed eagerly at import time raises `DefaultCredentialsError` with no
+credentials configured, which breaks importing the module at all under
+Layer 1 (`docs/testing.md`).
+
+**Caching `gateway-api-key` means a rotation needs a redeploy to take effect** — decided, not a gap; no TTL-based refresh.
 
 **`--allow-unauthenticated` on deploy is required.** Cloud Run's IAM invoker
 check needs a Google-issued token, which Power Platform can't present — the
@@ -766,6 +791,12 @@ unexpected failures too: catch, log, and return an `AgentResponse` whose
 **HTTP errors are for pre-turn rejections only** — auth (401) and request
 validation (400). Those happen *before* a turn exists, so there's no
 `AgentResponse` to return and nothing meaningful to log to `agent_telemetry`.
+
+**Open, not yet decided: what `POST /conversation` returns on an unexpected
+internal error.** It has no `AgentResponse` to fall back to like `/ask`
+does — confirmed live (2026-09-15) that an unhandled exception there
+currently surfaces as a raw, generic `500`. Decide before this matters in
+practice.
 
 **Turns that end abnormally still write telemetry** (row schema:
 `.claude/rules/telemetry.md`). A turn that times out,

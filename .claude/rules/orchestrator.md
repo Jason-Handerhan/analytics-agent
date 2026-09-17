@@ -391,6 +391,11 @@ def check_answer_length(answer_markdown: str) -> bool:
    verification** — *"Your answer is too long to display. Summarize the key
    findings concisely, or generate a chart instead of listing rows."* Never
    truncate silently; that can cut off a partial-answer caveat mid-sentence.
+3. **Retries exhausted:** a fixed decline, not another attempt at the answer
+   — *"I wasn't able to generate a response short enough to display. Try
+   breaking your question into smaller, more specific parts."* No claims, no
+   numbers — `check_length` runs before `verify` (`finalize`'s table, below),
+   so nothing here has been verified yet.
 
 ### Question-length cap — bounded at the gateway, not here
 
@@ -626,7 +631,7 @@ graph = g.compile()
 | `call_tool` | Dispatches tools, checks cancel, increments `iteration_count` |
 | `check_length` | Owns `length_retry_count` |
 | `verify` | `verify_response()`. Owns `verification_retry_count` |
-| `finalize` | Builds `AgentResponse`, writes telemetry, clears `live_turns` |
+| `finalize` | Sets `AgentResponse` fields and writes telemetry — seven routes in, see below |
 
 - `route_entry` branches on `pending_queries` — a fresh turn's is empty.
 - **Cost gating is not a node** — it lives inside `run_bigquery_sql`, which
@@ -634,8 +639,65 @@ graph = g.compile()
   on what the tool reports back.
 - `check_length` before `verify` — cheap check first; no point walking every
   claim on an answer that can't be displayed regardless.
-- `finalize` is the **single exit**: five paths end a turn (success, cancel,
-  approval pause, cost cap, iteration cap) and one place writes telemetry.
+- `finalize` is the **single exit** — full breakdown below.
+
+### `finalize` — the single exit, seven ways in
+
+Seven routes, not five — `check_length` and `verify` each collapse two
+different outcomes into one edge. Kept in sync with the actual conditional
+edges above; read those directly if this table and the code ever disagree.
+
+| From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
+|---|---|---|---|---|
+| `call_tool` | `cancelled` | Cancelled | Partial answer from whatever `claims` verified so far | Normal row, `cancelled: True` |
+| `call_tool` | `needs_approval` | Approval pause | `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
+| `call_tool` | `cost_cap_exceeded` | Hard decline | `cost_cap_exceeded: True`, `estimated_cost` set, no approval offered | Normal row |
+| `call_tool` | `iteration_cap_hit` | Partial answer | Synthesize from whatever `claims` verified; `iteration_cap_hit: True`; must state plainly it's partial (see "Hitting `max_iterations`" above) | Normal row, `iteration_cap_hit: True` |
+| `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question. `claims: []` — runs before `verify`, so nothing here is verified yet | Normal row |
+| `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `claims`, `suggested_follow_ups` | Normal row |
+| `verify` | failed, `verification_retry_count` exhausted | Honest decline | "No verified figure for that" — no unverified number emitted | Normal row |
+
+**`finalize` never touches `live_turns` — every write to it lives in the
+gateway's `run_agent_turn` instead.** `live_turns` is gateway-owned
+(`.claude/rules/gateway.md`); splitting its writes across two modules risks
+drift. `finalize` only sets the `AgentState` fields above and writes
+`agent_telemetry` (BigQuery — unchanged). The gateway acts on `final_state`
+once the loop ends:
+
+```python
+def build_pending_approval(state: AgentState) -> PendingApproval:
+    """Pure, no I/O — called from the gateway, not from finalize."""
+    return PendingApproval(
+        conversation_id=state["conversation_id"],
+        question=state["question"],
+        filter_context=state["filter_context"],
+        active_page=state["active_page"],
+        conversation_history=state["conversation_history"],
+        pending_queries=state["pending_queries"],
+        deferred_dax=state["deferred_dax"],
+        tool_calls=state["tool_calls"],
+        iteration_count=state["iteration_count"],
+        bytes_consumed=state["bytes_consumed"],
+        estimated_cost=state["estimated_cost"],
+        paused_at=now(),
+    )
+```
+
+```python
+# app/gateway/ — run_agent_turn, after the astream loop ends
+if final_state["needs_approval"]:
+    pending = build_pending_approval(final_state)
+    await live_turns_doc(conversation_id).set({"pending_approval": pending}, merge=True)
+else:
+    await live_turns_doc(conversation_id).delete()
+return build_agent_response(final_state)
+```
+
+**Why not in `finalize`:** `astream` yields a node's update only after it
+finishes. A `finalize`-side clear would run *before* the gateway's own
+`elif node == "finalize": set_status(...)` below — which would then
+re-create the document via its `merge=True` upsert, orphaned with no TTL
+(`live_turns` has none, unlike `sessions`).
 
 ### Node names are a design decision, and status depends on them
 

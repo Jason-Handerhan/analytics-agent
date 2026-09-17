@@ -2,9 +2,23 @@
 
 ## Current status — update this as we go
 
-**Phase: 0 (not started)**
+**Phase: 1 (in progress — items 1–3 of 7 done)**
 
-_Last updated: initial plan, nothing built yet._
+_Last updated: 2026-09-16._ **Phase 0 (2026-09-13): all nine items verified
+live against the real project, complete** — see git history for the full
+verification detail if ever needed; kept brief here since it's done, not
+current. One item remains by design, not as a gap: Entra registration B
+(connector app) can't be end-to-end tested until Phase 1 item 4 builds the
+actual connector.
+
+**Phase 1, items 1–3 of 7 done.** Items 1+2 (echo `/ask`, `/conversation` +
+ownership check) built and Layer 1 tested (`tests/test_gateway_auth.py`,
+9 tests). Item 3 (`Dockerfile` + deploy) done and verified live — deployed
+to `https://analytics-gateway-551802026956.us-central1.run.app`, confirmed
+reachable with a real `401` from `agent-sa` successfully reaching Secret
+Manager via Cloud Run's ambient credentials (the exact thing that fails in
+a local, credential-less container — expected, not a bug). Next: item 4,
+the custom connector, generated from this URL's OpenAPI.
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,
@@ -32,8 +46,11 @@ trusting a static tree that could drift from it.
 
 ## Phase 0 — Foundations (console/CLI, little code)
 
-1. Licensing: Power BI Pro sufficient; Power Apps Premium needed **now** (try
-   the free Developer Plan first).
+1. ~~Licensing: Power Apps Premium needed~~ — **resolved, no purchase
+   needed.** The free Power Apps Developer Plan confirmed to fully support
+   custom connectors (creation and live use), tested empirically
+   (`docs/frontend.md`). Power BI Pro remains sufficient, as originally
+   planned.
 2. Confirm Instacart reuse — BigQuery project, gold tables, GCS bucket.
 3. Enable GCP APIs (`run`, `cloudbuild`, `artifactregistry`, `secretmanager`,
    `bigquery`, `aiplatform`, `cloudscheduler`). Cloud Run services are created
@@ -49,15 +66,24 @@ trusting a static tree that could drift from it.
    - **Connector app** — Application ID URI + scope + secret. Its redirect URI
      can't be set until Phase 1 creates the connector; that's expected.
 6. Create `agent-sa` + IAM (needs #4 first — `dataViewer` targets `agent_safe`).
-7. **Secret Manager — all eight, one setup step** (setup guide Step 15),
+7. **Secret Manager — all ten, one setup step** (setup guide Step 15),
    even though several aren't needed until later phases: `power-bi-sp-client-id`,
    `power-bi-sp-client-secret`, `azure-tenant-id`, `entra-client-secret`,
    `gateway-api-key`, `anthropic-api-key` (first used in Phase 3's graph
-   skeleton), `github-read-token` (Phase 3's code tools), and
-   `langsmith-api-key` (Phase 3, once there's a loop worth tracing — optional). One creation pass
-   and one grant loop beats revisiting Secret Manager every phase.
+   skeleton), `github-read-token` (Phase 3's code tools),
+   `langsmith-api-key` (Phase 3, once there's a loop worth tracing — optional),
+   and `gemini-api-key`/`openai-api-key` (alternate providers, for model
+   swapability). One creation pass and one grant loop beats revisiting Secret
+   Manager every phase.
 8. GCP Budget alert (setup guide Step 12), if the reused project doesn't
    already have one.
+9. **CI/CD identity plumbing, pulled forward from Phase 6** (setup guide
+   Step 16): `github-deployer`, Workload Identity Federation (a pool +
+   provider + trust binding scoped to this repo — no JSON key, ever; see
+   Step 16's 2026-09-13 decision note), and the `WIF_PROVIDER`/
+   `PROD_SERVICE_ACCOUNT`/`PROD_REGION` GitHub repo variables. Doing this now
+   means Phase 6 is just "write `ci.yml`," not "write `ci.yml` and also
+   untangle IAM."
 
 **Longest-lead item:** the Power BI tenant settings in #5 need Fabric/Power BI
 admin rights. If you don't hold them, that's an external request — flag it
@@ -84,17 +110,21 @@ early rather than letting it block Phase 1.
    turn has a row from the first one, and the write path is proven before any
    tool complexity exists. `tool_calls` is simply empty until Phase 3 fills
    it — that's what "defined now, populated later" means in practice.
-8. *In parallel:* prove `executeQueries` from a plain script; prove a trivial
-   FastMCP server + one tool called from a local LangGraph script.
+
+**Dropped: proving `executeQueries` and a trivial FastMCP server here.**
+Decided 2026-09-13. `executeQueries` is already proven — Phase 0's live
+`executeQueries` smoke test (setup guide Step 14, done against the real
+dataset) covers it, and re-proving it here would just repeat that call.
+The trivial-FastMCP-server proof would only duplicate Phase 2 item 2, which
+already exists for exactly this purpose; no value in proving the same thing
+twice under two different names.
 
 ## Phase 2 — The MCP server
 
 1. **Stand up the real FastMCP server** — `streamable_http` transport,
-   localhost co-located (`.claude/rules/mcp-tools.md`). Phase 1's server was
-   a disposable proof; this is the one that carries forward. **Confirm the
-   exact `MultiServerMCPClient`/FastMCP parameter names here** — the first
-   real dependency on them, not something to assume from Phase 1's trivial
-   version.
+   localhost co-located (`.claude/rules/mcp-tools.md`). **Confirm the exact
+   `MultiServerMCPClient`/FastMCP parameter names here** — this is the first
+   real dependency on them, so don't assume from memory or docs.
 2. **Prove it end-to-end with a trivial tool** — something that returns a
    fixed string, registered with `@mcp.tool()` and called through a
    single-node LangGraph over MCP. **Deliberately not a real tool:**
@@ -254,7 +284,7 @@ layer failed.
    `execute_approved`, and the hard-decline tier. Depends on #5's cost tiers
    and #10's Firestore state. The UI half (approve/reject buttons) lands in
    Phase 4. **Verify it here anyway, via curl/script against
-   `/ask/respond`** — same pattern as Phase 1's `executeQueries` smoke test.
+   `/ask/respond`** — same pattern as Phase 0's `executeQueries` smoke test.
    The resume logic shouldn't sit a whole phase untested just because its
    buttons don't exist yet.
 12. **User cancellation** — `POST /ask/cancel/{conversation_id}` writing the
@@ -290,12 +320,14 @@ XMLA is a documented backup only. REST is the plan.
    event-triggered mechanism, **not** a subset of #1. Mostly hand-curation;
    Claude Code's part is `scripts/run_golden_tests.py`, the comparison
    runner.
-3. CI/CD slice: create `github-deployer` (separate from `agent-sa`), add its key
-   as a GitHub repo secret plus `PROD_SERVICE_ACCOUNT`/`PROD_REGION` as repo
-   *variables*, then write `.github/workflows/ci.yml` with a `test` job and a
-   `deploy` job gated by `needs: test`. **The deploy job is two steps** — build
-   a `${{ github.sha }}`-tagged image, then deploy *that image* (`docs/ci-cd.md`), not the `--source .` command used manually through Phases
-   1–5.
+3. CI/CD workflow: `github-deployer`, WIF, and the repo variables are already
+   done (Phase 0 item 9) — this is just writing
+   `.github/workflows/ci.yml` with a `test` job and a `deploy` job gated by
+   `needs: test`. **The deploy job is two steps** — build a
+   `${{ github.sha }}`-tagged image, then deploy *that image*
+   (`docs/ci-cd.md`), not the `--source .` command used manually through
+   Phases 1–5. Its `auth@v2` step uses `workload_identity_provider`/
+   `service_account`, not `credentials_json` — no key exists to use.
 4. Share the Power Apps app — the one auth step that's neither code nor IAM.
 5. Demo video + business-first README.
 

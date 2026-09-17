@@ -1,3 +1,5 @@
+from google.cloud import secretmanager
+
 # GCP Project Configuration
 GCP_PROJECT_ID = "instacart-ml-model"
 GCS_CHART_BUCKET = "instacart-ml-model-charts"
@@ -16,3 +18,10 @@ POWER_BI_WORKSPACE_ID = "8e20abd3-703e-46b8-9832-950249767864"
 # exists (Phase 1) — not defined here.
 LANGSMITH_TRACING = "true"
 LANGCHAIN_CALLBACKS_BACKGROUND = "false"
+
+
+def get_secret(secret_id: str, project_id: str, version: str = "latest") -> str:
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project_id}/secrets/{secret_id}/versions/{version}"
+    response = client.access_secret_version(request={"name": name})
+    return response.payload.data.decode("UTF-8")

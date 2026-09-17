@@ -217,7 +217,12 @@ in-memory dict would silently miss it.
 *completed* turns; a paused turn isn't in it yet. Firestore is the live state.
 
 **`PendingApproval`'s schema is in `.claude/rules/gateway.md`** — 12 fields,
-one place. What matters here is the *rule* behind them:
+one place. **Built by `build_pending_approval()`** (defined alongside
+`AgentState` in `.claude/rules/orchestrator.md`), **called from the
+gateway's `run_agent_turn` after the graph finishes — not from `finalize`**,
+which never touches `live_turns` (see that doc's `finalize` section for
+why). What matters here is the *rule* behind `PendingApproval`'s contents,
+not where it's assembled:
 
 **Carry what bounds total turn consumption; reset what's scoped to one
 attempt.** `iteration_count` and `bytes_consumed` carry, so approval can't be
