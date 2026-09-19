@@ -1,0 +1,6 @@
+-- An empty table fails SILENTLY at runtime: run_bigquery_sql just returns
+-- nothing, no error anywhere. rowConditions can't catch this -- there are no
+-- rows to fail a per-row check against.
+config { type: "assertion", tags: ["agent_safe"] }
+SELECT 1 FROM (SELECT COUNT(*) AS n FROM ${ref("candidate_reorder_features")})
+WHERE n = 0
