@@ -420,36 +420,52 @@ The staging table stays a single `WRITE_TRUNCATE` load.
 ```python
 class Chunk(BaseModel):
     chunk_id: str          # content hash — makes reloads idempotent
-    source_type: str       # "docs" — kept as a field because the schema is
-                           # shared with future sources, not because it filters
+    doc_source: str        # which document this came from, e.g. "readme" —
+                           # deliberately NOT a content-type discriminator.
+                           # A separate hypothetical code-chunks source would
+                           # get its own table with its own schema, not a
+                           # shared generic one — decided 2026-09-19 rather
+                           # than build for a future that may never arrive.
     file_path: str
-    symbol_name: str | None
-    start_line: int | None
-    end_line: int | None
+    section: str | None    # heading breadcrumb, e.g. "Environment Setup &
+                           # Provisioning > 2. IAM Security"
+    length: int             # len(chunk_text), in characters
     chunk_text: str
 ```
 
-| `source_type` | Table | Sources | Feeds |
+No `start_line`/`end_line` — those are meaningful for code, not prose, and
+this schema isn't shared with a hypothetical code source (see `doc_source`
+above), so they'd always be `None` with no consumer. Dropped rather than
+carried as dead columns.
+
+| `doc_source` | Table | Sources | Feeds |
 |---|---|---|---|
-| `docs` | `vector_db.chunks_docs` | Project methodology — the README, minus what's in static context. Heading breadcrumb prepended | `search_docs` |
+| `readme` | `vector_db.chunks_docs_embedded` | Project methodology — the README (`context/docs/index.html`), minus the orientation-bundle block, which is always in static context. Heading breadcrumb prepended | `search_docs` |
 
-**One output table, not one-with-a-filter.** Should a second embedded source
-ever be added, give it its own table rather than a `WHERE source_type = ...`:
-a `WHERE` on a vector search may be applied *after* the nearest-neighbor scan
-rather than pushed into it, so `top_k => 5` could return fewer than 5 — good
-matches discarded because the unfiltered top-5 happened to be other content
-types. Separate tables sidestep the question entirely.
+**One output table, not one-with-a-filter.** Should a second document ever be
+added, it gets its own `doc_source` value in the *same* table (not a new
+table) — `doc_source` exists precisely to make that distinguishable, unlike
+the old `source_type` design this replaced, which was a content-type
+discriminator for a shared-schema future this project deliberately isn't
+building toward.
 
-**`chunks_docs` is small enough to skip `CREATE VECTOR INDEX`
-entirely.** `VECTOR_SEARCH` works without an index — a brute-force exact scan.
-IVF indexes exist to make that fast at scale and have minimum row counts below
-which they aren't usable. The project README chunks to tens of rows, not
-thousands. **Check actual row counts before building any index**; brute force
-is the correct default here, not a fallback.
+**`chunks_docs_embedded` is far too small for `CREATE VECTOR INDEX` —
+confirmed, not estimated.** BigQuery's IVF index has a **5,000-row minimum**
+(confirmed against Google's own docs, 2026-09-19); the real build produced
+**66 rows**. `VECTOR_SEARCH` works with no index at all — a brute-force exact
+scan — which is the *correct* outcome here, not a fallback: exact
+nearest-neighbor results, no index-maintenance overhead, at a scale where an
+approximate index would add cost for zero benefit.
 
-**Exclude the orientation content** (Executive Summary, Project Navigator,
-architecture diagram) from `docs` chunking — it's always in context already, so
-indexing it wastes a retrieval slot.
+**Excludes the orientation-bundle content** (Executive Summary, Project
+Navigator, System Architecture — always in static context already, so
+indexing it wastes a retrieval slot) **by heading name, from inside the one
+HTML file** — not by excluding a separate file. `index.html` contains both the
+orientation content and everything else in one document; `chunk_docs` skips
+every element between the "Executive Summary" and "Environment Setup &
+Provisioning" depth-0 titles before chunking. Confirmed against the real file
+(85 of 499 elements excluded) — a heading-name rule, not a hardcoded line
+range, so it survives future edits to the document.
 
 ### Chunkers
 
@@ -457,16 +473,18 @@ indexing it wastes a retrieval slot.
 from unstructured.partition.html import partition_html
 from unstructured.partition.md import partition_md
 from unstructured.chunking.title import chunk_by_title
-import hashlib, pathlib, re
+import hashlib, pathlib
+
+EXCLUDE_START_TITLE = "Executive Summary"
+EXCLUDE_END_TITLE = "Environment Setup & Provisioning"
 
 def _chunk_id(file_path: str, text: str) -> str:
     """Content-addressed → identical ids for unchanged content, so reloads
     are idempotent instead of duplicating rows."""
     return hashlib.sha256(f"{file_path}:{text}".encode()).hexdigest()[:16]
 
-def chunk_docs(path: pathlib.Path, source_type: str = "docs") -> list[Chunk]:
+def chunk_docs(path: pathlib.Path, doc_source: str) -> list[Chunk]:
     """Structure-aware — respects headings so a chunk is a coherent section.
-    Same logic for both doc corpora; source_type decides the target table.
 
     Prepends the heading breadcrumb to chunk_text. A chunk under
     "### CI/CD Authentication" reading "we use Workload Identity Federation
@@ -475,42 +493,59 @@ def chunk_docs(path: pathlib.Path, source_type: str = "docs") -> list[Chunk]:
     partition = partition_html if path.suffix == ".html" else partition_md
     elements = partition(filename=str(path))
 
-    # Build a heading stack from the PRE-chunked elements. chunk_by_title
-    # decides *where* to break; it does not hand back a breadcrumb — the
-    # library treats chunking as a downstream consumer of elements, so the
-    # stack has to be tracked here. parent_id/category_depth are most
-    # reliable on HTML (native heading structure).
-    breadcrumbs, stack = {}, []
+    filtered, skipping = [], False
     for el in elements:
-        depth = (el.metadata.category_depth or 0)
+        is_top_title = el.category == "Title" and el.metadata.category_depth == 0
+        if is_top_title and str(el) == EXCLUDE_START_TITLE:
+            skipping = True
+        if is_top_title and str(el) == EXCLUDE_END_TITLE:
+            skipping = False
+        if not skipping:
+            filtered.append(el)
+
+    # Build a heading stack from the PRE-chunked, FILTERED elements.
+    # chunk_by_title decides *where* to break; it does not hand back a
+    # breadcrumb — the library treats chunking as a downstream consumer of
+    # elements, so the stack has to be tracked here.
+    breadcrumbs, stack = {}, []
+    for el in filtered:
+        depth = el.metadata.category_depth or 0
         if el.category == "Title":
-            stack[depth:] = [el.text]          # push, truncating deeper levels
+            stack[depth:] = [str(el)]          # push, truncating deeper levels
         breadcrumbs[el.id] = " > ".join(stack)
 
     chunks = []
-    for c in chunk_by_title(elements, max_characters=1500, overlap=150):
-        # Breadcrumb goes in chunk_text, NOT a metadata column — only
-        # chunk_text reaches ML.GENERATE_EMBEDDING. A column would be
-        # invisible to retrieval.
-        crumb = breadcrumbs.get(getattr(c, "id", None), "")
+    for c in chunk_by_title(filtered, max_characters=1500, overlap=150):
+        # chunk_by_title's own chunk ids do NOT match any source element id
+        # (confirmed: 0/73 matched, against this installed unstructured
+        # version) — use the chunk's first ORIGINAL element instead, which
+        # DOES (confirmed: 73/73). A direct reference, not a guess by
+        # ordinal position.
+        first_orig = c.metadata.orig_elements[0]
+        crumb = breadcrumbs.get(first_orig.id, "")
         text = f"[{crumb}]\n{c}" if crumb else str(c)
         chunks.append(Chunk(
-            chunk_id=_chunk_id(str(path), text), source_type=source_type,
-            file_path=str(path), symbol_name=crumb or None,
-            start_line=None, end_line=None, chunk_text=text))
+            # .as_posix(), not str(path): str() renders OS-native separators,
+            # which would fold a backslash into the hash on Windows and give
+            # a DIFFERENT chunk_id for identical content run from a
+            # different OS later (e.g. a Linux CI job) — breaking the
+            # "identical ids for unchanged content" guarantee _chunk_id
+            # exists for.
+            chunk_id=_chunk_id(path.as_posix(), text), doc_source=doc_source,
+            file_path=path.as_posix(), section=crumb or None,
+            length=len(text), chunk_text=text))
     return chunks
 ```
 
-**Two things to confirm in `chunk_docs` before trusting it.** (1) The exact
-attribute names — `element.id`, `metadata.category_depth`, and the `overlap`
-parameter's name — are version-dependent; verify against the installed
-`unstructured`. (2) Whether `chunk_by_title`'s output objects expose an `id`
-that matches a source element's. If they don't, map by element *order*
-instead of id — the breadcrumb lookup is the only part that depends on it.
-**Both fail silently**: chunks still build, just with no breadcrumb.
+**`element.id`, `metadata.category_depth`, and `overlap` all confirmed present
+and correctly named** against the real installed `unstructured` version — not
+assumed. **`chunk_by_title`'s own chunk ids do not match source element ids**
+— confirmed as a real gap, not a hypothetical one — fixed via
+`orig_elements[0].id` as shown above, rather than the element-order fallback
+originally proposed here.
 
 **Why the breadcrumb is prepended rather than stored in a column:** only
-`chunk_text` reaches `ML.GENERATE_EMBEDDING` (`file_path`/`symbol_name` ride
+`chunk_text` reaches `ML.GENERATE_EMBEDDING` (`file_path`/`section` ride
 along as columns but are invisible to the model). This is the same
 "contextual retrieval" idea — attach the context where it actually affects
 the embedding.
@@ -545,11 +580,10 @@ def load_chunks(chunks: list[Chunk], table: str = "staging.doc_chunks") -> None:
             write_disposition="WRITE_TRUNCATE",   # full rebuild, not append
             schema=[
                 bigquery.SchemaField("chunk_id", "STRING"),
-                bigquery.SchemaField("source_type", "STRING"),
+                bigquery.SchemaField("doc_source", "STRING"),
                 bigquery.SchemaField("file_path", "STRING"),
-                bigquery.SchemaField("symbol_name", "STRING"),
-                bigquery.SchemaField("start_line", "INTEGER"),
-                bigquery.SchemaField("end_line", "INTEGER"),
+                bigquery.SchemaField("section", "STRING"),
+                bigquery.SchemaField("length", "INTEGER"),
                 bigquery.SchemaField("chunk_text", "STRING"),
             ])).result()
 ```
@@ -570,10 +604,12 @@ import pathlib
 
 CONTEXT_ROOT = pathlib.Path("context")
 
-CHUNKER_BY_DIR = {
-    # context/docs/ = project methodology (README). The page-info HTML is
-    # NOT chunked — too small to rank; served whole by get_page_info.
-    "docs":      (lambda p: chunk_docs(p, "docs"),      ("*.html", "*.md")),
+# Which document each known file represents. Explicit rather than inferred
+# from the filename — there's one file today, and a naming-inference scheme
+# for files that don't exist yet is exactly the premature generality this
+# project avoids. Add a line here when a second doc lands.
+DOC_SOURCES = {
+    "index.html": "readme",
 }
 
 # NOT here, and why:
@@ -587,15 +623,13 @@ CHUNKER_BY_DIR = {
 
 def main() -> None:
     all_chunks: list[Chunk] = []
+    for filename, doc_source in DOC_SOURCES.items():
+        path = CONTEXT_ROOT / "docs" / filename
+        all_chunks.extend(chunk_docs(path, doc_source=doc_source))
 
-    for subdir, (chunker, patterns) in CHUNKER_BY_DIR.items():
-        for pattern in patterns:
-            for path in (CONTEXT_ROOT / subdir).rglob(pattern):
-                all_chunks.extend(chunker(path))
-
-    # Empty means the glob matched nothing — which would build an EMPTY
-    # chunks_docs with no error anywhere, and search_docs would silently
-    # return nothing on every call.
+    # Empty means chunking silently produced nothing — which would build an
+    # EMPTY chunks_docs_embedded with no error anywhere, and search_docs
+    # would silently return nothing on every call.
     if not all_chunks:
         raise SystemExit("Refusing to load: 0 chunks. Check context/docs/.")
 
@@ -607,9 +641,10 @@ if __name__ == "__main__":
     main()
 ```
 
-**This is the exact command referenced throughout this doc's refresh sequence**
-(below) — `python scripts/build_vector_db.py` — now with a concrete
-implementation behind it rather than a bare command name.
+**This is the real, verified implementation** — built, run end-to-end against
+the real `index.html` (66 chunks, 0 missing breadcrumbs), not a sketch.
+`python scripts/build_vector_db.py` is the exact command referenced
+throughout this doc's refresh sequence below.
 
 ### Embedding model + index
 

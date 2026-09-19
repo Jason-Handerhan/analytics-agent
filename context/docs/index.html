@@ -1,0 +1,3006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Master README - Instacart Reorder Engine</title>
+    <style>
+        :root {
+            --primary-color: #1a73e8;
+            --secondary-color: #0d47a1;
+            --bg-color: #f8f9fa;
+            --card-bg: #ffffff;
+            --text-color: #3c4043;
+            --text-dark: #202124;
+            --border-color: #dadce0;
+            --code-bg: #1e1e1e;
+            --code-text: #d4d4d4;
+            --accent-green: #137333;
+            --bg-green: #e6f4ea;
+            --accent-amber: #b06000;
+            --bg-amber: #fef7e0;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            padding: 40px 20px;
+            scroll-behavior: smooth;
+        }
+
+        .container {
+            max-width: 1050px;
+            margin: 0 auto;
+            background: var(--card-bg);
+            padding: 45px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+            border: 1px solid var(--border-color);
+        }
+
+        .header-title {
+            border-bottom: 3px solid var(--primary-color);
+            padding-bottom: 15px;
+            margin-bottom: 25px;
+        }
+
+        h1 {
+            color: var(--text-dark);
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+        
+        h2 {
+            color: var(--secondary-color);
+            margin-top: 35px;
+            margin-bottom: 15px;
+            font-size: 20px;
+            font-weight: 600;
+            border-bottom: 1px solid #e0e0e0;
+            padding-bottom: 8px;
+        }
+
+        h3 {
+            color: var(--text-dark);
+            margin-top: 25px;
+            margin-bottom: 12px;
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        p {
+            margin-bottom: 15px;
+            font-size: 15px;
+            color: #4a4a4a;
+            line-height: 1.7;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 22px;
+        }
+
+        li {
+            margin-bottom: 12px;
+            font-size: 15px;
+            color: #4a4a4a;
+            line-height: 1.6;
+        }
+        
+        a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+        
+        a:hover {
+            text-decoration: underline;
+        }
+
+        section {
+            padding-top: 20px;
+            margin-bottom: 40px;
+            border-bottom: 2px solid #f1f3f4;
+            padding-bottom: 40px;
+        }
+
+        section:last-of-type {
+            border-bottom: none;
+        }
+
+        .section-tag {
+            display: inline-block;
+            background: #e8f0fe;
+            color: var(--primary-color);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            padding: 4px 10px;
+            border-radius: 4px;
+            margin-bottom: 8px;
+        }
+
+        .ai-callout {
+            background-color: #f3e8ff;
+            border-left: 4px solid #8e24aa;
+            padding: 20px;
+            border-radius: 0 8px 8px 0;
+            margin: 30px 0;
+        }
+
+        .ai-callout-title {
+            color: #6b21a8;
+            font-weight: 700;
+            font-size: 16px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .ai-callout p {
+            margin-bottom: 0;
+            font-size: 14.5px;
+            color: #4c1d95;
+            line-height: 1.6;
+        }
+
+        .callout {
+            background-color: var(--bg-green);
+            border-left: 4px solid var(--accent-green);
+            color: #0b4e22;
+            padding: 16px;
+            border-radius: 0 6px 6px 0;
+            margin: 22px 0;
+            font-size: 14px;
+        }
+
+        .callout-blue {
+            background-color: #e8f0fe;
+            border-left: 4px solid var(--primary-color);
+            color: #0d47a1;
+            padding: 16px;
+            border-radius: 0 6px 6px 0;
+            margin: 22px 0;
+            font-size: 14px;
+        }
+
+        .callout-amber {
+            background-color: var(--bg-amber);
+            border-left: 4px solid var(--accent-amber);
+            color: #7a4300;
+            padding: 16px;
+            border-radius: 0 6px 6px 0;
+            margin: 22px 0;
+            font-size: 14px;
+        }
+
+        .disclaimer-callout {
+            background-color: var(--bg-amber);
+            border-left: 4px solid var(--accent-amber);
+            color: #8a4d00;
+            padding: 16px;
+            border-radius: 0 6px 6px 0;
+            margin: 22px 0;
+            font-size: 14px;
+        }
+
+        .strategy-callout {
+            background-color: #f1f8ff;
+            border-left: 4px solid #2980b9;
+            color: #0d47a1;
+            padding: 16px;
+            border-radius: 0 6px 6px 0;
+            margin: 22px 0;
+            font-size: 14px;
+        }
+
+        .code-container {
+            margin: 18px 0;
+            position: relative;
+        }
+
+        .code-header {
+            background-color: #2d2d2d;
+            color: #aaaaaa;
+            padding: 6px 14px;
+            font-family: 'Consolas', 'Courier New', Courier, monospace;
+            font-size: 12px;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            border-bottom: 1px solid #3d3d3d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            color: var(--code-text);
+            padding: 16px;
+            border-bottom-left-radius: 6px;
+            border-bottom-right-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Courier New', Courier, monospace;
+            font-size: 13px;
+            line-height: 1.55;
+            border: 1px solid #2d2d2d;
+        }
+
+        code {
+            font-family: 'Consolas', 'Courier New', Courier, monospace;
+            background-color: #f1f3f4;
+            color: #c7254e;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        pre code {
+            background-color: transparent;
+            color: inherit;
+            padding: 0;
+            border-radius: 0;
+            font-size: inherit;
+            white-space: pre;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 25px 0;
+            font-size: 13.5px;
+        }
+
+        th {
+            background-color: #f1f3f4;
+            color: var(--text-dark);
+            font-weight: 600;
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            text-align: left;
+        }
+
+        td {
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            vertical-align: top;
+        }
+
+        tr:nth-child(even) {
+            background-color: #fcfcfc;
+        }
+
+        .eda-card {
+            background: #ffffff;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 22px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+        }
+
+        .eda-card h2 {
+            margin-top: 0;
+        }
+
+        .img-container {
+            text-align: center;
+            margin: 25px 0;
+            background: #ffffff;
+            border: 1px solid #f0f0f0;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+
+        .img-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+
+        .media-container {
+            text-align: center;
+            margin: 25px 0;
+            background: #ffffff;
+            border: 1px solid #f0f0f0;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+
+        .media-container img, 
+        .media-container video {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            border: 1px solid var(--border-color);
+        }
+
+        .side-by-side {
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+            margin: 0 0 25px 0;
+        }
+
+        .side-by-side img {
+            width: 48%;
+            height: auto;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            border: 1px solid #f0f0f0;
+            background: #ffffff;
+            padding: 10px;
+        }
+
+        @media (max-width: 768px) {
+            .side-by-side {
+                flex-direction: column;
+            }
+            .side-by-side img {
+                width: 100%;
+                margin-bottom: 15px;
+            }
+        }
+
+        .image-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            margin: 20px 0;
+        }
+
+        .image-grid img {
+            width: 48%;
+            margin-bottom: 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        
+        .full-width-image {
+            width: 100%;
+            margin: 20px 0;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+
+        .feature-list {
+            background-color: #f1f3f4;
+            border: 1px solid var(--border-color);
+            padding: 20px;
+            border-radius: 6px;
+            column-count: 2;
+            column-gap: 40px;
+        }
+
+        .feature-list li {
+            font-family: 'Consolas', 'Courier New', Courier, monospace;
+            font-size: 12.5px;
+            color: #1a73e8;
+            margin-bottom: 6px;
+            word-break: break-all;
+        }
+        
+        .metric-box {
+            display: flex;
+            align-items: center;
+            justify-content: space-around;
+            background-color: #ffffff;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.02);
+        }
+        
+        .metric {
+            text-align: center;
+        }
+        
+        .metric-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--primary-color);
+            margin-top: 5px;
+        }
+        
+        .metric-label {
+            font-size: 12px;
+            color: var(--text-color);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        /* LaTeX-Style Fraction Formatting Helpers (Left-Aligned Layout Adjustment) */
+        .math-box {
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-left: 4px solid var(--primary-color);
+            padding: 16px;
+            border-radius: 8px;
+            text-align: left;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-size: 16px;
+            font-style: italic;
+            margin: 20px 0;
+            color: var(--text-dark);
+            line-height: 1.8;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+            overflow-x: auto;
+        }
+
+        .formula-name {
+            font-style: normal;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-weight: 600;
+            color: var(--secondary-color);
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .frac {
+            display: inline-block;
+            vertical-align: middle;
+            text-align: center;
+            font-size: 0.95em;
+            margin: 0 4px;
+        }
+
+        .frac > span {
+            display: block;
+            padding: 0 4px;
+        }
+
+        .frac-num {
+            border-bottom: 1px solid var(--text-dark);
+        }
+
+        .frac-den {
+            padding-top: 1px;
+        }
+
+        .timeline {
+            position: relative;
+            padding-left: 20px;
+            margin-top: 25px;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            top: 15px;
+            bottom: 15px;
+            left: 38px;
+            width: 2px;
+            background: #e0e0e0;
+            z-index: 1;
+        }
+
+        .step-card {
+            position: relative;
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 24px;
+            z-index: 2;
+        }
+
+        .step-number {
+            min-width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            background-color: var(--primary-color);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 14px;
+            margin-right: 20px;
+            box-shadow: 0 2px 6px rgba(26, 115, 232, 0.3);
+            flex-shrink: 0;
+        }
+
+        .step-content {
+            background: #fdfdfd;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 18px 22px;
+            width: 100%;
+        }
+
+        .step-title {
+            color: var(--secondary-color);
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        .step-description {
+            font-size: 14px;
+            color: #4a4a4a;
+            margin-bottom: 0;
+            line-height: 1.55;
+        }
+
+        .note-box {
+            background-color: #fff8e1;
+            border: 1px solid #ffc107;
+            padding: 12px 15px;
+            border-radius: 6px;
+            margin-top: 12px;
+            font-size: 13.5px;
+            color: #5c4300;
+        }
+
+        .strategy-card {
+            background: #fdfdfd;
+            border: 1px solid var(--border-color);
+            border-left: 4px solid var(--primary-color);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+        }
+
+        .strategy-title {
+            color: var(--text-dark);
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .strategy-text {
+            font-size: 14.5px;
+            color: #4a4a4a;
+            margin-bottom: 0;
+            line-height: 1.6;
+        }
+
+        .hybrid-badge {
+            display: inline-block;
+            background: #fef7e0;
+            color: #b06000;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            padding: 3px 8px;
+            border-radius: 12px;
+            margin-left: 8px;
+            vertical-align: middle;
+            border: 1px solid #fbeab3;
+        }
+
+        /* Scaled Architecture Diagram CSS Specifics */
+        .diagram-scroll-container {
+            width: 100%;
+            overflow-x: auto;
+            padding: 20px 0 15px 0;
+            zoom: 0.75;
+            -moz-transform: scale(0.75);
+            -moz-transform-origin: left top;
+        }
+
+        .diagram-scroll-container::-webkit-scrollbar {
+            height: 8px;
+        }
+        .diagram-scroll-container::-webkit-scrollbar-thumb {
+            background-color: #cbd0d5;
+            border-radius: 4px;
+        }
+
+        .diagram-wrapper {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 15px;
+            padding-top: 15px;
+            padding-left: 5px;
+            padding-right: 5px;
+        }
+
+        .arch-node {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 195px;
+            height: 100%;
+        }
+
+        .icon-box {
+            width: 75px;
+            height: 75px;
+            background: #fff;
+            border: 1px solid #dadce0;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.06);
+            margin-bottom: 15px;
+            z-index: 2;
+            flex-shrink: 0;
+        }
+
+        .icon-box svg {
+            width: 40px;
+            height: 40px;
+        }
+
+        .node-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #202124;
+            text-align: center;
+            margin-bottom: 12px;
+            height: 34px; 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .node-text {
+            font-size: 12.5px;
+            color: #4a4a4a;
+            background: #f8f9fa;
+            border: 1px solid #e8eaed;
+            border-radius: 8px;
+            padding: 12px;
+            width: 100%;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.02);
+            flex-grow: 1;
+        }
+
+        .node-text ul {
+            margin: 0;
+            padding-left: 16px;
+            list-style-type: square;
+        }
+
+        .node-text li {
+            margin-bottom: 6px;
+            line-height: 1.35;
+        }
+
+        .arrow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 75px; 
+            color: #9aa0a6;
+            font-size: 28px;
+            font-weight: bold;
+            padding: 0 5px;
+        }
+
+        .header-icon-wrapper {
+            background-color: #ffffff;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 44px;
+            height: 44px;
+            flex-shrink: 0;
+        }
+
+        .header-icon-wrapper.round {
+            border-radius: 50%;
+        }
+
+        .header-icon-wrapper svg {
+            width: 28px;
+            height: 28px;
+        }
+
+        .gcp-zone {
+            border: 2px dashed #4285F4;
+            border-radius: 12px;
+            padding: 65px 15px 15px 15px;
+            background-color: rgba(66, 133, 244, 0.03);
+            position: relative;
+            display: flex;
+            flex-direction: row;
+            gap: 15px;
+            align-items: stretch;
+        }
+
+        .iam-header {
+            position: absolute;
+            top: -26px;
+            left: 25px;
+            background: #4285F4;
+            color: #fff;
+            padding: 8px 24px 8px 8px;
+            border-radius: 30px;
+            font-size: 14.5px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            box-shadow: 0 4px 10px rgba(66,133,244,0.4);
+        }
+
+        .sub-zone {
+            border: 1px solid #dadce0;
+            border-radius: 10px;
+            padding: 75px 20px 20px 20px;
+            background-color: #ffffff;
+            position: relative;
+            display: flex;
+            flex-direction: row;
+            gap: 15px;
+            align-items: stretch;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+        }
+
+        .sub-zone-header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background: #f1f3f4;
+            color: #3c4043;
+            padding: 12px 15px;
+            border-top-left-radius: 9px;
+            border-top-right-radius: 9px;
+            font-size: 13.5px;
+            font-weight: 700;
+            border-bottom: 1px solid #dadce0;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            min-height: 56px;
+        }
+
+        .sdlc-zone {
+            border: 2px dashed #9aa0a6;
+            border-radius: 12px;
+            padding: 50px 30px 20px 30px;
+            background-color: rgba(95, 99, 104, 0.03);
+            position: relative;
+            display: flex;
+            flex-direction: row;
+            gap: 25px;
+            align-items: flex-start;
+            justify-content: center;
+            margin-top: 40px;
+            align-self: center;
+        }
+
+        .sdlc-header {
+            position: absolute;
+            top: -16px;
+            left: 25px;
+            background: #5f6368;
+            color: #fff;
+            padding: 6px 20px;
+            border-radius: 20px;
+            font-size: 13.5px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        }
+
+        .dag-scroll-container {
+            width: 100%;
+            overflow-x: auto;
+            margin: 25px 0;
+            background: #ffffff;
+            border: 1px solid #f0f0f0;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+            text-align: center;
+        }
+
+        .dag-scroll-container img {
+            min-width: 2400px;
+            max-width: none;
+            height: auto;
+            border-radius: 4px;
+            display: block;
+            margin: 0 auto;
+        }
+
+        .footer {
+            margin-top: 45px;
+            text-align: center;
+            font-size: 12px;
+            color: #80868b;
+            border-top: 1px solid var(--border-color);
+            padding-top: 18px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+
+    <!-- Executive Summary -->
+    <section id="executive-summary">
+        <div class="header-title">
+            <h1>Executive Summary</h1>
+        </div>
+
+        <p>This project leverages the Kaggle Instacart Market Basket Analysis dataset to build a machine learning-powered recommendation engine designed to populate a personalized, 5-slot reorder widget during active shopping sessions. Delivering relevant product suggestions drives profit lift through three key mechanisms: increasing Average Order Value (AOV) by encouraging supplementary purchases, boosting conversion rates via reduced friction, and mitigating customer churn through saved time and increased engagement.</p>
+        
+        <p>The champion model—a Rank Reciprocal Fusion (RRF) ensemble of all base models (XGBoost Ranker & Classifier + LightGBM Ranker & Classifier)—achieved a 0.3674 Recall@5 on unseen test data. While this may seem modest, predicting nearly 37% of a customer's reorders within just five slots is powerful. The model's value becomes more evident when compared to a heuristic baseline (predicting the first five items from the prior cart), providing a 39.3% lift over the 0.2638 recall@5 for the heuristic approach.</p>
+        
+        <p>Translating this performance into financial impact—using public Instacart SEC filings for baseline assumptions—this architecture generates an estimated $118M Annual Profit Lift compared to a "no widget" scenario, and $33.5M Annual Profit Lift over the heuristic approach.</p>
+
+        <div class="ai-callout">
+            <div class="ai-callout-title">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                    <path d="M19 3l-1.5 3.5L14 8l3.5 1.5L19 13l1.5-3.5L24 8l-3.5-1.5L19 3zm-7.5 3L8 0 4.5 6 0 8l4.5 2L8 16l3.5-6L16 8l-4.5-2z"/>
+                </svg>
+                AI-Accelerated Development & Human-in-the-Loop Workflow
+            </div>
+            <p>This project showcases a modern approach, strategically leveraging Generative AI to maximize productivity without sacrificing quality. AI tools were utilized across the development lifecycle to accelerate brainstorming, code generation, and documentation drafting. Crucially, a human-in-the-loop methodology was maintained at every step. Generative AI provided foundational code structures and debugging assistance, while manual oversight was applied to optimize existing code, identify architecture risks, and fill technical gaps—ensuring the quality of the final architecture and documentation.</p>
+        </div>
+
+        <div class="disclaimer-callout">
+            <strong>⚠️ Portfolio Context & Disclaimer:</strong> Please note that these financial projections are intended solely to demonstrate business analytics and ROI estimation skillsets for the purpose of this portfolio project. In reality, Instacart's massive scale and success are largely driven by the fact that they have already implemented highly sophisticated recommendation engines. Therefore, this analysis does not represent a true real-world incremental impact for Instacart today, but rather illustrates the theoretical value of deploying such machine learning models from a hypothetical zero-baseline.
+        </div>
+        
+        <h2>Project Navigator</h2>
+        <ul>
+            <li><a href="#system-architecture"><strong>System Architecture:</strong></a> Details the end-to-end architecture, from the Kaggle source data, through the GCP Platform, to Power BI. It utilizes BigQuery for orchestration of data transformation and feature engineering, Agent Platform for EDA and modeling, and Power BI for business intelligence insights.</li>
+            <li><a href="#environment-setup"><strong>Environment Setup & Provisioning:</strong></a> Provides instructions for configuring the GCP ecosystem and handling Kaggle API data ingestion into BigQuery. It also covers deploying a GPU-accelerated Agent Platform Workbench instance with automated multi-region fallbacks.</li>
+            <li><a href="#execution-order"><strong>Execution Order:</strong></a> Outlines the sequential nine-step execution workflow.</li>
+            <li><a href="#data-sources"><strong>Data Sources:</strong></a> Explains the underlying Kaggle Instacart Market Basket Analysis dataset and its limitations. It specifically notes the absence of dates/timestamps, and consequently, the inability to generate global features (e.g., popular/trending products, global average time between product reorders) without introducing data leakage.</li>
+            <li><a href="#preliminary-eda"><strong>Preliminary EDA:</strong></a> Highlights foundational behavioral insights, such as long-tail product sparsity, cyclical order patterns, and user exploratory ratios. These insights directly inform the feature engineering strategy.</li>
+            <li><a href="#bigquery-pipeline"><strong>BigQuery Dataform Pipeline & Feature Engineering:</strong></a> Describes the modular medallion ELT architecture (Bronze to Gold) executed in BigQuery. It outlines the "Anchor Order" strategy for leakage prevention and the data quality assertions applied to the 39 generated features.</li>
+            <li><a href="#feature-eda"><strong>Feature EDA & Screening:</strong></a> Details the secondary Exploratory Data Analysis and feature screening process. This section highlights the use of boxplots and distribution visualizations, alongside bivariate analysis, to analyze feature distributions and the relationship between features and the target. It also details the cumulative gain strategy employed to select the final features for machine learning.</li>
+            <li><a href="#ml-modeling"><strong>Machine Learning Modeling & Ensembling:</strong></a> Details the 3-Fold Stratified Group K-Fold cross-validation strategy, Bayesian hyperparameter tuning via Optuna, experiment tracking via MLflow, and the blending of LightGBM and XGBoost models using Rank Reciprocal Fusion (RRF).</li>
+            <li><a href="#model-evaluation"><strong>Model Evaluation:</strong></a> Breaks down the primary metrics (Recall@5, NDCG@5, Precision@5, F1@5) used to evaluate the models. It compares the machine learning ensembles against a prior-cart heuristic baseline, discusses model selection using Recall@5 on the validation split, and verifies test generalization.</li>
+            <li><a href="#financial-impact"><strong>Financial Impact Analysis:</strong></a> Evaluates the projected financial impact of the champion model on the unseen test data. It highlights an estimated annual profit lift of ~$118M compared to a "no widget" baseline and $33.5M over the heuristic baseline, revealing that churn reduction serves as the most significant driver of this increase.</li>
+            <li><a href="#power-bi-dashboard"><strong>Power BI Business Intelligence Dashboard:</strong></a> Details the interactive Power BI dashboard built using the .pbip format to support CI/CD workflows, featuring model evaluation, feature importance interpretability, financial sensitivity analysis, and a star schema semantic data model.</li>
+            <li><a href="#mlops-blueprint"><strong>Path to Production: MLOps Blueprint:</strong></a> Details the MLOps engineering framework, contrasting current implementation (GitHub version control, Dataform ELT, MLflow tracking, automated shell training, and BigQuery feature storage) with target production architecture (CI/CD GitHub Actions, Agent Platform Feature Store, Agent Platform Pipelines CT orchestrations, and drift monitoring).</li>
+            <li><a href="#cold-start-strategy"><strong>Cold Start Strategy:</strong></a> Outlines the dynamic, heuristic-based fallback logic designed to populate the 5-slot widget for new or infrequent users (fewer than 4 prior orders).</li>
+            <li><a href="#next-steps"><strong>Next Steps & Opportunities:</strong></a> Outlines prerequisites before a full production rollout, including automated data ingestion via Airflow, A/B testing against a control group, latency and load testing, and establishing CI/CD and retraining pipelines. It also identifies opportunities to enhance performance, such as widget UI expansion (e.g., a Top 10+ carousel), accessing timestamps for global features, and incorporating real-time "in-session" context.</li>
+        </ul>
+    </section>
+
+    <!-- System Architecture -->
+    <section id="system-architecture">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>System Architecture</h1>
+        </div>
+
+        <p class="intro-text">
+            The diagram below illustrates the end-to-end architecture of the Instacart Reorder Engine. Data flows horizontally from the initial Kaggle source data into Google Cloud Storage, then downstream to BigQuery where data pipelines are executed. Exploratory analysis, ML modeling, and model evaluation occur in Agent Platform. The results are then streamed to Big Query to feed business intelligence insights displayed in a Power BI Dashboard.
+        </p>
+
+        <div class="diagram-scroll-container">
+            <div style="display: flex; flex-direction: column; min-width: 2650px;">
+                <div class="diagram-wrapper">
+                    <div class="arch-node">
+                        <div class="icon-box" style="border-bottom: 3px solid #20BEFF;">
+                            <svg viewBox="0 0 24 24" fill="#20BEFF">
+                                <path d="M18.8 23.8c-.02.09-.11.14-.28.14h-3.14c-.19 0-.35-.08-.49-.25l-5.18-6.59-1.45 1.37v5.11c0 .24-.12.35-.35.35H5.5c-.23 0-.35-.12-.35-.35V.35c0-.23.12-.35.35-.35h2.43c.23 0 .35.12.35.35v15.34l6.22-6.54c.14-.16.3-.25.49-.25h3.22c.16 0 .26.05.28.14.02.07 0 .14-.07.21l-5.46 5.37 5.92 8.95c.07.07.09.14.07.23z"/>
+                            </svg>
+                        </div>
+                        <div class="node-title">Kaggle Source Data</div>
+                        <div class="node-text">
+                            <ul>
+                                <li>Instacart Market Basket Analysis</li>
+                                <li><a href="https://www.kaggle.com/datasets/psparks/instacart-market-basket-analysis" target="_blank" style="color: #1a73e8; text-decoration: none; font-weight: 500;">View Dataset</a></li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="arrow">➔</div>
+
+                    <div class="gcp-zone">
+                        <div class="iam-header">
+                            <div class="header-icon-wrapper round">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+                                    <path d="M40.728 20.488l2.05.035 5.57-5.57.27-2.36C44.2 8.657 38.367 6.26 31.993 6.26c-11.54 0-21.28 7.852-24.163 18.488.608-.424 1.908-.106 1.908-.106l11.13-1.83s.572-.947.862-.9A13.88 13.88 0 0 1 32 17.375c3.3.007 6.34 1.173 8.728 3.102z" fill="#ea4335"/>
+                                    <path d="M56.17 24.77c-1.293-4.77-3.958-8.982-7.555-12.177l-7.887 7.887c3.16 2.55 5.187 6.452 5.187 10.82v1.392c3.837 0 6.954 3.124 6.954 6.954 0 3.837-3.124 6.954-6.954 6.954H32.007L30.615 48v8.346l1.392 1.385h13.908A18.11 18.11 0 0 0 64 39.647c-.007-6.155-3.1-11.6-7.83-14.876z" fill="#4285f4"/>
+                                    <path d="M18.085 57.74h13.9V46.6h-13.9a6.89 6.89 0 0 1-2.862-.622l-2.007.615-5.57 5.57-.488 1.88a18 18 0 0 0 10.926 3.689z" fill="#34a853"/>
+                                    <path d="M18.085 21.57A18.11 18.11 0 0 0 0 39.654c0 5.873 2.813 11.095 7.166 14.403l8.064-8.064a6.96 6.96 0 0 1-4.099-6.339c0-3.837 3.124-6.954 6.954-6.954 2.82 0 5.244 1.7 6.34 4.1l8.064-8.064c-3.307-4.353-8.53-7.166-14.403-7.166z" fill="#fbbc05"/>
+                                </svg>
+                            </div>
+                            Google Cloud Platform (IAM Secured)
+                        </div>
+
+                        <div class="sub-zone">
+                            <div class="sub-zone-header">Data Warehouse & Pipeline Orchestration</div>
+                            <div class="arch-node" style="padding-top: 25px;">
+                                <div class="icon-box" style="border-bottom: 3px solid #4285F4;">
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" style="width: 40px; height: 40px;">
+                                        <path fill="#34a853" d="M442,277.9H70c-8.8,0-16,7.2-16,16v148.1c0,8.8,7.2,16,16,16h107.2c1.5.5,3.1.7,4.8.7s3.3-.3,4.8-.7h255.2c8.8,0,16-7.2,16-16v-148.1c0-8.8-7.2-16-16-16ZM86,309.9h80v116.1h-80v-116.1ZM426,425.9h-228v-116.1h228v116.1Z"/>
+                                        <path fill="#fbbc04" d="M442,54H70c-8.8,0-16,7.2-16,16v148.8c0,8.8,7.2,16,16,16h372c8.8,0,16-7.2,16-16V70c0-8.8-7.2-16-16-16ZM86,86h80v116.8h-80v-116.8ZM426,202.8h-228v-116.8h228v116.8Z"/>
+                                        <path fill="#ea4335" d="M442,234.8h-16V86H54v-16c0-8.8,7.2,16,16-16h372c8.8,0,16-7.2,16-16v148.8c0,8.8-7.2,16-16,16Z"/>
+                                        <path fill="#4285f4" d="M442,457.9h-16v-148.1H54v-16c0-8.8,7.2,16,16-16h372c8.8,0,16-7.2,16-16v148.1c0,8.8-7.2,16-16,16Z"/>
+                                        <circle fill="#ea4335" cx="349" cy="144.4" r="37"/>
+                                        <circle fill="#4285f4" cx="349" cy="367.9" r="37"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Cloud Storage</div>
+                                <div class="node-text">
+                                    <ul><li>Raw Kaggle dataset landing</li></ul>
+                                </div>
+                            </div>
+
+                            <div class="arrow">➔</div>
+
+                            <div class="arch-node" style="padding-top: 25px;">
+                                <div class="icon-box" style="border-bottom: 3px solid #4285F4;">
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" style="width: 44px; height: 44px;">
+                                        <path fill="#34a853" d="M311.9,418.9c-8.8,0-16-7.2-16-16v-145.8c0-8.8,7.2-16,16-16s16,7.2,16,16v145.8c0,8.8-7.2,16-16,16h0Z"/>
+                                        <path fill="#34a853" d="M147.6,418.9c-8.8,0-16-7.2-16-16v-200.5c0-8.8,7.2-16,16-16s16,7.2,16,16v200.5c0,8.8-7.2,16-16,16Z"/>
+                                        <path fill="#34a853" d="M229.8,437.4c-8.8,0-16-7.2-16-16V147.6c0-8.8,7.2-16,16-16s16,7.2,16,16v273.7c0,8.8-7.2,16-16,16h0Z"/>
+                                        <path fill="#fbbc04" d="M229.8,437.4c-114.5,0-207.6-93.1-207.6-207.6h32c0,96.8,78.8,175.6,175.6,175.6s175.6-78.8,175.6-175.6h32c0,114.5-93.1,207.6-207.6,207.6h0Z"/>
+                                        <path fill="#ea4335" d="M437.4,229.8h-32c0-96.8-78.8-175.6-175.6-175.6S54.1,132.9,54.1,229.8H22.1c0-114.5,93.2-207.7,207.7-207.7s207.6,93.1,207.6,207.6h0Z"/>
+                                        <path fill="#4285f4" d="M487.4,464.8l-100-100c32.3-37.6,49.9-85,49.9-135.1s-21.6-107.6-60.8-146.8l-22.6,22.6c33.2,33.2,51.4,77.3,51.4,124.2s-18.3,90.9-51.5,124.1h0c-5,5-7.5,7-11.8,10.8l122.8,122.8c3.1,3.1,7.2,4.7,11.3,4.7h0c4.1,0,8.2-1.6,11.3-4.7,6.2-6.2,6.2-16.4,0-22.6h0Z"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Google BigQuery</div>
+                                <div class="node-text">
+                                    <ul>
+                                        <li>dbt / Dataform Pipeline</li>
+                                        <li>Data Cleansing</li>
+                                        <li>Feature Engineering</li>
+                                        <li>Automated assertions</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="arrow">➔</div>
+
+                        <div class="sub-zone" style="border-top: 3px solid #1a73e8;">
+                            <div class="sub-zone-header" style="background: #e8f0fe; color: #1a73e8; border-bottom: none;">
+                                <div class="header-icon-wrapper">
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+                                        <path d="M128,244.99c-8.84,0-16-7.16-16-16v-95.97c0-8.84,7.16-16,16-16s16,7.16,16,16v95.97c0,8.84-7.16,16-16,16Z" fill="#ea4335"/>
+                                        <path d="M256,458c-2.98,0-5.97-.83-8.59-2.5l-186-122c-7.46-4.74-9.65-14.63-4.91-22.09,4.75-7.46,14.64-9.65,22.09-4.91l177.41,116.53,177.41-116.53c7.45-4.74,17.34-2.55,22.09,4.91,4.74,7.46,2.55,17.34-4.91,22.09l-186,122c-2.62,1.67-5.61,2.5-8.59,2.5Z" fill="#fbbc04"/>
+                                        <path d="M256,388.03c-8.84,0-16-7.16-16-16v-73.06c0-8.84,7.16-16,16-16s16,7.16,16,16v73.06c0,8.84-7.16,16-16,16Z" fill="#34a853"/>
+                                        <circle cx="128" cy="70" r="16" fill="#ea4335"/>
+                                        <circle cx="128" cy="292" r="16" fill="#ea4335"/>
+                                        <path d="M384.23,308.01c-8.82,0-15.98-7.14-16-15.97l-.23-94.01c-.02-8.84,7.13-16.02,15.97-16.03h.04c8.82,0,15.98,7.14,16,15.97l.23,94.01c.02,8.84-7.13,16.02-15.97,16.03h-.04Z" fill="#4285f4"/>
+                                        <circle cx="384" cy="70" r="16" fill="#4285f4"/>
+                                        <circle cx="384" cy="134" r="16" fill="#4285f4"/>
+                                        <path d="M320,220.36c-8.84,0-16-7.16-16-16v-103.02c0-8.84,7.16-16,16-16s16,7.16,16,16v103.02c0,8.84-7.16,16-16,16Z" fill="#fbbc04"/>
+                                        <circle cx="256" cy="171" r="16" fill="#34a853"/>
+                                        <circle cx="256" cy="235" r="16" fill="#34a853"/>
+                                        <circle cx="320" cy="265" r="16" fill="#fbbc04"/>
+                                        <circle cx="320" cy="329" r="16" fill="#fbbc04"/>
+                                        <path d="M192,217.36c-8.84,0-16-7.16-16-16v-100.02c0-8.84,7.16-16,16-16s16,7.16,16,16v100.02c0,8.84-7.16,16-16,16Z" fill="#fbbc04"/>
+                                        <circle cx="192" cy="265" r="16" fill="#fbbc04"/>
+                                        <circle cx="192" cy="329" r="16" fill="#fbbc04"/>
+                                    </svg>
+                                </div>
+                                <span style="font-weight: 700; font-size: 15px;">Agent Platform</span>
+                                <span style="font-weight: normal; font-size: 12px; color: #5f6368;">(16 vCPU Compute | 64GB RAM | 1x NVIDIA L4 GPU)</span>
+                            </div>
+                            
+                            <div class="arch-node">
+                                <div class="icon-box" style="border-bottom: 3px solid #00ACC1;">
+                                    <svg viewBox="0 0 24 24" fill="#00ACC1" style="width: 40px; height: 40px;">
+                                        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Exploratory Data Analysis</div>
+                                <div class="node-text">
+                                    <ul>
+                                        <li><strong>Preliminary EDA:</strong> long-tail product sparsity, cyclical order patterns, & user exploratory ratios</li>
+                                        <li><strong>Feature EDA:</strong> Bivariate analysis & feature distributions</li>
+                                        <li><strong>Feature Screening:</strong> Cumulative gain feature pruning</li>
+                                    </ul>
+                                </div>
+                            </div>
+
+                            <div class="arrow">➔</div>
+
+                            <div class="arch-node">
+                                <div class="icon-box" style="border-bottom: 3px solid #34A853;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="#34A853" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="width: 40px; height: 40px;">
+                                        <polygon points="12 2 2 7 12 12 22 7 12 2" fill="#e6f4ea"/>
+                                        <polyline points="2 12 12 17 22 12"/>
+                                        <polyline points="2 17 12 22 22 17"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Base Models</div>
+                                <div class="node-text">
+                                    <ul>
+                                        <li>LightGBM Ranker & Classifier</li>
+                                        <li>XGBoost Ranker & Classifier</li>
+                                        <li>Train/Val, Validation, Test Split</li>
+                                        <li>3-Fold Cross Validation</li>
+                                        <li>Stratified GroupKFold Sampling</li>
+                                    </ul>
+                                </div>
+                            </div>
+
+                            <div class="arrow">➔</div>
+
+                            <div class="arch-node">
+                                <div class="icon-box" style="border-bottom: 3px solid #FBBC04;">
+                                    <svg viewBox="0 0 24 24" fill="#FBBC04" style="width: 40px; height: 40px;">
+                                        <path d="M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Ensembling</div>
+                                <div class="node-text">
+                                    <ul>
+                                        <li>Rank Reciprocal Fusion (RRF)</li>
+                                        <li>Ensemble Weight Optimization via Optuna</li>
+                                        <li>Exports final <code>.pkl</code> to Cloud Storage</li>
+                                    </ul>
+                                </div>
+                            </div>
+
+                            <div class="arrow">➔</div>
+
+                            <div class="arch-node">
+                                <div class="icon-box" style="border-bottom: 3px solid #8E24AA;">
+                                    <svg viewBox="0 0 24 24" fill="#8E24AA" style="width: 40px; height: 40px;">
+                                        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 14l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Evaluation</div>
+                                <div class="node-text">
+                                    <ul>
+                                        <li><strong>Evaluation Metrics:</strong> Recall@5, NDCG@5, Precision@5, F1@5</li>
+                                        <li><strong>Tuning & Ensembling:</strong> NDCG@5</li>
+                                        <li><strong>Champion Selection:</strong> Recall@5</li>
+                                        <li><strong>Feature Importance:</strong> SHAP (Mean Absolute Importance & Beeswarm)</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="arrow">➔</div>
+
+                        <div class="sub-zone">
+                            <div class="sub-zone-header">Results Storage</div>
+                            <div class="arch-node" style="padding-top: 25px;">
+                                <div class="icon-box" style="border-bottom: 3px solid #4285F4;">
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" style="width: 40px; height: 40px;">
+                                        <path fill="#34a853" d="M442,277.9H70c-8.8,0-16,7.2-16,16v148.1c0,8.8,7.2,16,16,16h107.2c1.5.5,3.1.7,4.8.7s3.3-.3,4.8-.7h255.2c8.8,0,16-7.2,16-16v-148.1c0-8.8-7.2-16-16-16ZM86,309.9h80v116.1h-80v-116.1ZM426,425.9h-228v-116.1h228v116.1Z"/>
+                                        <path fill="#fbbc04" d="M442,54H70c-8.8,0-16,7.2-16,16v148.8c0,8.8,7.2,16,16,16h372c8.8,0,16-7.2,16-16V70c0-8.8-7.2-16-16-16ZM86,86h80v116.8h-80v-116.8ZM426,202.8h-228v-116.8h228v116.8Z"/>
+                                        <path fill="#ea4335" d="M442,234.8h-16V86H54v-16c0-8.8,7.2,16,16-16h372c8.8,0,16-7.2,16-16v148.8c0,8.8-7.2,16-16,16Z"/>
+                                        <path fill="#4285f4" d="M442,457.9h-16v-148.1H54v-16c0-8.8,7.2,16,16-16h372c8.8,0,16-7.2,16-16v148.1c0,8.8-7.2,16-16,16Z"/>
+                                        <circle fill="#ea4335" cx="349" cy="144.4" r="37"/>
+                                        <circle fill="#4285f4" cx="349" cy="367.9" r="37"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Cloud Storage</div>
+                                <div class="node-text">
+                                    <ul><li>Stores base ranker & classifier model <code>.pkl</code> files</li></ul>
+                                </div>
+                            </div>
+
+                            <div class="arch-node" style="padding-top: 25px;">
+                                <div class="icon-box" style="border-bottom: 3px solid #4285F4;">
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" style="width: 44px; height: 44px;">
+                                        <path fill="#34a853" d="M311.9,418.9c-8.8,0-16-7.2-16-16v-145.8c0-8.8,7.2-16,16-16s16,7.2,16,16v145.8c0,8.8-7.2,16-16,16h0Z"/>
+                                        <path fill="#34a853" d="M147.6,418.9c-8.8,0-16-7.2-16-16v-200.5c0-8.8,7.2-16,16-16s16,7.2,16,16v200.5c0,8.8-7.2,16-16,16Z"/>
+                                        <path fill="#34a853" d="M229.8,437.4c-8.8,0-16-7.2-16-16V147.6c0-8.8,7.2-16,16-16s16,7.2,16,16v273.7c0,8.8-7.2,16-16,16h0Z"/>
+                                        <path fill="#fbbc04" d="M229.8,437.4c-114.5,0-207.6-93.1-207.6-207.6h32c0,96.8,78.8,175.6,175.6,175.6s175.6-78.8,175.6-175.6h32c0,114.5-93.1,207.6-207.6,207.6h0Z"/>
+                                        <path fill="#ea4335" d="M437.4,229.8h-32c0-96.8-78.8-175.6-175.6-175.6S54.1,132.9,54.1,229.8H22.1c0-114.5,93.2-207.7,207.7-207.7s207.6,93.1,207.6,207.6h0Z"/>
+                                        <path fill="#4285f4" d="M487.4,464.8l-100-100c32.3-37.6,49.9-85,49.9-135.1s-21.6-107.6-60.8-146.8l-22.6,22.6c33.2,33.2,51.4,77.3,51.4,124.2s-18.3,90.9-51.5,124.1h0c-5,5-7.5,7-11.8,10.8l122.8,122.8c3.1,3.1,7.2,4.7,11.3,4.7h0c4.1,0,8.2-1.6,11.3-4.7,6.2-6.2,6.2-16.4,0-22.6h0Z"/>
+                                    </svg>
+                                </div>
+                                <div class="node-title">Google BigQuery</div>
+                                <div class="node-text">
+                                    <ul>
+                                        <li>Model evaluation metrics</li>
+                                        <li>SHAP mean absolute importance bar plot data</li>
+                                        <li>Power BI beeswarm plot data</li>
+                                        <li>Power BI dimension tables</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="arrow">➔</div>
+
+                    <div class="sub-zone">
+                        <div class="sub-zone-header">Business Intelligence</div>
+                        <div class="arch-node" style="padding-top: 25px;">
+                            <div class="icon-box" style="border-bottom: 3px solid #F2C811;">
+                                <svg viewBox="0 0 630 630" style="width: 40px; height: 40px;" xmlns="http://www.w3.org/2000/svg">
+                                    <defs>
+                                        <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="pbi-linearGradient-1">
+                                            <stop stop-color="#EBBB14" offset="0%"></stop>
+                                            <stop stop-color="#B25400" offset="100%"></stop>
+                                        </linearGradient>
+                                        <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="pbi-linearGradient-2">
+                                            <stop stop-color="#F9E583" offset="0%"></stop>
+                                            <stop stop-color="#DE9800" offset="100%"></stop>
+                                        </linearGradient>
+                                        <path d="M346,604 L346,630 L320,630 L153,630 C138.640597,630 127,618.359403 127,604 L127,183 C127,168.640597 138.640597,157 153,157 L320,157 C334.359403,157 346,168.640597 346,183 L346,604 Z" id="pbi-path-3"></path>
+                                        <filter x="-9.1%" y="-6.3%" width="136.5%" height="116.9%" filterUnits="objectBoundingBox" id="pbi-filter-4">
+                                            <feOffset dx="20" dy="10" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset>
+                                            <feGaussianBlur stdDeviation="10" in="shadowOffsetOuter1" result="shadowBlurOuter1"></feGaussianBlur>
+                                            <feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.0530211976 0" type="matrix" in="shadowBlurOuter1"></feColorMatrix>
+                                        </filter>
+                                        <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="pbi-linearGradient-5">
+                                            <stop stop-color="#F9E68B" offset="0%"></stop>
+                                            <stop stop-color="#F3CD32" offset="100%"></stop>
+                                        </linearGradient>
+                                    </defs>
+                                    <g stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+                                        <g transform="translate(77.500000, 0.000000)">
+                                            <rect fill="url(#pbi-linearGradient-1)" x="256" y="0" width="219" height="630" rx="26"></rect>
+                                            <g>
+                                                <use fill="black" fill-opacity="1" filter="url(#pbi-filter-4)" href="#pbi-path-3"></use>
+                                                <use fill="url(#pbi-linearGradient-2)" fill-rule="evenodd" href="#pbi-path-3"></use>
+                                            </g>
+                                            <path d="M219,604 L219,630 L193,630 L26,630 C11.6405965,630 1.75851975e-15,618.359403 0,604 L0,341 C-1.75851975e-15,326.640597 11.6405965,315 26,315 L193,315 C207.359403,315 219,326.640597 219,341 L219,604 Z" fill="url(#pbi-linearGradient-5)"></path>
+                                        </g>
+                                    </g>
+                                </svg>
+                            </div>
+                            <div class="node-title">Power BI</div>
+                            <div class="node-text">
+                                <ul>
+                                    <li>.pbip CI/CD Format & .pbix format</li>
+                                    <li>Champion model selection</li>
+                                    <li>Model Evaluation Metrics</li>
+                                    <li>SHAP feature importance visualization</li>
+                                    <li>Financial Impact Analysis</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sdlc-zone">
+                    <div class="sdlc-header">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                            <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+                        </svg>
+                        SDLC, Infrastructure Provisioning, & Security
+                    </div>
+
+                    <div class="arch-node" style="height: auto;">
+                        <div class="icon-box" style="border-bottom: 3px solid #24292e;">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50" width="40px" height="40px" fill="#24292e">
+                                <path d="M17.791,46.836C18.502,46.53,19,45.823,19,45v-5.4c0-0.197,0.016-0.402,0.041-0.61C19.027,38.994,19.014,38.997,19,39 c0,0-3,0-3.6,0c-1.5,0-2.8-0.6-3.4-1.8c-0.7-1.3-1-3.5-2.8-4.7C8.9,32.3,9.1,32,9.7,32c0.6,0.1,1.9,0.9,2.7,2c0.9,1.1,1.8,2,3.4,2 c2.487,0,3.82-0.125,4.622-0.555C21.356,34.056,22.649,33,24,33v-0.025c-5.668-0.182-9.289-2.066-10.975-4.975 c-3.665,0.042-6.856,0.405-8.677,0.707c-0.058-0.327-0.108-0.656-0.151-0.987c1.797-0.296,4.843-0.647,8.345-0.714 c-0.112-0.276-0.209-0.559-0.291-0.849c-3.511-0.178-6.541-0.039-8.187,0.097c-0.02-0.332-0.047-0.663-0.051-0.999 c1.649-0.135,4.597-0.27,8.018-0.111c-0.079-0.5-0.13-1.011-0.13-1.543c0-1.7,0.6-3.5,1.7-5c-0.5-1.7-1.2-5.3,0.2-6.6 c2.7,0,4.6,1.3,5.5,2.1C21,13.4,22.9,13,25,13s4,0.4,5.6,1.1c0.9-0.8,2.8-2.1,5.5-2.1c1.5,1.4,0.7,5,0.2,6.6c1.1,1.5,1.7,3.2,1.6,5 c0,0.484-0.045,0.951-0.11,1.409c3.499-0.172,6.527-0.034,8.204,0.102c-0.002,0.337-0.033,0.666-0.051,0.999 c-1.671-0.138-4.775-0.28-8.359-0.089c-0.089,0.336-0.197,0.663-0.325,0.98c3.546,0.046,6.665,0.389,8.548,0.689 c-0.043,0.332-0.093,0.661-0.151,0.987c-1.912-0.306-5.171-0.664-8.879-0.682C35.112,30.873,31.557,32.75,26,32.969V33 c2.6,0,5,3.9,5,6.6V45c0,0.823,0.498,1.53,1.209,1.836C41.37,43.804,48,35.164,48,25C48,12.318,37.683,2,25,2S2,12.318,2,25 C2,35.164,8.63,43.804,17.791,46.836z"/>
+                            </svg>
+                        </div>
+                        <div class="node-title" style="margin-bottom: 6px;">GitHub Repository</div>
+                        <div style="font-size: 13px; color: #5f6368; text-align: center; line-height: 1.4;">(Version Control & CI/CD Blueprint)</div>
+                    </div>
+
+                    <div class="arch-node" style="height: auto;">
+                        <div class="icon-box" style="border-bottom: 3px solid #4285f4;">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="40px" height="40px" viewBox="0 0 24 24">
+                                <path fill="#aecbfa" d="M20.2,2.67H3.8A1.79,1.79,0,0,0,2,4.47v10.8a1.79,1.79,0,0,0,1.8,1.8H10v2.26H8v2h8v-2H14V17.07h6.2a1.79,1.79,0,0,0,1.8-1.8V4.47A1.79,1.79,0,0,0,20.2,2.67Zm-3.53,12h-4v-2h4Zm0-4.54L7.6,13.93V12.07l6.53-2.8L7.6,6.4V4.53l9.07,3.74Z"/>
+                                <polygon fill="#4285f4" points="10 17.07 14 17.07 14 19.33 10 19.33 10 17.07"/>
+                                <rect fill="#669df6" x="8" y="19.33" width="8" height="2"/>
+                            </svg>
+                        </div>
+                        <div class="node-title" style="margin-bottom: 6px;">Google Cloud Shell</div>
+                        <div style="font-size: 13px; color: #5f6368; text-align: center; line-height: 1.4;">(VM Setup & Provisioning)</div>
+                    </div>
+
+                    <div class="arch-node" style="height: auto;">
+                        <div class="icon-box" style="border-bottom: 3px solid #ea4335;">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="40px" height="40px">
+                                <path fill="#669df6" fill-rule="evenodd" d="M12,2,3.79,5.42v5.63c0,5.06,3.5,9.8,8.21,11,4.71-1.15,8.21-5.89,8.21-10.95V5.42Zm0,3.79a2.63,2.63,0,1,1-1.86.77A2.63,2.63,0,0,1,12,5.79Zm4.11,11.15A8.64,8.64,0,1,1,12,19.87a8.64,8.64,0,0,1-4.11-2.93V14.69c0-1.67,2.74-2.52,4.11-2.52s4.11.85,4.11,2.52v2.25Z"/>
+                                <path fill="#4285f4" fill-rule="evenodd" d="M12,2V5.79a2.63,2.63,0,1,1,0,5.26v1.12c1.37,0,4.11.85,4.11,2.52v2.25A8.64,8.64,0,0,1,12,19.87V22c4.71-1.15,8.21-5.89,8.21-10.95V5.42Z"/>
+                            </svg>
+                        </div>
+                        <div class="node-title" style="margin-bottom: 6px;">IAM Roles & Permissions</div>
+                        <div style="font-size: 13px; color: #5f6368; text-align: center; line-height: 1.4;">(Role-Based Access Control)</div>
+                    </div>
+
+                    <div class="arch-node" style="height: auto;">
+                        <div class="icon-box" style="border-bottom: 3px solid #fbbc04;">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="40px" height="40px" viewBox="0 0 24 24" fill="#fbbc04">
+                                <path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/>
+                            </svg>
+                        </div>
+                        <div class="node-title" style="margin-bottom: 6px;">Google-Managed Encryption Keys</div>
+                        <div style="font-size: 13px; color: #5f6368; text-align: center; line-height: 1.4;">(GMEK Encryption)</div>
+                    </div>
+
+                    <div class="arch-node" style="height: auto;">
+                        <div class="icon-box" style="border-bottom: 3px solid #4285F4;">
+                           <svg width="24px" height="24px" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+
+    <g stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+
+        <g transform="translate(2.000000, 6.000000)" fill="#4285F4" fill-rule="nonzero">
+
+            <path d="M20,9.41469125e-14 L20,11.8867925 L16.0377358,11.8867925 C15.9335312,11.8867925 15.8490566,11.8023179 15.8490566,11.6981132 L15.8490566,10.5660377 C15.8490566,10.4618331 15.9335312,10.3773585 16.0377358,10.3773585 L18.4900566,10.377 L18.4900566,1.509 L16.0377358,1.50943396 C15.9335312,1.50943396 15.8490566,1.42495939 15.8490566,1.32075472 L15.8490566,0.188679245 C15.8490566,0.0844745755 15.9335312,9.41105434e-14 16.0377358,9.41469125e-14 L20,9.41469125e-14 Z M4.309101,9.41469125e-14 C4.41330567,9.3877869e-14 4.49778024,0.0844745755 4.49778024,0.188679245 L4.49778024,1.32075472 C4.49778024,1.42495939 4.41330567,1.50943396 4.309101,1.50943396 L1.509,1.509 L1.509,10.377 L4.29245283,10.3773585 C4.3966575,10.3773585 4.48113208,10.4618331 4.48113208,10.5660377 L4.48113208,11.6981132 C4.48113208,11.8023179 4.3966575,11.8867925 4.29245283,11.8867925 L2.14050999e-13,11.8867925 L2.14050999e-13,9.41469125e-14 L4.309101,9.41469125e-14 Z M15.4271098,3.86792453 L15.4271098,5.3240566 L15.4879305,5.34852941 L16.8381494,4.87130966 L17.1179245,5.69114872 L15.7555414,6.15613208 L15.719049,6.25402331 L16.6556874,7.51437292 L15.9501676,8.02830189 L15.0378575,6.76795228 L14.9527085,6.76795228 L14.0403984,8.02830189 L13.3348786,7.51437292 L14.2593529,6.25402331 L14.2350246,6.15613208 L12.8726415,5.69114872 L13.1524166,4.87130966 L14.4904714,5.34852941 L14.5634562,5.3240566 L14.5634562,3.86792453 L15.4271098,3.86792453 Z M5.19597773,3.86792453 L5.19597773,5.30963945 L5.2567984,5.33386996 L6.60701735,4.86137515 L6.88679245,5.673097 L5.52440936,6.13347656 L5.48791696,6.23039857 L6.42455533,7.47826947 L5.71903552,7.98711003 L4.80672541,6.73923913 L4.72157647,6.73923913 L3.80926637,7.98711003 L3.10374655,7.47826947 L4.02822079,6.23039857 L4.00389252,6.13347656 L2.64150943,5.673097 L2.92128453,4.86137515 L4.25933935,5.33386996 L4.33232416,5.30963945 L4.33232416,3.86792453 L5.19597773,3.86792453 Z M10.2903173,3.86792453 L10.2903173,5.30963945 L10.351138,5.33386996 L11.701357,4.86137515 L11.9811321,5.673097 L10.618749,6.13347656 L10.5822566,6.23039857 L11.518895,7.47826947 L10.8133751,7.98711003 L9.90106504,6.73923913 L9.81591609,6.73923913 L8.90360599,7.98711003 L8.19808618,7.47826947 L9.12256042,6.23039857 L9.09823215,6.13347656 L7.73584906,5.673097 L8.01562416,4.86137515 L9.35367897,5.33386996 L9.42666378,5.30963945 L9.42666378,3.86792453 L10.2903173,3.86792453 Z" ></path>
+
+        </g>
+
+    </g>
+
+</svg> 
+
+
+                        </div>
+                        <div class="node-title" style="margin-bottom: 6px;">Secret Manager</div>
+                        <div style="font-size: 13px; color: #5f6368; text-align: center; line-height: 1.4;">(Secret Storage & Management)</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="strategy-callout" style="margin-top: 25px;">
+            <strong>🛠️ SDLC Strategy — Repository Structure & CI/CD Blueprint:</strong><br>
+            The complete project codebase—spanning Dataform SQL transformations, EDA & evaluation notebooks, model training scripts, ensembling modules, and execution bash pipelines—is version-controlled within a GitHub repository using isolated <code>dev</code> and <code>main</code> branches. Code was iteratively developed and tested in <code>dev</code> before PR merging into <code>main</code>. While an automated production deployment pipeline was intentionally bypassed for this portfolio project, this repository structure provides the blueprint required for automated CI/CD triggers (e.g., GitHub Actions running automated unit tests or triggering Dataform executions upon merges to <code>main</code>).
+        </div>
+    </section>
+
+    <!-- Environment Setup & Provisioning -->
+    <section id="environment-setup">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Environment Setup & Provisioning</h1>
+        </div>
+
+        <p>This project is designed to run on the Google Cloud Platform (GCP), leveraging Google Cloud Shell, Cloud Storage (GCS), BigQuery, and Agent Platform Workbench with GPU acceleration. Follow the steps below to provision an identical workspace environment.</p>
+
+        <h2>1. Prerequisites & API Enablement</h2>
+        <p>GCP service APIs are specified in a version-controlled configuration file (<code>config/enabled_apis.txt</code>) and automated using an enablement shell script (<code>scripts/enable_apis.sh</code>). The script dynamically resolves the environment root from <code>config/config.py</code> and enables all required service endpoints via <code>gcloud</code>.</p>
+
+        <p>Execute the enablement script directly from <strong>Google Cloud Shell</strong> or terminal:</p>
+        <div class="code-container">
+            <div class="code-header"><span>Bash (Cloud Shell / Terminal)</span></div>
+            <pre><code>bash scripts/enable_apis.sh</code></pre>
+        </div>
+
+        <div class="strategy-callout">
+            <strong>📌 GCP API Scope Note:</strong> 
+            The setup script enables the primary service APIs required for Agent Platform, BigQuery, Dataform, GCS, IAM, and MLOps tooling. In GCP, enabling high-level service APIs automatically provisions auxiliary background dependencies (such as telemetry, logging, and underlying storage components). While active projects may show additional auto-enabled dependencies in <code>gcloud services list --enabled</code>, enabling the core APIs specified in <code>config/enabled_apis.txt</code> is all that is required to provision a fresh environment.
+        </div>
+
+        <h2>2. IAM Security & Permissions Configuration</h2>
+        <p>To execute native BigQuery operations, feature pipelines, and storage access without permission bottlenecks:</p>
+        <ul>
+            <li><strong>User Account:</strong> Ensure your GCP identity has the <strong>Owner</strong>, <strong>BigQuery Admin</strong>, and <strong>Service Usage Admin</strong> roles assigned.</li>
+            <li><strong>Compute Engine Default Service Account:</strong> Grant the Compute Engine default service account (<code>&lt;project-number&gt;-compute@developer.gserviceaccount.com</code>) the <strong>BigQuery Admin</strong> role.</li>
+        </ul>
+
+        <div class="callout">
+            <strong>🔒 Security Verification</strong>
+            Navigate to <strong>IAM & Admin &gt; IAM</strong> in the GCP Console to verify that your service account holds <code>BigQuery Admin</code> access prior to running pipeline transformations.
+        </div>
+
+        <h2>3. Data Ingestion: Kaggle to BigQuery Pipeline</h2>
+        <p>Rather than downloading large files locally, run this automated ingestion pipeline in <strong>Google Cloud Shell</strong> to stream the public Instacart dataset directly into BigQuery:</p>
+
+        <h3>Step 3.1: Configure Kaggle Credentials</h3>
+        <ol>
+            <li>Log in to Kaggle, go to <strong>Account Settings</strong>, and click <strong>Create New Token</strong> to download <code>kaggle.json</code>.</li>
+            <li>In Cloud Shell, install the Kaggle CLI and set up your authentication key:</li>
+        </ol>
+
+        <div class="code-container">
+            <div class="code-header"><span>Bash (Cloud Shell)</span></div>
+            <pre><code>pip install --user kaggle
+export PATH=$PATH:~/.local/bin
+source ~/.bashrc
+
+mkdir -p ~/.kaggle
+nano ~/.kaggle/kaggle.json
+# Paste your kaggle.json contents, save (CTRL+O), and exit (CTRL+X)
+
+chmod 600 ~/.kaggle/kaggle.json</code></pre>
+        </div>
+
+        <h3>Step 3.2: Download and Unpack Public Dataset</h3>
+        <div class="code-container">
+            <div class="code-header"><span>Bash (Cloud Shell)</span></div>
+            <pre><code>kaggle datasets download -d psparks/instacart-market-basket-analysis
+unzip instacart-market-basket-analysis.zip
+gunzip *.gz 2>/dev/null || unzip "*.zip"</code></pre>
+        </div>
+
+        <h3>Step 3.3: Stage Files in Google Cloud Storage (GCS)</h3>
+        <div class="code-container">
+            <div class="code-header"><span>Bash (Cloud Shell)</span></div>
+            <pre><code># Create a globally unique bucket name
+BUCKET_NAME="instacart-market-basket-analysis-$(gcloud config get-value project)"
+gsutil mb -l US gs://$BUCKET_NAME
+
+# Upload raw CSV files
+gsutil cp *.csv gs://$BUCKET_NAME/</code></pre>
+        </div>
+
+        <h3>Step 3.4: Load Data into BigQuery Tables</h3>
+        <div class="code-container">
+            <div class="code-header"><span>Bash (Cloud Shell)</span></div>
+            <pre><code># Create target BigQuery dataset
+bq mk --location=US instacart
+
+# Bulk load tables with auto schema detection
+bq load --autodetect --source_format=CSV instacart.orders gs://$BUCKET_NAME/orders.csv
+bq load --autodetect --source_format=CSV instacart.products gs://$BUCKET_NAME/products.csv
+bq load --autodetect --source_format=CSV instacart.aisles gs://$BUCKET_NAME/aisles.csv
+bq load --autodetect --source_format=CSV instacart.departments gs://$BUCKET_NAME/departments.csv
+bq load --autodetect --source_format=CSV instacart.order_products__prior gs://$BUCKET_NAME/order_products__prior.csv
+bq load --autodetect --source_format=CSV instacart.order_products__train gs://$BUCKET_NAME/order_products__train.csv</code></pre>
+        </div>
+
+        <h2>4. Compute Provisioning: Agent Platform Workbench VM</h2>
+        <p>Due to the scale of the 18.9M-row dataset, models are trained on a GPU-accelerated <strong>Agent Platform Workbench</strong> instance.</p>
+
+        <h3>Multi-Region Fallback Launcher (<code>deploy_workbench.sh</code>)</h3>
+        <p>To handle regional stockouts of GPU hardware, execute the deployment script in <strong>Cloud Shell</strong>. It automatically scans GCP zones in sequence until an <strong>NVIDIA L4 GPU</strong> paired with a <code>g2-standard-16</code> machine is successfully allocated:</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>Bash (Cloud Shell)</span></div>
+            <pre><code>chmod +x scripts/deploy_workbench.sh && ./scripts/deploy_workbench.sh</code></pre>
+        </div>
+
+        <h2>5. Environment Dependency Installation</h2>
+        <p>Project dependencies are managed via a version-controlled <code>requirements.txt</code> file and automated using an installation shell script (<code>scripts/setup.sh</code>). The setup script dynamically extracts the configured Python environment path (<code>PY_ENV</code>) from <code>config/config.py</code> and installs all required packages directly into the target environment using `pip`.</p>
+
+        <p>Execute the installation script directly from your terminal session in JupyterLab:</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>Bash (JupyterLab Terminal)</span></div>
+            <pre><code>bash scripts/setup.sh</code></pre>
+        </div>
+
+        <div class="callout-amber">
+    		<strong>⚠️ Execution Note & Memory Refresh</strong>
+    		Executing <code>bash scripts/setup.sh</code> installs packages directly to the VM's persistent Python environment and only needs to be run once. If you have active Jupyter notebooks open during setup, select <strong>Kernel &gt; Restart Kernel...</strong> from the JupyterLab top menu to load the newly installed libraries into active memory.
+        </div>
+
+        <h3>Step 5.1: Verify Environment Stack</h3>
+        <p>Run the verification block inside a notebook cell to ensure all packages defined in <code>requirements.txt</code> are installed and importing cleanly:</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>Jupyter Notebook Cell</span></div>
+            <pre><code>import pandas_gbq
+import google.cloud.bigquery_storage
+import pyarrow
+import optuna
+import xgboost as xgb
+import lightgbm as lgb
+import sklearn
+import seaborn as sns
+import bigframes.pandas as bpd
+import google.auth
+import pydantic
+import google.cloud.storage
+import statsmodels
+import optuna_integration
+import shap
+import mlflow
+
+print("🔥 MASTER ENVIRONMENT ACTIVE & VERIFIED")
+print(f"• BigQuery Storage / GBQ:        {pandas_gbq.__version__}")
+print(f"• PyArrow Data Engine:          {pyarrow.__version__}")
+print(f"• Optuna Hyperparameter Engine: {optuna.__version__}")
+print(f"• Gradient Boosting (XGBoost):  {xgb.__version__}")
+print(f"• Gradient Boosting (LightGBM): {lgb.__version__}")
+print(f"• Scikit-Learn Modeling:        {sklearn.__version__}")
+print(f"• Seaborn Visualization:        {sns.__version__}")
+print(f"• BigFrames BigQuery Link:      {bpd.__version__}")
+print(f"• Pydantic Data Validation:     {pydantic.__version__}")
+print(f"• Statsmodels Statistical Engine: {statsmodels.__version__}")
+print(f"• SHAP Explainability Engine:   {shap.__version__}")
+print(f"• MLflow Tracking System:       {mlflow.__version__}")</code></pre>
+        </div>
+    </section>
+
+    <!-- Execution Order -->
+    <section id="execution-order">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Execution Order</h1>
+        </div>
+
+        <p>To deploy and execute this pipeline end-to-end, run the scripts and workflows in the following order:</p>
+
+        <div class="strategy-callout">
+            <strong>⚙️ Environment Configuration & Resource Provisioning:</strong><br>
+            Before running any notebooks or pipeline scripts, open <code>config/config.py</code> and adjust the environmental settings to match your GCP infrastructure:
+            <ul>
+                <li>Set <code>root_loc</code>, <code>source_loc</code>, <code>output_loc</code>, and <code>config_loc</code> to match your local VM workspace directory structure.</li>
+                <li>Set <code>project_id</code> to your target GCP Project ID.</li>
+                <li>Set <code>BUCKET_NAME</code> and <code>BUCKET_PATH</code> to your designated Google Cloud Storage bucket.</li>
+                <li>Set <code>results_dataset</code> to your target BigQuery evaluation results dataset name.</li>
+            </ul>
+            <em>Ensure that your Google Cloud Storage bucket and target BigQuery datasets are provisioned in GCP prior to executing downstream scripts.</em>
+        </div>
+
+        <div class="timeline">
+            <div class="step-card">
+                <div class="step-number">1</div>
+                <div class="step-content">
+                    <div class="step-title">Infrastructure Provisioning</div>
+                    <div class="step-description">
+                        Execute the environment setup and provisioning scripts outlined in Section 2 to configure GCP service APIs, IAM permissions, Kaggle-to-BigQuery ETL, and the Agent Platform GPU Workbench VM.
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">2</div>
+                <div class="step-content">
+                    <div class="step-title">Preliminary Exploratory Data Analysis (EDA)</div>
+                    <div class="step-description">
+                        Execute <code>Notebooks/EDA/preliminary_eda.ipynb</code> to analyze the raw Instacart dataset via BigFrames, validate data integrity, and uncover foundational order density and user-product behavior dynamics.
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">3</div>
+                <div class="step-content">
+                    <div class="step-title">BigQuery Dataform / dbt Feature Pipeline</div>
+                    <div class="step-description">
+                        Orchestrate the medallion ELT feature pipeline using Google Cloud Dataform:
+                        <ol style="margin-top: 8px; margin-bottom: 8px;">
+                            <li>In the GCP Console, create a new repository in <strong>GCP Dataform</strong> and link it to your GitHub repository or development workspace.</li>
+                            <li>Upload all <code>.sqlx</code> transformation models into the <code>definitions/</code> directory, maintaining the medallion subfolder hierarchy:
+                                <ul style="margin-top: 4px; margin-bottom: 4px;">
+                                    <li><code>definitions/sources/</code> (Bronze source table declarations)</li>
+                                    <li><code>definitions/bronze/</code> (Bronze cleansed views)</li>
+                                    <li><code>definitions/silver/</code> (Silver building-block tables)</li>
+                                    <li><code>definitions/gold/</code> (Gold feature tables & assertions)</li>
+                                </ul>
+                            </li>
+                            <li>Trigger an <em>"Execute Actions"</em> run in Dataform to build all tables and run automated data quality assertions in BigQuery.</li>
+                        </ol>
+                        <div class="note-box" style="margin-top: 6px;">
+                            <strong>📌 BigQuery Dataset Prerequisite:</strong> Ensure that the target BigQuery datasets referenced in your Dataform models (e.g., raw source datasets and <code>ml_model_feature_table</code>) are created in BigQuery before executing Dataform actions.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">4</div>
+                <div class="step-content">
+                    <div class="step-title">Feature Screening & Baseline Modeling</div>
+                    <div class="step-description">
+                        Run <code>Notebooks/EDA/feature_eda_screening.ipynb</code> to evaluate feature distributions and perform bi-variate analysis to identify relationships between the features and the target variable. Additionally, screen for multicollinearity (correlation heatmap), prune non-value-added features, and fit a fast baseline LightGBM Ranker model.
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">5</div>
+                <div class="step-content">
+                    <div class="step-title">Base Model Training</div>
+                    <div class="step-description">
+                        Execute <code>scripts/run_training_pipeline.sh</code> (or its underlying Python scripts) to train and hyperparameter-tune the base LightGBM and XGBoost models using a Bayesian search.
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">6</div>
+                <div class="step-content">
+                    <div class="step-title">Ensemble Tuning & Blending</div>
+                    <div class="step-description">
+                        <code>scripts/run_training_pipeline.sh</code> triggers <code>src/ensemble/ensemble.py</code>. This module applies Rank Reciprocal Fusion (RRF) to normalize ranker scores and classification probabilities onto a unified scale, then utilizes Optuna to identify optimal blending weights.
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">7</div>
+                <div class="step-content">
+                    <div class="step-title">Model Evaluation & Power BI Input Generation</div>
+                    <div class="step-description">
+                        Execute <code>Notebooks/evaluation/model_evaluation.ipynb</code> to identify the champion model and validate test generalization (using <code>Recall@5</code>, <code>NDCG@5</code>, <code>Precision@5</code>, and <code>F1@5</code> as evaluation metrics). This notebook computes SHAP feature importance and streams outputs to BigQuery for downstream Power BI reporting.
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">8</div>
+                <div class="step-content">
+                    <div class="step-title">Financial Impact Modeling</div>
+                    <div class="step-description">
+                        Run <code>Notebooks/evaluation/financial_impact.ipynb</code> to translate predictive power into estimated profit lift, grounded in baseline financial metrics sourced from public SEC filings.
+                    </div>
+                </div>
+            </div>
+
+            <div class="step-card">
+                <div class="step-number">9</div>
+                <div class="step-content">
+                    <div class="step-title">Power BI Dashboard</div>
+                    <div class="step-description">
+                        Open the Power BI dashboard (download the <code>.pbix</code> file) to inspect model evaluation metrics, SHAP feature importance, and perform financial sensitivity analysis by adjusting assumptions.
+                        <div class="note-box">
+                            <strong>💡 Setup Note:</strong> The dashboard defaults to displaying results from my original execution data. If you are deploying this project in your own GCP environment, you will need to open the data source settings in Power BI and swap the source tables to connect to your personal BigQuery tables.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="callout">
+            <strong>⚡ Automation Note:</strong>
+            Steps 5 and 6 are chained together within <code>scripts/run_training_pipeline.sh</code>. Once triggered, ensemble weight tuning executes immediately following the base model .py scripts.
+        </div>
+    </section>
+
+    <!-- Data Sources -->
+    <section id="data-sources">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Data Sources</h1>
+        </div>
+
+        <p>The source data for this project is the <strong>Kaggle Instacart Market Basket Analysis dataset</strong>. This dataset is anonymized and contains a sample of over 3 million grocery orders from more than 200,000 Instacart users.</p> 
+
+        <p>You can access the dataset and view the complete schema for each source table by following this link: <a href="https://www.kaggle.com/datasets/psparks/instacart-market-basket-analysis" target="_blank">Kaggle Instacart Market Basket Analysis Dataset</a>.</p>
+
+        <div class="callout-amber">
+            <p style="margin-bottom: 12px;"><strong>⚠️ Data Limitation:</strong> There are no dates or timestamps provided in the source data. While there is time-related information available—such as <code>order_number</code> and <code>days_since_prior_order</code>—this only allows for the creation of a relative calendar at the user-level.</p>
+            
+            <p style="margin-bottom: 0;">Because of this limitation, no global calendar can be created. Consequently, global features (e.g., trending products and seasonal purchasing patterns) cannot be included in the model without introducing data leakage.</p>
+        </div>
+    </section>
+
+    <!-- Preliminary EDA -->
+    <section id="preliminary-eda">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Preliminary EDA</h1>
+        </div>
+
+        <p>This preliminary exploratory data analysis investigates the raw Instacart datasets via <strong>BigFrames</strong> to inform downstream feature engineering and modeling strategy. Key analytical findings include:</p>
+
+        <div class="eda-card">
+            <h2>Long-Tail Sparsity</h2>
+            <p>The product catalog exhibits extreme sparsity, with the top 20% of items driving ~91% of total product order volume. This underscores the importance of leveraging data volume to enable predictive models to learn the patterns of the long tail.</p>
+            
+            <div class="img-container">
+                <img src="images/Long Tail Sparsity.png" alt="Product Order Volume Sparsity & Long-Tail Distribution">
+                <div class="caption">Figure 1: Product Order Volume Sparsity & Long-Tail Distribution</div>
+            </div>
+        </div>
+
+        <div class="eda-card">
+            <h2>Cyclical Order Patterns</h2>
+            <p>Order density shows clear cyclical patterns by time of day and day of week, peaking Sunday afternoons and Monday mornings.</p>
+            
+            <div class="img-container">
+                <img src="images/Order Density Cyclical Patterns.png" alt="Order Density: Day of Week vs Hour of Day">
+                <div class="caption">Figure 2: Order Density (Day of Week vs Hour of Day)</div>
+            </div>
+        </div>
+
+        <div class="eda-card">
+            <h2>User Types & Exploratory Ratio</h2>
+            <p>Analyzing user count by unique products purchased reveals a sharp right-skewed distribution. By calculating an <strong>"Exploratory Ratio"</strong> (unique products divided by total products ordered), users can be segmented into categories from habitual staple-buyers to highly exploratory shoppers.</p>
+            
+            <div class="image-grid">
+                <div class="img-container" style="width: 48%; margin: 0;">
+                    <img src="images/User Count by Unique Product Purchases.png" alt="Distribution of Distinct Products Purchased per User" style="width:100%;">
+                    <div class="caption">Figure 3a: Distinct Products Purchased per User</div>
+                </div>
+                <div class="img-container" style="width: 48%; margin: 0;">
+                    <img src="images/Exploratory Ratio.png" alt="User Exploratory Ratio Distribution" style="width:100%;">
+                    <div class="caption">Figure 3b: User Exploratory Ratio Distribution</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="callout">
+            <strong>💡 Key Takeaway for Feature Pipeline</strong>
+            These exploratory insights directly motivated the inclusion of temporal cycle features, product concentration & order penetration metrics, and user exploratory features in the downstream BigQuery/Dataform feature engineering pipeline.
+        </div>
+    </section>
+
+    <!-- BigQuery Dataform Pipeline & Feature Engineering -->
+    <section id="bigquery-pipeline">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>BigQuery Dataform Pipeline & Feature Engineering</h1>
+        </div>
+
+        <p>The foundation of this machine learning model is a modular, version-controlled (GitHub Repository) SQL transformation pipeline orchestrated within BigQuery using Google Cloud Dataform.</p>
+
+        <h2>1. Pipeline Architecture & Transformation Strategy</h2>
+        <p>The ELT workflow follows a structured medallion architecture (Bronze Source Declarations &rarr; Silver Cleansed & Building Block Tables &rarr; Gold Feature Tables) designed to handle tens of millions of rows with minimal execution time.</p>
+
+        <h3>1.1 Base Analytical Table & Feature Calculation Strategy</h3>
+        <p>At the core of the Silver layer is the <code>base_analytical_table</code>, which unifies all cleansed source tables (orders, products, aisles, departments, and order_products) into a single analytical foundation. Candidate features for ML modeling are calculated from the base analytical table across distinct grains:</p>
+        <ul>
+            <li><strong>User-Level</strong> (e.g., order pacing, basket sizes, organic affinity)</li>
+            <li><strong>User-Category</strong> (e.g., aisle and department shares)</li>
+            <li><strong>User-Product</strong> pairs (e.g., cumulative purchases, cart positions, day-of-week and time-of-day counts).</li>
+        </ul>
+
+        <h3>1.2 Candidate Skeleton & Anchor Order Strategy</h3>
+        <p>To prevent data leakage, features are engineered using an "Anchor Order" strategy:</p>
+        <ul>
+            <li><strong>Anchor Order:</strong> For each user, an Anchor Order is selected as the point of prediction.</li>
+            <li><strong>Candidate Skeleton:</strong> A <code>candidate_skeleton</code> maps users to all products they have purchased on or before the Anchor Order (the reorder candidate products).</li>
+            <li><strong>Join to Candidate Skeleton:</strong> All feature aggregations (purchase frequencies, basket shares, temporal patterns, etc.) calculated from the base analytical table are joined to the candidate skeleton on the anchor order. This ensures all features include only data from the first order through the anchor order.</li>
+            <li><strong>Join the Label:</strong> The label is then independently joined to the candidate skeleton on Anchor Order + 1, ensuring the label represents the next order.</li>
+            <li><strong>Forward-Fill Imputation:</strong> Because candidate products are not ordered in every order, window functions using <code>LAST_VALUE(... IGNORE NULLS)</code> forward-fill behavioral metrics across subsequent orders up to the anchor order. This preserves historical context without introducing leakage.</li>
+        </ul>
+
+        <h3>1.3 Pipeline Execution Lineage Graph (DAG)</h3>
+        <p>Below is the dependency graph generated inside Google Cloud Dataform, illustrating the flow from raw source declarations to data quality assertions:</p>
+
+        <div class="dag-scroll-container">
+            <img src="images/Compiled Graph_3.png" alt="Dataform Lineage Graph (DAG) for Feature Store Construction">
+            <div class="caption">Figure 5: Dataform Lineage Graph (DAG) for Feature Store Construction</div>
+        </div>
+
+        <h2>2. Data Quality Assertions & Validation</h2>
+        <p>Dataform assertions are configured within <code>final_ml_features_table.sqlx</code> to enforce data integrity, order sequence consistency, and cold-start logic prior to modeling:</p>
+
+        <ul>
+            <li><strong>Null Value Prevention:</strong> Enforces <code>IS NOT NULL</code> checks across all features except for <code>user_product_cart_position_last_order</code> (which inherently & intentionally has nulls)</li>
+            <li><strong>Sequence Consistency:</strong> Verifies that <code>anchor_order_number = (label_order_number - 1)</code> to ensure the label always represents the order following the anchor order.</li>
+            <li><strong>Cold-Start Threshold Enforcement:</strong> Asserts <code>anchor_order_number > 4</code>, ensuring only users with established purchase histories are included in the machine learning model. A fallback heuristic approach is recommended for cold starts.</li>
+            <li><strong>Bounded Range Checks:</strong> Validates that ratios (e.g., <code>user_organic_affinity_ratio</code>, <code>user_product_day_of_week_affinity</code>) fall within <code>[0.0, 1.0]</code> and day-of-week/hour bounds stay within calendar limits.</li>
+        </ul>
+
+        <h2>3. Pipeline Output Dictionary</h2>
+        <p>The following table lists all 39 columns generated in the <code>final_ml_features_table</code> dataset along with their data type, category/grain, and description:</p>
+
+        <div style="max-height: 400px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; margin: 25px 0;">
+            <table style="margin: 0; width: 100%;">
+                <thead style="position: sticky; top: 0; background-color: #f1f3f4; z-index: 1;">
+                    <tr>
+                        <th>Feature Name</th>
+                        <th>Data Type</th>
+                        <th>Category / Grain</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>user_id</code></td>
+                        <td>INT64</td>
+                        <td>Identifier</td>
+                        <td>Unique identifier for the shopper.</td>
+                    </tr>
+                    <tr>
+                        <td><code>anchor_order_id</code></td>
+                        <td>INT64</td>
+                        <td>Context Identifier</td>
+                        <td>Historical order ID used as the feature calculation baseline.</td>
+                    </tr>
+                    <tr>
+                        <td><code>anchor_order_number</code></td>
+                        <td>INT64</td>
+                        <td>Context Sequence</td>
+                        <td>Sequential order index of the anchor order (&gt; 4 to exclude cold starts).</td>
+                    </tr>
+                    <tr>
+                        <td><code>candidate_product_id</code></td>
+                        <td>INT64</td>
+                        <td>Identifier</td>
+                        <td>Candidate item ID previously ordered by the user.</td>
+                    </tr>
+                    <tr>
+                        <td><code>department_id</code></td>
+                        <td>INT64</td>
+                        <td>Categorical</td>
+                        <td>department identifier</td>
+                    </tr>
+                    <tr>
+                        <td><code>aisle_id</code></td>
+                        <td>INT64</td>
+                        <td>Categorical</td>
+                        <td>aisle identifier</td>
+                    </tr>
+                    <tr>
+                        <td><code>anchor_days_since_first_order</code></td>
+                        <td>INT64</td>
+                        <td>Context Recency</td>
+                        <td>Cumulative days elapsed from user's first order to the anchor order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_order_id</code></td>
+                        <td>INT64</td>
+                        <td>Target Context</td>
+                        <td>Future order ID being predicted.</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_order_number</code></td>
+                        <td>INT64</td>
+                        <td>Target Sequence</td>
+                        <td>Sequential order index of the label order (anchor_order_number + 1).</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_reordered</code></td>
+                        <td>INT64</td>
+                        <td>Target Label</td>
+                        <td>Binary target variable (1 if candidate product was reordered in target order, 0 otherwise).</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_order_dow</code></td>
+                        <td>INT64</td>
+                        <td>Target Context</td>
+                        <td>Day of week of the target order (0 = Sunday to 6 = Saturday).</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_order_hour_of_day</code></td>
+                        <td>INT64</td>
+                        <td>Target Context</td>
+                        <td>Hour of day (0 to 23) when the target order was placed.</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_days_since_prior_order</code></td>
+                        <td>INT64</td>
+                        <td>Target Context</td>
+                        <td>Days elapsed between the anchor order and the target order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_time_of_day</code></td>
+                        <td>STRING</td>
+                        <td>Target Context</td>
+                        <td>Categorical time window of target order (morning, afternoon, evening, nighttime).</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_days_since_first_order</code></td>
+                        <td>INT64</td>
+                        <td>Target Recency</td>
+                        <td>Cumulative days elapsed from user's first order to the target order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_avg_days_between_orders</code></td>
+                        <td>FLOAT64</td>
+                        <td>User Pacing</td>
+                        <td>Average days between historical orders for the user.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_distinct_product_count</code></td>
+                        <td>INT64</td>
+                        <td>User Footprint</td>
+                        <td>Unique products ordered by the user up to and including the anchor order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_organic_affinity_ratio</code></td>
+                        <td>FLOAT64</td>
+                        <td>User Preference</td>
+                        <td>Share of organic products in user's purchase history.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_avg_basket_size</code></td>
+                        <td>FLOAT64</td>
+                        <td>User Behavior</td>
+                        <td>Average number of items in user's historical orders.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_reorder_ratio</code></td>
+                        <td>FLOAT64</td>
+                        <td>User Habituality</td>
+                        <td>Overall proportion of reordered items across user's history.</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_dow_user_product_same_dow_count</code></td>
+                        <td>INT64</td>
+                        <td>Context Match</td>
+                        <td>Historical purchases of a candidate product on the same day of week as the target order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_tod_user_product_same_tod_count</code></td>
+                        <td>INT64</td>
+                        <td>Context Match</td>
+                        <td>Historical purchases of a candidate product in the same time-of-day window as the target order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_aisle_share</code></td>
+                        <td>FLOAT64</td>
+                        <td>User-Category</td>
+                        <td>Proportion of user's total purchases belonging to the product's aisle.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_deptartment_share</code></td>
+                        <td>FLOAT64</td>
+                        <td>User-Category</td>
+                        <td>Proportion of user's total purchases belonging to the product's department.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_cumulative_purchases</code></td>
+                        <td>INT64</td>
+                        <td>User-Product Count</td>
+                        <td>Total times the user has purchased the candidate product up to and including the anchor order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_avg_cart_position</code></td>
+                        <td>FLOAT64</td>
+                        <td>User-Product Priority</td>
+                        <td>Average add-to-cart position of the item in past orders.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_avg_relative_cart_position</code></td>
+                        <td>FLOAT64</td>
+                        <td>User-Product Priority</td>
+                        <td>Normalized cart position relative to total basket size.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_cart_position_last_order</code></td>
+                        <td>INT64</td>
+                        <td>User-Product Recency</td>
+                        <td>Cart position of the candidate product in the user's last order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_purchase_concentration</code></td>
+                        <td>FLOAT64</td>
+                        <td>User-Product Share</td>
+                        <td>Candidate item purchases divided by total items purchased by user.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_reorder_concentration</code></td>
+                        <td>FLOAT64</td>
+                        <td>User-Product Share</td>
+                        <td>Candidate item reorders divided by user's total reordered items.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_order_penetration_ratio</code></td>
+                        <td>FLOAT64</td>
+                        <td>User-Product Penetration</td>
+                        <td>The proportion of historical orders in which a product was purchased</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_consecutive_order_skips</code></td>
+                        <td>INT64</td>
+                        <td>Recency Gap</td>
+                        <td>Number of consecutive orders elapsed since the item was last purchased.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_last3order_streak</code></td>
+                        <td>INT64</td>
+                        <td>Habitual Streak</td>
+                        <td>Streak indicator (0 to 3) showing purchase streak across last 3 orders.</td>
+                    </tr>
+                    <tr>
+                        <td><code>label_user_product_days_since_last_purchased</code></td>
+                        <td>INT64</td>
+                        <td>Time Recency</td>
+                        <td>Days elapsed from last purchase of this item to the target order date.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_prod_avg_days_between_purchases</code></td>
+                        <td>FLOAT64</td>
+                        <td>Item Replenishment</td>
+                        <td>Average repurchase cycle length (days) for a user-product pair.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_nearing_reorder_ratio</code></td>
+                        <td>FLOAT64</td>
+                        <td>Replenishment Pacing</td>
+                        <td>Ratio of elapsed days to user's average repurchase cycle (&gt; 1 indicates overdue for reorder).</td>
+                    </tr>
+                    <tr>
+                        <td><code>days_since_last_ordered_vs_user_pace_ratio</code></td>
+                        <td>FLOAT64</td>
+                        <td>Order Pacing</td>
+                        <td>Days elapsed since product purchase relative to general order frequency.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_day_of_week_affinity</code></td>
+                        <td>FLOAT64</td>
+                        <td>Temporal Alignment</td>
+                        <td>Proportion of historical purchases made on the same day of week as the label order.</td>
+                    </tr>
+                    <tr>
+                        <td><code>user_product_time_of_day_affinity</code></td>
+                        <td>FLOAT64</td>
+                        <td>Temporal Alignment</td>
+                        <td>Proportion of historical purchases made during the same time window as the label order.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Feature EDA & Screening -->
+    <section id="feature-eda">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Feature EDA & Screening</h1>
+        </div>
+
+        <p>Before proceeding to machine learning model training, a second Exploratory Data Analysis (EDA) and feature screening process was conducted. This step bridges the gap between the BigQuery pipeline and ML execution by ensuring data quality, understanding feature-target relationships, and pragmatically managing data volume through strategic feature pruning/selection.</p>
+
+        <h2>1. Data Sampling</h2>
+        <p>Due to the scale of the 18.9 million row feature table, <code>BigFrames</code> was utilized to keep execution within the BigQuery engine where possible. For localized visualization and quick statistical checks, a reproducible 10% user sample was used.</p>
+        
+        <h2>2. Feature Distribution & Outlier Analysis</h2>
+        <p>Initial distribution checks utilized histograms and whisker box plots to understand the spread and expected ranges of generated features.</p>
+        
+        <details>
+            <summary style="cursor: pointer; font-weight: 700; font-size: 16px; color: var(--primary-color); padding: 12px 0;">
+                🔍 Expand Feature Distributions & Box Plots
+            </summary>
+            <div style="max-height: 500px; overflow-y: auto; border: 1px solid var(--border-color); padding: 15px; border-radius: 8px; margin-top: 10px; background-color: #fafafa;">
+                <div class="image-grid">
+                    <img src="images/Histograms and box plots 1.png" alt="Histograms and Box Plots 1" style="width: 100%;">
+                    <img src="images/Histograms and box plots 2.png" alt="Histograms and Box Plots 2" style="width: 100%;">
+                    <img src="images/Histograms and box plots 3.png" alt="Histograms and Box Plots 3" style="width: 100%;">
+                    <img src="images/Histograms and box plots 4.png" alt="Histograms and Box Plots 4" style="width: 100%;">
+                </div>
+            </div>
+        </details>
+        
+        <div class="callout">
+            <strong>💡 Key Insight (User-Product Dynamics):</strong>
+            <p style="margin-top: 8px; margin-bottom: 0;">Penetration, concentration, and reorder metrics show that at the individual customer level, a shopper's basket splits into two distinct categories: a small set of staple items bought in most orders, and a large tail of exploratory or one-off items. The boxplots confirm that these behavioral metrics have expected middle ranges for customer habits. This will give the ml models clean patterns to learn from.</p>
+        </div>
+
+        <h2>3. Feature-Target Relationships (Bivariate EDA)</h2>
+        <p>To validate the predictive power of engineered features, bivariate analysis was performed against the target variable (<code>label_reordered</code>). The charts below illustrate how key features correlate with the probability a customer reorders an item.</p>
+
+        <ul>
+            <li><strong>Purchase Concentration:</strong> As purchase concentration increases, the reorder rate also increases.</li>
+            <li><strong>Order Skips:</strong> Reorder probability drops as the number of consecutive order skips increases.</li>
+            <li><strong>Order Streak:</strong> Reorder probability increases as the order streak increases.</li>
+            <li><strong>Penetration Ratio:</strong> Higher order penetration ratio correlates with a higher probability of reordering.</li>
+        </ul>
+
+        <details>
+            <summary style="cursor: pointer; font-weight: 700; font-size: 16px; color: var(--primary-color); padding: 12px 0;">
+                🔍 Expand Bivariate Analysis Charts
+            </summary>
+            <div style="max-height: 500px; overflow-y: auto; border: 1px solid var(--border-color); padding: 15px; border-radius: 8px; margin-top: 10px; background-color: #fafafa;">
+                <div class="image-grid">
+                    <img src="images/Reorder_Rate by product purchase concentration.png" alt="Reorder Rate by Product Purchase Concentration" style="width: 100%;">
+                    <img src="images/reorder rate vs consecutive order skips.png" alt="Reorder Rate vs Consecutive Order Skips" style="width: 100%;">
+                    <img src="images/Reorder_Rate by Last 3 Order Streak.png" alt="Reorder Rate by Last 3 Order Streak" style="width: 100%;">
+                    <img src="images/Reorder_Rate by Order Penetration Ratio.png" alt="Reorder Rate by Order Penetration Ratio" style="width: 100%;">
+                </div>
+            </div>
+        </details>
+
+        <h2>4. Correlation Analysis</h2>
+        <p>A correlation heatmap was created to evaluate multicollinearity. While Gradient Boosted Decision Trees (GBDTs) natively handle correlated features well, identifying massive correlations is still important. Removing highly redundant features prevents models from repetitively splitting on identical signals, reducing computational overhead and clarifying final feature importance interpretations.</p>
+
+        <img src="images/Correlation Heatmap.png" alt="Correlation Heatmap" class="full-width-image">
+
+        <div class="callout">
+            <strong>💡 Key Insights:</strong> 
+            <ul> 
+                <li><strong>Feature Redundancy:</strong> <code>days_since_last_ordered_vs_user_pace_ratio</code> is almost perfectly correlated with <code>user_product_consecutive_order_skips</code>. Since it represents the same underlying signal (the number of orders consecutively skipped), it can be dropped.</li>
+                <li><strong>Temporal Correlation:</strong> Either <code>anchor_days_since_first</code> or <code>label_days_since_first_order</code> should be dropped due to their extremely high correlation.</li>
+            </ul>
+        </div>
+
+        <h2>5. Cumulative Gain & Feature Screening</h2>
+        <p>To manage resources efficiently on a dataset of this scale, a baseline LightGBM model was trained to establish initial performance and measure raw feature importance. A <strong>Cumulative Gain Feature Pruning</strong> strategy was then applied.</p>
+        
+        <p>Features were ranked by importance, and a cumulative sum of their impact was calculated. To remove noise and potentially confusing non-value-added variables, only the top features that contributed to ~99.2% of the model's predictive power were retained. (The threshold was extended slightly past 99% to intentionally preserve both department and aisle share metrics).</p>
+
+        <h3>5.1 Final Pruned Feature List (Top 15)</h3>
+        <ul class="feature-list">
+            <li>user_prod_avg_days_between_purchases</li>
+            <li>user_product_consecutive_order_skips</li>
+            <li>user_product_order_penetration_ratio</li>
+            <li>user_product_reorder_concentration</li>
+            <li>label_user_product_days_since_last_purchased</li>
+            <li>user_product_last3order_streak</li>
+            <li>user_product_cumulative_purchases</li>
+            <li>user_product_purchase_concentration</li>
+            <li>user_product_nearing_reorder_ratio</li>
+            <li>user_reorder_ratio</li>
+            <li>user_product_cart_position_last_order</li>
+            <li>user_product_avg_cart_position</li>
+            <li>user_distinct_product_count</li>
+            <li>user_deptartment_share</li>
+            <li>user_aisle_share</li>
+        </ul>
+
+        <h3>5.2 Pruning Verification</h3>
+        <p>To ensure that dropping the lower-impact features did not harm predictive power, the baseline model was retrained using only the pruned feature list. The results confirmed that the impact of trimming features was completely negligible, allowing for faster model training & tuning execution times with a smaller dataset.</p>
+
+        <div class="metric-box">
+            <div class="metric">
+                <div class="metric-label">All Features Baseline</div>
+                <div class="metric-value">0.540693</div>
+                <div class="metric-label" style="color:#666; font-size:10px; margin-top:2px;">(NDCG@5)</div>
+            </div>
+            <div style="font-size: 24px; color: #dadce0;">vs</div>
+            <div class="metric">
+                <div class="metric-label">Pruned Features Baseline</div>
+                <div class="metric-value">0.540393</div>
+                <div class="metric-label" style="color:#666; font-size:10px; margin-top:2px;">(NDCG@5)</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Machine Learning Modeling & Ensembling -->
+    <section id="ml-modeling">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Machine Learning Modeling & Ensembling</h1>
+        </div>
+
+        <p>To deliver an optimized Top 5 Reorder Widget for Instacart shoppers, the predictive architecture balances learning complex user-product interactions with computational efficiency (due to data size). Four gradient-boosted decision tree (GBDT) base models—spanning both ranking (LambdaMART) and binary classification algorithms across LightGBM and XGBoost—were trained, hyperparameter-tuned, and blended into 5 different ensembles.</p>
+
+        <h2>1. Dataset Splits & Cross Validation Strategy</h2>
+        <p>Predicting reorders requires evaluation safeguards to prevent data leakage across orders and users. This was managed through the data splits and stratified group K-fold cross-validation.</p>
+
+        <h3>1.1 Dataset Splits</h3>
+        <ul>
+            <li><strong><code>train_val</code> Split (80% of Users):</strong> Reserved for model training, Bayesian Search hyperparameter tuning, and generating Out-Of-Fold (OOF) predictions for ensemble blending.</li>
+            <li><strong><code>validation</code> Split (10% of Users):</strong> Unseen validation set used for champion model selection.</li>
+            <li><strong><code>test</code> Split (10% of Users):</strong> Unseen holdout set used for evaluating generalization and financial impact projections.</li>
+        </ul>
+
+        <div class="code-container">
+            <div class="code-header"><span>utility_functions.py &mdash; Data Splitting Strategy</span></div>
+            <pre><code>def split_data(df):
+    """
+    Split data into Train/Val (80%), Val (10%), and Test (10%).
+    Sorts unique users first to guarantee identical splits across multiple scripts.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        The full input dataframe containing a 'user_id' column.
+
+    Returns:
+    --------
+    tuple of pd.DataFrame
+        Returns (train_val_df, val_df, test_df).
+    """
+    
+    # Sort unique users to ensure same splits across multiple scripts
+    unique_users = pd.Series(np.sort(df['user_id'].unique()))
+    shuffled_users = shuffle(unique_users, random_state = 42).reset_index(drop = True)
+    
+    n_users = len(shuffled_users)
+    train_val_users = shuffled_users[:int(0.8 * n_users)]
+    val_users = shuffled_users[int(0.8 * n_users):int(0.9 * n_users)]
+    test_users = shuffled_users[int(0.9 * n_users):]
+    
+    train_val_df = df[df['user_id'].isin(train_val_users)].copy()
+    val_df = df[df['user_id'].isin(val_users)].copy()
+    test_df = df[df['user_id'].isin(test_users)].copy()
+    
+    return train_val_df, val_df, test_df</code></pre>
+        </div>
+
+        <h3>1.2 Leakage Prevention via Stratified Group K-Fold</h3>
+        <p>Base models were trained using <strong>3-Fold <code>StratifiedGroupKFold</code></strong> cross-validation, grouped on <code>user_id</code>. Grouping on <code>user_id</code> guarantees that all historical orders for a given customer remain within the same fold, eliminating user-level data leakage while preserving class balance across folds.</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>train_lgbm_ranker.py &mdash; Stratified Group K-Fold Implementation</span></div>
+            <pre><code>#Create StratifiedGroupKFold instance
+sgkf = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=42)
+
+#Create empty cv cores list to track cross validation scores
+cv_scores = []
+
+#Create array to track predictions
+trial_oof_preds = np.zeros(len(train_val_df))
+
+#Create list to track trees per fold
+trial_trees_per_fold = []
+
+for train_index, val_index in sgkf.split(train_val_df[feature_list], train_val_df['label_reordered'], groups=train_val_df['user_id']):
+
+    print('Starting new fold...')
+
+    #Create train and val data sets for current fold
+    train_fold = train_val_df.iloc[train_index].copy()
+    val_fold = train_val_df.iloc[val_index].copy()</code></pre>
+        </div>
+
+        <h2>2. Evaluation Metrics</h2>
+        <p>To align technical optimization with business value, the modeling pipeline utilized a tiered evaluation framework across three phases:</p>
+
+        <ul>
+            <li><strong>Training & Tuning Metric (<code>NDCG@5</code> / Average Precision):</strong> Baseline models utilized objectives tailored to their architectural frameworks and class imbalance:
+                <ul>
+                    <li><strong>GBDT Rankers (<code>NDCG@5</code>):</strong> Tree-based ranking algorithms natively perform better when using LambdaMART or pairwise objectives optimizing for NDCG. Restricting the training metric evaluation to K=5 ensures the trees prioritize finding relevant items within the bounds of the UI widget.</li>
+                    <li><strong>Binary Classifiers (Average Precision / PR-AUC):</strong> For non-ranking models, PR-AUC was selected as the training metric to manage class imbalance. This focused optimization on precision-recall trade-offs without inflating performance via true negatives.</li>
+                </ul>
+            </li>
+            <li><strong>Ensemble Weight Optimization Metric (<code>NDCG@5</code>):</strong> <code>NDCG@5</code> was selected as the optimization objective for three key reasons:
+                <ul>
+                    <li><strong>Pipeline Consistency:</strong> It aligns with the evaluation metric used during ranker model training. Switching to an unaligned metric like Recall@5 during the blending phase could distort the rankings established by the base models.</li>
+                    <li><strong>Position-Aware Ranking:</strong> Position matters in a recommendation widget. NDCG@5 penalizes the model heavily if highly relevant items are placed to lower positions (e.g., position 4 or 5 instead of position 1), which directly improves user experience.</li>
+                    <li><strong>Shared-Window Recall Optimization:</strong> Because both metrics evaluate the exact same window length (K=5), maximizing NDCG@5 inherently forces the model to pull relevant items into the top 5 slots—effectively optimizing for Recall@5 (the primary driver of business value) while simultaneously sorting them in the highest-conversion order.</li>
+                </ul>
+            </li>
+            <li><strong>Model Selection Metric (<code>Recall@5</code>):</strong> While <code>NDCG@5</code> fine-tunes item positioning within the widget, <strong><code>Recall@5</code></strong> was chosen as the metric for model selection. From an e-commerce business perspective, capturing the target reorder product <em>anywhere within the 5-item widget</em> is the primary driver of customer conversion, friction reduction, and Average Order Value (AOV) growth.</li>
+            <li><strong>Secondary Evaluation Metrics (<code>Precision@5</code> & <code>F1-Score@5</code>):</strong> While <code>Recall@5</code> serves as the primary business north star, <code>Precision@5</code> and <code>F1-Score@5</code> were tracked as secondary guardrail metrics. Monitoring these metrics ensured the models maintained a balanced precision-recall profile, providing a holistic view of model performance.</li>
+        </ul>
+
+        <h2>3. Base Model Architectures & Bayesian Hyperparameter Optimization</h2>
+        <p>Four distinct base models were constructed to capture complementary patterns in customer behavior:</p>
+        <ol>
+            <li><strong>LightGBM Ranker:</strong> Uses a <code>lambdarank</code> objective with <code>('metric': 'ndcg', 'eval_at': 5)</code> evaluation (leaf-wise tree growth).</li>
+            <li><strong>LightGBM Classifier:</strong> Uses a <code>binary</code> objective with <code>average_precision</code> evaluation (leaf-wise tree growth).</li>
+            <li><strong>XGBoost Ranker:</strong> Uses a <code>rank:ndcg</code> objective with <code>(eval_metric='ndcg@5')</code> evaluation (level-wise tree growth).</li>
+            <li><strong>XGBoost Classifier:</strong> Uses a <code>binary:logistic</code> objective with <code>aucpr</code> evaluation (level-wise tree growth).</li>
+        </ol>
+
+        <h3>3.1 Hyperparameter Tuning Strategy</h3>
+        <p>Given the scale of the dataset (18.9 million rows), the training strategy prioritized data volume over exhaustive hyperparameter tuning. This approach ensured the models could learn nuanced interactions across long-tail product categories. To remain pragmatic with compute resources and execution runtimes for a portfolio project, an Optuna Bayesian Search was deployed for 25 trials per model to optimize tree architecture. Prioritizing data volume on massive datasets frequently yields better generalization than squeezing out fractional gains through exhaustive search spaces. Key strategies include:</p>
+
+        <ul>
+            <li><strong>Tree Ceiling & Early Stopping (<code>n_estimators = 2000</code>):</strong> Setting a high tree limit provided sufficient capacity for models to converge. An <code>early_stopping_rounds = 50</code> callback was implemented as a primary regularization mechanism, halting training at peak validation performance before the models could memorize noise.</li>
+            <li><strong>Learning Rate (<code>learning_rate = 0.05</code>):</strong> A moderate learning rate was selected to prevent overfitting while maintaining practical execution runtimes on a 16 vCPU Agent Platform virtual machine.</li>
+            <li><strong>Tree Depth Strategy (<code>num_leaves</code> vs. <code>max_depth</code>):</strong> For LightGBM models, <code>num_leaves</code> was tuned instead of maximum depth to leverage leaf-wise growth. For XGBoost models, <code>max_depth</code> was tuned to control level-wise growth, capped at 10 to mitigate overfitting from repetitive splits on identical features.</li>
+            <li><strong>L2 Regularization (<code>reg_lambda</code>):</strong> EDA feature screening revealed that a small subset of features drove the majority of feature importance. Tuning <code>reg_lambda</code> penalized the model for over-splitting on these dominant features, forcing it to learn patterns from secondary signals.</li>
+            <li><strong>Feature Sampling (<code>feature_fraction</code> / <code>colsample_bytree</code>):</strong> This was tuned to inject diversity across individual trees, improving overall ensemble regularization and generalization.</li>
+            <li><strong>Minimum Split Gain (<code>min_split_gain</code> / <code>gamma</code>):</strong> Set to a baseline of 0.1 for classifier models. This acts as a conservative regularization threshold, preventing the models from creating complex branches for marginal gains.</li>
+        </ul>
+
+        <div class="strategy-callout">
+            <strong>⚖️ Class Imbalance & Class Weight Rationale (<code>scale_pos_weight</code> / <code>is_unbalance</code>):</strong><br>
+            Positive reorder labels comprise ~9% of the dataset. Given the overall scale of the training data, that 9% minority class still represents a significant volume of positive samples—allowing XGBoost and LightGBM to effectively learn patterns using default loss weights. To stay pragmatic with compute time and cloud costs, hyperparameter tuning focused primarily on tree shape rather than class weighting. However, because the model specifically targets the top 5 slots, experimenting with class weights could provide fine-grained ranking improvements at the very top of the list. Testing these hyperparameters is therefore recommended for future iterations.
+        </div>
+
+        <h3>3.2 Optimal Base Model Parameters</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Base Model</th>
+                    <th>Objective / Metric</th>
+                    <th>Optimal Hyperparameters</th>
+                    <th>Optimal Trees</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><b>LightGBM Ranker</b></td>
+                    <td><code>lambdarank</code> / <code>ndcg@5</code></td>
+                    <td><code>num_leaves: 96</code>, <code>feature_fraction: 0.7163</code>, <code>reg_lambda: 0.0595</code></td>
+                    <td>155</td>
+                </tr>
+                <tr>
+                    <td><b>LightGBM Classifier</b></td>
+                    <td><code>binary</code> / <code>average_precision</code></td>
+                    <td><code>num_leaves: 242</code>, <code>feature_fraction: 0.6792</code>, <code>reg_lambda: 7.7839</code></td>
+                    <td>108</td>
+                </tr>
+                <tr>
+                    <td><b>XGBoost Ranker</b></td>
+                    <td><code>rank:ndcg</code> / <code>ndcg@5</code></td>
+                    <td><code>max_depth: 6</code>, <code>colsample_bytree: 0.8026</code>, <code>reg_lambda: 1.8449</code></td>
+                    <td>345</td>
+                </tr>
+                <tr>
+                    <td><b>XGBoost Classifier</b></td>
+                    <td><code>binary:logistic</code> / <code>aucpr</code></td>
+                    <td><code>max_depth: 8</code>, <code>colsample_bytree: 0.7300</code>, <code>reg_lambda: 1.0527</code></td>
+                    <td>160</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>4. Ensembling & Rank Reciprocal Fusion (RRF)</h2>
+
+        <h3>4.1 Mathematical Objective Alignment & LambdaMART Overview</h3>
+        <p>To enable seamless blending, the loss objectives and gain parameters were aligned between base LightGBM and XGBoost ranker models. Setting <code>ndcg_exp_gain = False</code> in XGBoost forced both XGBoost and LightGBM rankers to evaluate reorder probability using linear gain, ensuring both architectures solved the same unified <strong>LambdaMART</strong> objective from different algorithmic angles.</p>
+
+        <div class="callout" style="background-color: #f0f7ff; border-left-color: #1a73e8; color: #0d47a1;">
+            <strong>💡 Understanding the LambdaMART Objective</strong>
+            
+            <p style="margin-top: 8px;">
+                In machine learning, standard classification models predict whether a customer will buy an item independently (Yes or No). However, in e-commerce recommendation widgets, items are not evaluated in isolation; they compete for a limited number of display slots (e.g., Top 5). <strong>LambdaMART</strong> is an industry-leading "Learning-to-Rank" algorithm designed specifically for this list-based competition.
+            </p>
+
+            <p style="font-weight: 600; margin-bottom: 4px;">1. What is a Gradient?</p>
+            <p style="margin-top: 0;">
+                During training, a model makes predictions and measures its mistakes using a loss function. A <strong>gradient</strong> is simply the mathematical compass (the direction and magnitude of error) that tells the model how to adjust its parameters to reduce mistakes. In standard regression, if a model predicts 0.4 for an item that should be 1.0, the gradient tells it: <em>"Increase this score by 0.6."</em>
+            </p>
+
+            <p style="font-weight: 600; margin-bottom: 4px;">2. How LambdaMART Works (Pairwise Comparisons & &Delta;NDCG):</p>
+            <p style="margin-top: 0;">
+                Instead of looking at one item at a time, LambdaMART evaluates <strong>pairs of items</strong> within a user's order. If Item A (which the user actually reordered) is ranked below Item B (which was not reordered), LambdaMART calculates a specialized ranking gradient called <strong>&lambda;<sub>ij</sub></strong> (Lambda):
+            </p>
+
+            <div class="math-box">
+                &lambda;<sub>ij</sub> = |&Delta;NDCG| &times; 
+                <div class="frac">
+                    <span class="frac-num">1</span>
+                    <span class="frac-den">1 + e<sup>s<sub>i</sub> &minus; s<sub>j</sub></sup></span>
+                </div>
+            </div>
+
+            <p style="margin-top: 8px;">Where:</p>
+            <ul style="margin-top: 4px; margin-bottom: 10px;">
+                <li><strong>(s<sub>i</sub> &minus; s<sub>j</sub>):</strong> Is the current difference in predicted scores between the correct item (<i>i</i>) and the incorrect item (<i>j</i>).</li>
+                <li><strong>|&Delta;NDCG|:</strong> Is the exact change in the global <code>NDCG</code> metric if the positions of item <i>i</i> and item <i>j</i> were swapped.</li>
+            </ul>
+
+            <p style="font-weight: 600; margin-bottom: 4px;">3. What is a Gradient Update in LambdaMART?</p>
+            <p style="margin-top: 0;">
+                A <strong>gradient update</strong> is the step the tree-boosting algorithm takes to fix ranking errors. Because the gradient &lambda;<sub>ij</sub> is directly multiplied by |&Delta;NDCG|, mistakes at the top of the list cause massive penalties. If swapping two items at Rank 1 and Rank 2 significantly drops the <code>NDCG</code> score, LambdaMART generates a huge gradient update that forces the decision trees to push the reordered item up immediately. Conversely, ranking errors at position 20 generate tiny gradient updates because they do not affect the Top 5 widget.
+            </p>
+        </div>
+
+        <h3>4.2 Score Standardization via Reciprocal Rank Fusion (RRF)</h3>
+        <p>Blending ranker outputs (raw margin scores) with classifier outputs (probabilities between 0 and 1) directly can distort predictions. To solve this, predictions were standardized using <strong>Reciprocal Rank Fusion (RRF)</strong>.</p>
+
+        <div class="math-box">
+            RRF_Score = 
+            <div class="frac">
+                <span class="frac-num">1</span>
+                <span class="frac-den">60 + Rank<sub>i</sub></span>
+            </div>
+        </div>
+
+        <p>where <i>Rank<sub>i</sub></i> is the item's predicted rank for a target order and 60 is the standard smoothing constant. This maps all model outputs onto an identical, rank-aware scale.</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>utility_functions.py &mdash; Reciprocal Rank Fusion (RRF)</span></div>
+            <pre><code>def compute_rrf_scores(df, models, group_cols, c=60):
+    """
+    Converts raw predictions into Reciprocal Rank Fusion scores.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Dataframe containing raw predictions.
+    models : list of str
+        List of model prediction column names to convert.
+    group_cols : list of str
+        Columns defining the grouping level (e.g., user and order).
+    c : int, default=60
+        RRF constant parameter.
+
+    Returns:
+    --------
+    pd.DataFrame
+        Dataframe containing the original data plus new RRF score columns.
+    """
+    df_rrf = df.copy()
+    for col in models:
+        rank_series = df_rrf.groupby(group_cols)[col].rank(ascending=False, method='min')
+        df_rrf[f'{col}_rrf'] = 1.0 / (c + rank_series)
+    return df_rrf</code></pre>
+        </div>
+
+        <h3>4.3 Optuna Ensemble Weight Optimization</h3>
+        <p>Out-Of-Fold (OOF) RRF predictions from the <code>train_val</code> set were used in Optuna trials to find optimal blending weights for five ensemble configurations by maximizing <code>NDCG@5</code>:</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>ensemble.py &mdash; Master 4-Model Ensemble Weight Objective</span></div>
+            <pre><code>def obj_ens5(trial):
+    """
+    Objective function for Optuna to optimize ensemble weights of all four 
+    base models (LightGBM Ranker & Classifier, XGBoost Ranker & Classifier) 
+    based on NDCG@5.
+
+    Args:
+        trial (optuna.trial.Trial): A trial object for hyperparameter optimization.
+
+    Returns:
+        float: The NDCG@5 score for the ensembled predictions.
+    """
+    with mlflow.start_run(run_name=f"ens5_trial_{trial.number}", nested=True):
+        w_lr = trial.suggest_float('w_lr', 0.0, 1.0)
+        w_lc = trial.suggest_float('w_lc', 0.0, 1.0)
+        w_xr = trial.suggest_float('w_xr', 0.0, 1.0)
+        w_xc = trial.suggest_float('w_xc', 0.0, 1.0)
+        tot = w_lr + w_lc + w_xr + w_xc
+        
+        ensemble_preds = ((w_lr/tot)*base_model_preds['lgbm_ranker_rrf'] + (w_lc/tot)*base_model_preds['lgbm_classifier_rrf'] +
+                     (w_xr/tot)*base_model_preds['xgb_ranker_rrf'] + (w_xc/tot)*base_model_preds['xgb_classifier_rrf'])
+
+        ndcg_at_5 = evaluate_ensemble(ensemble_preds, base_model_preds)
+        
+        mlflow.log_params({'w_lr': w_lr, 'w_lc': w_lc, 'w_xr': w_xr, 'w_xc': w_xc})
+        mlflow.log_metric("ndcg_at_5", ndcg_at_5)
+        
+        return ndcg_at_5</code></pre>
+        </div>
+
+        <h3>4.4 Optimal Blending Weights Summary</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Ensemble Optuna Study</th>
+                    <th>Blended Base Models</th>
+                    <th>Optimal Blending Weights</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><b>Ensemble 1</b></td>
+                    <td>LightGBM Ranker + XGBoost Classifier</td>
+                    <td><code>w_lr: 0.6836</code>, <code>w_xc: 0.0898</code></td>
+                </tr>
+                <tr>
+                    <td><b>Ensemble 2</b></td>
+                    <td>LightGBM Ranker + LightGBM Classifier</td>
+                    <td><code>w_lr: 0.4583</code>, <code>w_lc: 0.0201</code></td>
+                </tr>
+                <tr>
+                    <td><b>Ensemble 3</b></td>
+                    <td>XGBoost Ranker + LightGBM Classifier</td>
+                    <td><code>w_xr: 0.8000</code>, <code>w_lc: 0.1332</code></td>
+                </tr>
+                <tr>
+                    <td><b>Ensemble 4</b></td>
+                    <td>XGBoost Ranker + XGBoost Classifier</td>
+                    <td><code>w_xr: 0.3923</code>, <code>w_xc: 0.0045</code></td>
+                </tr>
+                <tr>
+                    <td><b>Ensemble 5</b></td>
+                    <td>All 4 Base Models Blended</td>
+                    <td><code>w_lr: 0.5433</code>, <code>w_lc: 0.2193</code>, <code>w_xr: 0.7483</code>, <code>w_xc: 0.1551</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>5. MLOps Experimentation Infrastructure & MLflow Logging</h2>
+        <p>To establish reproducible MLOps standards, MLflow logging was integrated into both the base model training scripts (<code>src/base_models/</code>) and <code>src/ensemble/ensemble.py</code>. This architecture logs Optuna trial parameters, cross-validation <code>NDCG@5</code> scores, hyperparameter JSONs, Out-Of-Fold (OOF) predictions, ensemble blending weights, and model artifacts (<code>.pkl</code>). Results are viewable by connecting to a local SQLite tracking store (<code>sqlite:///mlflow.db</code>).</p>
+
+        <p><strong>Pragmatic Portfolio Strategy & Future Iterations:</strong><br>
+        Given the scale of the dataset (18.9 million rows) and personal compute costs, exhaustive trial-and-error experiment sweeps were intentionally avoided. Instead, a front-loaded engineering approach was taken: calculate a comprehensive set of candidate features upstream in BigQuery/Dataform, and use LightGBM feature importance and cumulative gain pruning to identify the most impactful signals.</p>
+
+        <p>With that said, MLflow logging was implemented for future model experiments and iterations as outlined in the <em>Next Steps & Opportunities</em> section (e.g., testing new price/promotion features or real-time in-session context). This automated logging guarantees future experiment runs, hyperparameter changes, and model versions can be tracked, compared, and audited without code modifications.</p>
+
+        <h3>5.1 Base Model Experiment Tracking Snippet</h3>
+        <p>The code block below illustrates how parent and nested child runs are tracked inside <code>src/base_models/train_lgbm_ranker.py</code> during Bayesian hyperparameter tuning and full model training:</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>src/base_models/train_lgbm_ranker.py &mdash; MLflow Integration</span></div>
+            <pre><code>mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+mlflow.set_experiment("LGBM_Ranker_Optimization")
+
+with mlflow.start_run(run_name="LGBM_Ranker_Training_Tuning") as parent_run:
+
+    def objective(trial):
+        with mlflow.start_run(run_name=f"trial_{trial.number}", nested=True):
+            params = {
+                'objective': 'lambdarank', 'metric': 'ndcg', 'eval_at': 5,
+                'device': 'gpu', 'learning_rate': 0.05, 'n_estimators': 2000,
+                'num_leaves': trial.suggest_int('num_leaves', 31, 255),
+                'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 0.9),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0.01, 10.0, log=True)
+            }
+            mlflow.log_params(params)
+            
+            # ... [3-Fold Cross-Validation Fit & Predictions] ...
+            
+            avg_cv_score = np.mean(cv_scores)
+            mlflow.log_metric("avg_cv_ndcg5", avg_cv_score)
+            return avg_cv_score
+
+    # Optimize study
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=base_model_trials)
+
+    # Log Master Parent Metrics, Parameter JSONs, Parquet Artifacts, and Native Models
+    mlflow.log_params(study.best_params)
+    mlflow.log_metric("best_cv_ndcg5", study.best_value)
+    mlflow.log_metric("optimal_trees", optimal_trees)
+    mlflow.log_artifact(param_file_path)
+    mlflow.log_artifact(oof_file_path)
+    mlflow.lightgbm.log_model(lgbm_ranker_final, artifact_path="lgbm_ranker_base_model")</code></pre>
+        </div>
+
+        <h3>5.2 Ensemble Weight Search Tracking Snippet</h3>
+        <p>Similarly, <code>src/ensemble/ensemble.py</code> logs nested Optuna trial weights and master metrics across all five ensemble studies:</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>src/ensemble/ensemble.py &mdash; MLflow Integration</span></div>
+            <pre><code>mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+mlflow.set_experiment("Ensemble_Weight_Optimization")
+
+with mlflow.start_run(run_name="Ensemble_Weight_Tuning") as parent_run:
+
+    def obj_ens5(trial):
+        with mlflow.start_run(run_name=f"ens5_trial_{trial.number}", nested=True):
+            w_lr = trial.suggest_float('w_lr', 0.0, 1.0)
+            w_lc = trial.suggest_float('w_lc', 0.0, 1.0)
+            w_xr = trial.suggest_float('w_xr', 0.0, 1.0)
+            w_xc = trial.suggest_float('w_xc', 0.0, 1.0)
+            tot = w_lr + w_lc + w_xr + w_xc
+            
+            ensemble_preds = ((w_lr/tot)*base_model_preds['lgbm_ranker_rrf'] + (w_lc/tot)*base_model_preds['lgbm_classifier_rrf'] +
+                         (w_xr/tot)*base_model_preds['xgb_ranker_rrf'] + (w_xc/tot)*base_model_preds['xgb_classifier_rrf'])
+
+            ndcg_at_5 = evaluate_ensemble(ensemble_preds, base_model_preds)
+            
+            mlflow.log_params({'w_lr': w_lr, 'w_lc': w_lc, 'w_xr': w_xr, 'w_xc': w_xc})
+            mlflow.log_metric("ndcg_at_5", ndcg_at_5)
+            return ndcg_at_5
+
+    # Log master best values for all 5 studies
+    mlflow.log_metric("ens1_best_ndcg5", study1.best_value)
+    mlflow.log_metric("ens2_best_ndcg5", study2.best_value)
+    mlflow.log_metric("ens3_best_ndcg5", study3.best_value)
+    mlflow.log_metric("ens4_best_ndcg5", study4.best_value)
+    mlflow.log_metric("ens5_best_ndcg5", study5.best_value)
+    mlflow.log_artifact(best_weights_path)</code></pre>
+        </div>
+
+        <h3>5.3 MLflow User Interface & Tracking Dashboard</h3>
+        <p>The screenshot below displays the centralized MLflow tracking dashboard hosted on the Agent Platform Workbench instance, showing parameter comparisons and logged artifacts across optimization experiments:</p>
+
+        <div class="img-container">
+            <img src="images/mlflow_dashboard.png" alt="MLflow Experiment Tracking Dashboard Interface">
+            <div class="caption">Figure 6: MLflow Experiment Tracking Dashboard Interface</div>
+        </div>
+
+        <h2>6. Pipeline Execution Automation & Resource Management</h2>
+        <p>The entire pipeline from base model training to ensemble weight optimization is automated via <code>run_training_pipeline.sh</code>:</p>
+
+        <div class="code-container">
+            <div class="code-header"><span>Bash Execution & Background Run Commands</span></div>
+            <pre><code># 1. Grant execute permissions
+chmod +x run_training_pipeline.sh
+
+# 2. Execute pipeline in background detached from terminal
+nohup ./run_training_pipeline.sh > pipeline.log 2>&1 &</code></pre>
+        </div>
+
+        <div class="callout">
+            <strong>⚡ High-Volume Memory Management Strategies</strong>
+            <ul style="margin-bottom: 0;">
+                <li><strong>Garbage Collection:</strong> Deletions (<code>del</code>) paired with <code>gc.collect()</code> flush memory allocations immediately after each cross-validation fold.</li>
+                <li><strong>In-Memory Cloud Storage Streaming:</strong> Models are serialized in memory using <code>io.BytesIO()</code> and streamed directly to Google Cloud Storage via JIT authentication (<code>pickle_and_stream_to_gcs</code>).</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- Model Evaluation -->
+    <section id="model-evaluation">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Model Evaluation</h1>
+        </div>
+
+        <p>To measure how well the models predict grocery cart reorders, performance was assessed using four metrics evaluated at the top 5 positions (K=5). To establish a practical benchmark, a <strong>Heuristic Baseline Model</strong> was calculated utilizing a prior cart position strategy. This baseline predicts that a customer's 5 most likely reorders are the top 5 items they placed in their cart during their last order. By comparing the machine learning ensembles against this baseline, we can measure the predictive lift generated by the models.</p>
+
+        <h2>1. Evaluation Metrics</h2>
+        
+        <ul>
+            <li><strong>Recall@5:</strong> The primary metric. Evaluates the share of total reorders captured in the top 5 recommendations.</li>
+        </ul>
+        <div class="math-box">
+            Recall@5 = 
+            <div class="frac">
+                <span class="frac-num">Number of actual reorders in top 5</span>
+                <span class="frac-den">Total Reorders in the order</span>
+            </div>
+        </div>
+
+        <ul>
+            <li><strong>NDCG@5 (Normalized Discounted Cumulative Gain):</strong> Evaluates how well actual reorders fill the top recommendation slots, penalizing relevant items placed lower in the ranking (order matters).</li>
+        </ul>
+        <div class="math-box">
+            DCG@5 = &Sigma;<sub>i=1</sub><sup>5</sup> 
+            <div class="frac" style="vertical-align: middle;">
+                <span class="frac-num">2<sup>rel<sub>i</sub></sup> &minus; 1</span>
+                <span class="frac-den">log<sub>2</sub>(i + 1)</span>
+            </div><br><br>
+            IDCG@5 = &Sigma;<sub>i=1</sub><sup>|REL<sub>5</sub>|</sup> 
+            <div class="frac" style="vertical-align: middle;">
+                <span class="frac-num">2<sup>rel<sub>i</sub></sup> &minus; 1</span>
+                <span class="frac-den">log<sub>2</sub>(i + 1)</span>
+            </div><br><br>
+            NDCG@5 = 
+            <div class="frac">
+                <span class="frac-num">DCG@5</span>
+                <span class="frac-den">IDCG@5</span>
+            </div>
+        </div>
+
+        <ul>
+            <li><strong>Precision@5:</strong> The proportion of the top 5 recommendations that were actually reordered.</li>
+        </ul>
+        <div class="math-box">
+            Precision@5 = 
+            <div class="frac">
+                <span class="frac-num">Number of actual reorders in top 5</span>
+                <span class="frac-den">5</span>
+            </div>
+        </div>
+
+        <ul>
+            <li><strong>F1@5:</strong> The harmonic mean of Precision and Recall at 5, identifying if one metric is inflated at the expense of the other.</li>
+        </ul>
+        <div class="math-box">
+            F1@5 = 2 &times; 
+            <div class="frac">
+                <span class="frac-num">Precision@5 &times; Recall@5</span>
+                <span class="frac-den">Precision@5 + Recall@5</span>
+            </div>
+        </div>
+
+        <h2>2. Model Performance & Champion Selection</h2>
+        
+        <p><strong>Model Selection:</strong> The champion model selection was made on the validation data using Recall@5, prioritizing the model's ability to maximize the number of correct reorder predictions in the top 5.</p>
+        
+        <p><strong>Secondary Evaluation Metrics:</strong> The secondary evaluation metrics (NDCG@5, Precision@5, and F1@5) were utilized to further validate the models' performance. Specifically, the NDCG@5 scores show the models' ability to place reorder predictions in the correct order. Thus, this metric indicates the models' strength at placing the reorder predictions in the optimal positions in the widget based on natural human reading patterns. Furthermore, Precision@5 and F1@5 scores provide additional context into the models' ability to be efficient within the 5-item constraint, maximizing true positive recommendations while penalizing wasted slots.</p>
+
+        <div style="background-color: #e6f4ea; border-left: 4px solid #137333; color: #137333; padding: 15px; border-radius: 4px; margin: 15px 0;">
+            <strong>💡 Key Insights (Model Performance):</strong> 
+            <ul class="modern-list">
+                <li><strong>Massive Lift Over Baseline:</strong> Every machine learning model significantly outperformed the heuristic baseline (Prior Cart Position) across both data splits. For context, the baseline achieved a Recall@5 of 0.2725 on validation, while the top models exceeded 0.383.</li>
+                <li><strong>Validation Champion:</strong> The <strong>Full Ensemble (All Base Models)</strong> won the validation phase with a leading Recall@5 of 0.38384 and NDCG@5 of 0.53233. In fact, it was the leader across all evaluation metrics (Recall@5, NDCG@5, Precision@5, F1@5)</li>
+                <li><strong>Test Champion:</strong> The <strong>Full Ensemble (All Base Models)</strong> also won the test split (Recall@5: 0.36739) and lead in 3 of the 4 evaluation metrics (Recall@5, Precision@5, F1@5).</li>
+                <li><strong>Test Generalization:</strong> While overall scores dipped slightly from validation to test, this is not abnormal behavior. The heuristic baseline score also experienced a corresponding drop (from 0.2725 to 0.2638), suggesting that the test split contained slightly harder-to-predict consumer behaviors rather than indicating model overfitting. Overall, the consistent lift over the heuristic baseline across the validation and test splits indicates strong generalization to unseen data.</li>
+                <li><strong>Razor-Thin Margins:</strong> Extremely thin performance margins across the non-baseline models raises the question of complexity vs. return for the champion model. Financial impact projections will be important to inform decision making around this trade-off. </li>
+            </ul>
+        </div>
+
+        <div class="callout-blue">
+            <strong>📈 Contextualizing Recall@5:</strong><br>
+            While a Recall@5 score of ~0.36 to ~0.38 might numerically seem modest, it represents strong performance in this domain. Grocery shopping carts frequently contain dozens of items. Successfully predicting and capturing nearly 40% of a customer's total reorders using only 5 recommendations is significant. This becomes especially apparent when comparing the machine learning ensembles to the results of the heuristic baseline.
+        </div>
+
+        <h3>2.1 Validation Split Results</h3>
+        <div class="img-container">
+            <img src="images/validation_evaluation_metrics table.png" alt="Validation Split Results Chart">
+            <div class="caption">Figure 7: Model Performance Metrics on Validation Data</div>
+        </div>
+        
+        <h3>2.2 Test Split Results</h3>
+        <div class="img-container">
+            <img src="images/test_evaluation_metrics table.png" alt="Test Split Results Chart">
+            <div class="caption">Figure 8: Model Performance Metrics on Test Holdout Data</div>
+        </div>
+
+        <h2>3. Feature Importance (SHAP)</h2>
+        <p>Model interpretability is important for understanding what drives customer behavior. To visualize feature importance, SHAP (SHapley Additive exPlanations) values were extracted across both validation and test splits and utilized to create SHAP mean absolute importance bar plots (to understand magnitude) and Beeswarm plots (to understand direction).</p>
+
+        <h3>Features Driving Predictions:</h3>
+        <p>Model performance is largely driven by a few feature categories:</p>
+        <ul>
+            <li><strong>Cyclical Time Features:</strong> (e.g., <em>Days Since Last Purchase</em> and <em>Avg Days Between Product Purchases</em>). The interplay between these cyclical markers is a strong indicator of when a customer is ready to reorder a product.</li>
+            <li><strong>Streak Features:</strong> (e.g., <em>Consecutive Product Order Skips</em> and <em>Last 3 Orders Purchase Streak</em>). These define buying momentum. Has a customer been consistently buying/skipping this product?</li>
+            <li><strong>Concentration/Penetration Features:</strong> Represent product loyalty and a product's overall share of a user's purchases.</li>
+            <li><strong>Rankers vs. Classifiers:</strong> There are notable differences between how Classifiers and Rankers utilize these features. Classifiers tend to place heavier weight on streak features and penetration ratios to predict probabilities. However, the rankers place greater importance on cyclical time features and purchase concentration.</li>
+        </ul>
+
+        <div class="callout">
+            <strong>🔑 Consistency Provides Confidence:</strong> The feature importance visualizations show consistency across the base models, validation split, and test split. This consistency provides confidence the models are capturing the correct signals.
+        </div>
+        
+        <div class="callout-blue">
+            <strong>⚙️ Strategy (SHAP Computation & Storage):</strong> Generating SHAP values for millions of predictions is memory-intensive. This was optimized by utilizing <code>shap.GPUTreeExplainer</code> for hardware acceleration where compatible. To preserve local memory, row-level SHAP data was directly streamed into BigQuery in memory-safe chunks of 2,000 using <code>to_gbq</code>.
+        </div>
+
+        <details>
+            <summary style="cursor: pointer; font-weight: 700; font-size: 16px; color: var(--primary-color); padding: 12px 0;">
+                🔍 Expand SHAP Interpretability Plots (Validation Split)
+            </summary>
+            <div style="max-height: 500px; overflow-y: auto; border: 1px solid var(--border-color); padding: 15px; border-radius: 8px; margin-top: 10px; background-color: #fafafa;">
+                <h3>3.1 Validation Data - SHAP Importance</h3>
+                
+                <h4>LightGBM Ranker</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP LGBM Ranker Validation.png" alt="LightGBM Ranker Mean Abs SHAP Validation">
+                    <img src="images/Beeswarm LGBM Ranker Validation.png" alt="LightGBM Ranker Beeswarm Validation">
+                </div>
+
+                <h4>LightGBM Classifier</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP LGBM Classifier Validation.png" alt="LightGBM Classifier Mean Abs SHAP Validation">
+                    <img src="images/Beeswarm LGBM Classifier Validation.png" alt="LightGBM Classifier Beeswarm Validation">
+                </div>
+
+                <h4>XGBoost Ranker</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP XGBoost Ranker Validation.png" alt="XGBoost Ranker Mean Abs SHAP Validation">
+                    <img src="images/Beeswarm XGBoost Ranker Validation.png" alt="XGBoost Ranker Beeswarm Validation">
+                </div>
+
+                <h4>XGBoost Classifier</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP XGBoost Classifier Validation.png" alt="XGBoost Classifier Mean Abs SHAP Validation">
+                    <img src="images/Beeswarm XGBoost Classifier Validation.png" alt="XGBoost Classifier Beeswarm Validation">
+                </div>
+
+                <div class="caption">Figure 9: SHAP Feature Importance on Validation Data (Mean Absolute Magnitude vs. Directional Beeswarm)</div>
+            </div>
+        </details>
+
+        <details style="margin-top: 15px;">
+            <summary style="cursor: pointer; font-weight: 700; font-size: 16px; color: var(--primary-color); padding: 12px 0;">
+                🔍 Expand SHAP Interpretability Plots (Test Split)
+            </summary>
+            <div style="max-height: 500px; overflow-y: auto; border: 1px solid var(--border-color); padding: 15px; border-radius: 8px; margin-top: 10px; background-color: #fafafa;">
+                <h3>3.2 Test Data - SHAP Importance</h3>
+                
+                <h4>LightGBM Ranker</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP LGBM Ranker Test.png" alt="LightGBM Ranker Mean Abs SHAP Test">
+                    <img src="images/Beeswarm LGBM Ranker Test.png" alt="LightGBM Ranker Beeswarm Test">
+                </div>
+
+                <h4>LightGBM Classifier</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP LGBM Classifier Test.png" alt="LightGBM Classifier Mean Abs SHAP Test">
+                    <img src="images/Beeswarm LGBM Classifier Test.png" alt="LightGBM Classifier Beeswarm Test">
+                </div>
+
+                <h4>XGBoost Ranker</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP XGBoost Ranker Test.png" alt="XGBoost Ranker Mean Abs SHAP Test">
+                    <img src="images/Beeswarm XGBoost Ranker Test.png" alt="XGBoost Ranker Beeswarm Test">
+                </div>
+
+                <h4>XGBoost Classifier</h4>
+                <div class="side-by-side">
+                    <img src="images/Mean Abs SHAP XGBoost Classifier Test.png" alt="LightGBM Classifier Mean Abs SHAP Test">
+                    <img src="images/Beeswarm XGBoost Classifier Test.png" alt="XGBoost Classifier Beeswarm Test">
+                </div>
+
+                <div class="caption">Figure 10: SHAP Feature Importance on Test Data (Mean Absolute Magnitude vs. Directional Beeswarm)</div>
+            </div>
+        </details>
+    </section>
+
+    <!-- Financial Impact Analysis -->
+    <section id="financial-impact">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Financial Impact Analysis</h1>
+        </div>
+
+        <p>This section evaluates the projected financial impact of implementing the machine learning reorder prediction models compared to two baselines: a "No Widget" baseline and a "Heuristic Model" baseline. Translating the primary evaluation metric (Recall@5) into estimated profit lift bridges the gap between model performance and business value.</p>
+        
+        <div class="disclaimer-callout">
+            <strong>⚠️ Portfolio Context & Disclaimer:</strong> Please note that these financial projections are intended solely to demonstrate business analytics and ROI estimation skillsets for the purpose of this portfolio project. In reality, Instacart's massive scale and success are largely driven by the fact that they have already implemented highly sophisticated recommendation engines. Therefore, this analysis does not represent a true real-world incremental impact for Instacart today, but rather illustrates the theoretical value of deploying such machine learning models from a hypothetical zero-baseline.
+        </div>
+
+        <div class="strategy-callout">
+            <strong>🛠️ Strategy (Test Data for Financial Projections):</strong> The financial evaluation is based exclusively on the <strong>test split</strong> (unseen holdout data) rather than the validation set. While hyperparameters and ensemble weights were optimized on the train/validation split, the validation set was still utilized for model selection. Calculating the financial impact on that same validation data could introduce selection bias and artificially inflate profit lift estimates. By evaluating the financial impact on the unseen test set, we ensure the most unbiased projection of actual production performance.
+        </div>
+
+        <h2>1. Key Assumptions</h2>
+        <p>Lacking access to proprietary Instacart data, this model establishes baseline assumptions using publicly reported metrics. The financial projections are calculated by linking the Recall@5 performance of each model to three core business levers: Average Order Value (AOV), conversion rate, and customer churn. In a production environment, these theoretical lifts would need to be validated through A/B testing.</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Variable</th>
+                    <th>Assumed Value</th>
+                    <th>Source / Methodology</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Annual Orders</strong></td>
+                    <td>338,800,000</td>
+                    <td>Instacart publicly reported 2025 Annual Order Volume</td>
+                </tr>
+                <tr>
+                    <td><strong>Annual Revenue</strong></td>
+                    <td>$3,742,000,000</td>
+                    <td>Instacart publicly reported revenue in 2025 from SEC filings</td>
+                </tr>
+                <tr>
+                    <td><strong>Base AOV</strong></td>
+                    <td>Calculated (~$11.04)</td>
+                    <td>Derived from Annual Revenue / Annual Orders</td>
+                </tr>
+                <tr>
+                    <td><strong>Profit Margin</strong></td>
+                    <td>73.7%</td>
+                    <td>Instacart's publicly reported profit margin from SEC filings</td>
+                </tr>
+                <tr>
+                    <td><strong>Base Conversion Rate</strong></td>
+                    <td>6.0%</td>
+                    <td>Estimate for e-commerce grocery shopping</td>
+                </tr>
+                <tr>
+                    <td><strong>Base Churn Rate</strong></td>
+                    <td>39.0%</td>
+                    <td>Based on Bloomberg Second Measure study</td>
+                </tr>
+                <tr>
+                    <td><strong>Active Users</strong></td>
+                    <td>14,000,000</td>
+                    <td>Instacart publicly reported monthly active consumers across North America</td>
+                </tr>
+                <tr>
+                    <td><strong>Annual User Orders</strong></td>
+                    <td>Calculated (~24.2)</td>
+                    <td>Derived from Annual Orders / Active Users</td>
+                </tr>
+                <tr>
+                    <td><strong>Conversion Lift (per 10% Recall)</strong></td>
+                    <td>+0.2%</td>
+                    <td>Assumption: Less customer friction results in a higher rate of completed orders</td>
+                </tr>
+                <tr>
+                    <td><strong>AOV Lift (per 10% Recall)</strong></td>
+                    <td>+$0.05</td>
+                    <td>Assumption: Increased AOV due to extra items added to the cart</td>
+                </tr>
+                <tr>
+                    <td><strong>Churn Reduction (per 10% Recall)</strong></td>
+                    <td>-0.5%</td>
+                    <td>Assumption: Reduced churn due to lower customer friction and better experience</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>2. Profit Lift Calculations & Formulas</h2>
+        <p>To translate the Recall@5 metric into profit lift, the baseline conversion, churn, and AOV assumptions are scaled proportionally to the model's performance. For every 10% of Recall achieved, the model applies a fractional lift to these core profit drivers. The total profit lift is calculated by isolating and summing the impact of the three drivers.</p>
+
+        <div class="math-box">
+            <span class="formula-name">Recall Scaling Unit</span>
+            Recall Units = 
+            <div class="frac">
+                <span class="frac-num">Recall@5</span>
+                <span class="frac-den">0.10</span>
+            </div>
+        </div>
+
+        <div class="math-box">
+            <span class="formula-name">1. Conversion Profit Lift</span>
+            New Conversion Rate = Base Conversion Rate + (Recall Units &times; 0.002)<br><br>
+            Extra Orders = Annual Orders &times; (New Conversion Rate &minus; Base Conversion Rate)<br><br>
+            <strong>Conversion Profit Lift = Extra Orders &times; Base AOV &times; Profit Margin</strong>
+        </div>
+
+        <div class="math-box">
+            <span class="formula-name">2. Annual Retention Profit Lift</span>
+            New Churn Rate = Base Churn Rate &minus; (Recall Units &times; 0.005)<br><br>
+            Extra Customers Retained = Active Users &times; (Base Churn Rate &minus; New Churn Rate)<br><br>
+            <strong>Annual Retention Profit Lift = Extra Customers Retained &times; Base AOV &times; Annual User Orders &times; Profit Margin</strong>
+        </div>
+
+        <div class="math-box">
+            <span class="formula-name">3. AOV Profit Lift</span>
+            New AOV = Base AOV + (Recall Units &times; 0.05)<br><br>
+            Extra Order AOV Lift = (Extra Orders &times; New AOV &times; Profit Margin) &minus; Conversion Profit Lift<br><br>
+            Extra Customer AOV Lift = (Extra Customers Retained &times; New AOV &times; Annual User Orders &times; Profit Margin) &minus; Annual Retention Profit Lift<br><br>
+            Baseline Order AOV Lift = (Annual Orders &times; New AOV &times; Profit Margin) &minus; Baseline Profit<br><br>
+            <strong>Total AOV Profit Lift = Extra Order AOV Lift + Extra Customer AOV Lift + Baseline Order AOV Lift</strong>
+        </div>
+
+        <div class="math-box">
+            <span class="formula-name">Total Profit Lift</span>
+            <strong>Total Profit Lift = Total AOV Profit Lift + Conversion Profit Lift + Annual Retention Profit Lift</strong>
+        </div>
+
+        <h2>3. Model Performance & Financial Impact</h2>
+        
+        <div style="margin-bottom: 25px;">
+            <img src="images/Financial_Impact Bar Chart.png" alt="Expected Annual Profit Lift by Model Bar Chart" style="width: 100%; max-width: 1050px; border: 1px solid #dadce0; border-radius: 8px;">
+        </div>
+
+        <div class="callout">
+            <strong>💡 Key Insights (Financial Evaluation):</strong>
+            <p style="margin-top: 8px; margin-bottom: 8px;"><strong>Significant Lift Over Baselines:</strong> All trained base and ensemble models performed significantly better than the heuristic baseline. This translates to an estimated increase in annual profit of >~$33M compared to the heuristic baseline and >$117M annually relative to the "no widget" baseline.</p>
+            <p style="margin-bottom: 8px;"><strong>Largest Profit Driver:</strong> As visualized in the chart above, the Churn Decrease Profit Lift (dark blue segment) contributes the largest lift to total profit (based on assumptions made).</p>
+            <p style="margin-bottom: 0;"><strong>Model Complexity vs. Marginal Return:</strong> There is only a narrow ~$0.5M annual profit difference between the highest-performing ensemble ("Full Ensemble") and the lowest-performing non-baseline ML model ("XGBoost Classifier"). This tight margin indicates a critical trade-off: cross-functional business teams must weigh this fractional profit lift against the increased computational overhead, latency, and maintenance costs of deploying complex ensembles in production versus a simpler, single-model architecture.</p>
+        </div>
+    </section>
+
+    <!-- Power BI Dashboard -->
+    <section id="power-bi-dashboard">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Power BI Business Intelligence Dashboard</h1>
+        </div>
+
+        <p>The culmination of this machine learning pipeline is an interactive Power BI dashboard, built using the <code>.pbip</code> (Power BI Project) format to support CI/CD workflows and version control (a downloadable <code>.pbix</code> file is also available). This dashboard empowers technical and business stakeholders to evaluate model performance, interpret feature importance, and perform financial sensitivity analysis.</p>
+
+        <h2>1. Data Preparation Strategy (Agent Platform to BigQuery)</h2>
+        <p>To improve dashboard performance, heavy analytical processing is offloaded to Agent Platform (model evaluation notebook) before data ever reaches Power BI. Key datasets are transformed, streamed to BigQuery, then imported into Power BI.</p>
+        <ul>
+            <li><strong>SHAP Beeswarm Optimization:</strong> Because Power BI struggles to render scatter plots with millions of data points, raw features and SHAP values are unpivoted (melted) into a long format. A stratified percentile bin sampling method is then applied to downsample the data (600 rows per feature) while preserving the original feature distribution shape.</li>
+            <li><strong>Ensemble Weight Normalization:</strong> JSON ensemble weights are parsed, normalized to sum to 100%, and pivoted into a wide-format for use in the pop-up ensemble weight pie charts.</li>
+        </ul>
+
+        <div class="callout-amber">
+            <strong>⚠️ Dataflow Context:</strong> As this is a portfolio project, Power BI Dataflows were not utilized. However, in a real production environment, Dataflows would be implemented. This would establish a single source of truth, reduce refresh load on BigQuery, and enable reusability across multiple reports.
+        </div>
+
+        <h2>2. Machine Learning Model Evaluation Page</h2>
+        <p>This page allows users to evaluate candidate machine learning models (XGBoost, LightGBM, and Ensembles) against a heuristic baseline (Prior Cart Position).</p>
+        <ul>
+            <li><strong>Dynamic Evaluation Metric Slicer:</strong> Users can select a specific evaluation metric (Recall@5, NDCG@5, Precision@5, F1@5) to update the horizontal bar chart to reflect the selected metric.</li>
+            <li><strong>Interactive Feature Importance:</strong> Navigate beyond "black-box" predictions. Users can toggle between Base Models and switch between visualization types (Mean Absolute Importance Bar Plot vs. Beeswarm Plot) to understand how behavioral features influence reorder probabilities.</li>
+        </ul>
+
+        <h3>Top-Right Icon Tools & Pop-Ups:</h3>
+        <ul>
+            <li><strong>Data Split Toggle:</strong> Flip all page metrics between the Validation and Test datasets.</li>
+            <li><strong>Pie Chart Icon:</strong> Opens a pop-up window displaying the optimal model blending weights used to construct the selected ensemble predictions.</li>
+            <li><strong>Spreadsheet Icon:</strong> Expands a table detailing all evaluation metrics across every model.</li>
+            <li><strong>Info Page:</strong> Selecting the info icon in the top right navigates the user to a dedicated information page. This page utilizes an HTML Content visual and an HTML measure to display an executive summary, navigation guide, key formulas & definitions, and data sources in a clean and professional format.</li>
+        </ul>
+
+        <div class="media-container">
+            <video controls loop muted playsinline>
+                <source src="images/Model Evaluation Page Video Demonstration.mp4" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+            <div class="caption">Video 1: Machine Learning Model Evaluation Dashboard Interaction</div>
+        </div>
+
+        <h2>3. Financial Impact Evaluation Page</h2>
+        <p>This page bridges the gap between data science and profit by translating the primary evaluation metric (Recall@5) into estimated profit lift, utilizing baseline assumptions derived from public SEC filings.</p>
+        <ul>
+            <li><strong>Interactive Sensitivity Analysis:</strong> Users can adjust slider controls to change business assumptions (Baseline Conversion Rate, Baseline Churn Rate, Conversion Lift, AOV Lift, and Churn Reduction) to simulate different financial scenarios.</li>
+            <li><strong>Total Profit by Driver Waterfall:</strong> Tracks the financial step-up from the Baseline Profit, isolating the financial lift generated by Churn Reduction, Average Order Value (AOV) growth, and increased Conversion.</li>
+        </ul>
+
+        <h3>Top-Right Icon Tools & Pop-Ups:</h3>
+        <ul>
+            <li><strong>Data Split Toggle:</strong> Flip all page metrics between the Validation and Test datasets.</li>
+            <li><strong>Donut Chart Icon:</strong> Opens a pop-up window displaying the profit lift share by driver.</li>
+            <li><strong>List Icon:</strong> Displays the SEC baseline operational metrics and derived assumptions used by the financial model.</li>
+            <li><strong>Info Page:</strong> Similar to the model evaluation section, an info icon provides access to an executive summary, navigation instructions, key formulas & definitions, and data sources, all rendered via an HTML measure.</li>
+        </ul>
+
+        <div class="media-container">
+            <video controls loop muted playsinline>
+                <source src="images/Financial Impact Video Demonstration.mp4" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+            <div class="caption">Video 2: Financial Impact Evaluation Dashboard Interaction</div>
+        </div>
+
+        <h2>4. Semantic Data Model</h2>
+        <p>The semantic model leverages a star schema. It contains central fact tables (evaluation_metrics, beeswarm_plot_data, & power_bi_shap_barplots) connected to dimensions for the dataset split (validation/test), model types, models, and base models. Disconnected parameter tables power the "What-If" Sensitivity Controls for the Financial Impact page. Additionally, disconnected tables are used to organize the dashboard measures.</p>
+
+        <div class="media-container">
+            <img src="images/Data Model.png" alt="Power BI Semantic Data Model Star Schema">
+            <div class="caption">Figure 11: Power BI Semantic Data Model Architecture</div>
+        </div>
+    </section>
+
+    <!-- Path to Production: MLOps Blueprint -->
+    <section id="mlops-blueprint">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Path to Production: MLOps Blueprint</h1>
+        </div>
+
+        <p>Deploying a production recommendation engine requires balancing data science modeling with software engineering standards. This module contrasts the current implementation with the production architecture needed to scale to real-time in-session reorder predictions.</p>
+
+        <div class="strategy-callout">
+            <strong>⚙️ Operational Trade-off — Single Model vs. Multi-Model Ensemble:</strong><br>
+            While the 4-model ensemble achieved the highest <code>Recall@5</code>, its performance margin over individual base models is narrow. In production, deploying the best-performing base model (XGBoost Ranker) is strongly recommended to minimize inference latency, reduce serving costs, and simplify pipeline maintenance—sacrificing less than $40K in projected annual profit lift.
+        </div>
+
+        <h2>Current Implementation vs. Target Production Architecture</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>MLOps Pillar</th>
+                    <th>Current Implementation</th>
+                    <th>Target Production Architecture</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><b>CI/CD & Version Control</b></td>
+                    <td>GitHub (isolated <code>dev</code> & <code>main</code> branches), Dataform medallion ELT SQL models (<code>definitions/sources</code>, <code>bronze</code>, <code>silver</code>, <code>gold</code>).</td>
+                    <td>GitHub Actions CI/CD workflows executing automated pytest suites on codebase, Dataform SQL compilation checks, and deployment triggers on PR merges to main.</td>
+                </tr>
+                <tr>
+                    <td><b>Experimentation & Tracking</b></td>
+                    <td>MLflow tracking store (<code>sqlite:///mlflow.db</code>) logging Optuna hyperparameter parameters, RRF ensemble weights, evaluation metrics, oof predictions, and model artifacts.</td>
+                    <td>Centralized MLflow Model Registry with explicit model aliasing (<code>Staging</code> vs. <code>Production</code>) and lineage governance.</td>
+                </tr>
+                <tr>
+                    <td><b>Feature Serving & Online Storage</b></td>
+                    <td>Google BigQuery Gold feature table storing historical feature sets for training and evaluation.</td>
+                    <td>Scheduled batch pipeline publishing the latest user feature snapshots from BigQuery Gold tables to Agent Platform Feature Store and Cloud Bigtable for single-digit millisecond online serving during active shopping sessions.</td>
+                </tr>
+                <tr>
+                    <td><b>Continuous Training (CT) & Orchestration</b></td>
+                    <td>Automated background bash pipeline script (<code>scripts/run_training_pipeline.sh</code>) chaining base model training and ensemble weight blending.</td>
+                    <td>Orchestrated DAG workflows via Agent Platform Pipelines (Kubeflow) triggered on scheduled intervals or model drift alerts.</td>
+                </tr>
+                <tr>
+                    <td><b>Data Quality & Monitoring</b></td>
+                    <td>Dataform SQL quality assertions (null value prevention, sequence consistency, cold-start threshold filters, and bounded range checks).</td>
+                    <td><b>Agent Platform Model Monitoring</b> tracking Data Drift (e.g., changes in basket sizes/purchase concentrations) and Concept Drift (decay in <code>Recall@5</code> / <code>NDCG@5</code>) to trigger automated alerts.</td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- Cold Start Strategy -->
+    <section id="cold-start-strategy">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Cold Start Strategy</h1>
+        </div>
+
+        <p>While the machine learning model is effective at predicting reorder behavior for established users, the pipeline filters out users with insufficient order history (users with fewer than 4 prior orders). To ensure a seamless and personalized shopping experience for new users, a heuristic-based fallback strategy should be employed to fill the 5 widget slots.</p>
+
+        <h2>Dynamic Widget Fallback Logic</h2>
+        
+        <div class="strategy-card">
+            <div class="strategy-title">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="#1a73e8">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                </svg>
+                Scenario 1: True Cold Start (Zero Prior Orders)
+            </div>
+            <p class="strategy-text">If a user is placing their first order on the platform, no historical cart data exists. In this scenario, the widget populates with the 5 most popular products globally at that exact time.</p>
+            <p class="strategy-text" style="margin-top: 15px;"><em>Note: This assumes the introduction of dates/timestamps in the production data pipeline to calculate real-time trending items.</em></p>
+        </div>
+
+        <div class="strategy-card">
+            <div class="strategy-title">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="#1a73e8">
+                    <path d="M7 18c-1.1 0-1.99.9-1.99 2S5.9 22 7 22s2-.9 2-2-.9-2-2-2zM1 2v2h2l3.6 7.59-1.35 2.45c-.16.28-.25.61-.25.96 0 1.1.9 2 2 2h12v-2H7.42c-.14 0-.25-.11-.25-.25l.03-.12.9-1.63h7.45c.75 0 1.41-.41 1.75-1.03l3.58-6.49c.08-.14.12-.31.12-.48 0-.55-.45-1-1-1H5.21l-.94-2H1zm16 16c-1.1 0-1.99.9-1.99 2s.89 2 1.99 2-.9 2-2-.9-2-2-2z"/>
+                </svg>
+                Scenario 2: Partial Prior Cart (&lt; 5 Items) <span class="hybrid-badge">Hybrid Approach</span>
+            </div>
+            <p class="strategy-text">If a user has order history but their previous cart contained fewer than 5 items, the system utilizes a hybrid approach. It first pulls all available items from the user's prior cart to maintain personalization. The remaining empty slots are then filled using the global most popular items (that are not already in the cart). This guarantees all 5 slots are monetized.</p>
+        </div>
+
+        <div class="strategy-card">
+            <div class="strategy-title">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="#1a73e8">
+                    <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 14l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                </svg>
+                Scenario 3: Full Prior Cart (≥ 5 Items)
+            </div>
+            <p class="strategy-text">If the user's most recent cart contained 5 or more items, the widget bypasses the global popularity metrics. It mimics the baseline heuristic model by populating the widget with the top 5 items from their prior cart, maximizing personalization.</p>
+        </div>
+    </section>
+
+    <!-- Next Steps & Opportunities -->
+    <section id="next-steps">
+        <div class="header-title">
+            <span class="section-tag">Module</span>
+            <h1>Next Steps & Opportunities for Improvement</h1>
+        </div>
+
+        <h2>1. Next Steps to Production</h2>
+        <p>Before a full production rollout, several critical validation and engineering steps must be completed:</p>
+        <ul>
+            <li><strong>Automated Data Ingestion:</strong> Replacing the static Kaggle dataset with an orchestrated Cloud Composer (Airflow) DAG to continuously ingest, validate, and load source data into the BigQuery Bronze layer.</li>
+            <li><strong>MLOps Strategy Execution:</strong> Execute the production MLOps target architecture detailed in the <em>Path to Production: MLOps Blueprint</em> module—specifically configuring GitHub Actions CI/CD workflows across the codebase, setting up Agent Platform Feature Store / Cloud Bigtable for low-latency online serving, establishing MLflow Model Registry governance, and deploying Agent Platform Pipelines (Kubeflow) automated retraining DAGs with drift monitoring.</li>
+            <li><strong>Front-End Widget & Cold Start Implementation:</strong> The front-end user interface for the 5-slot widget must be built and integrated into the active shopping session. Concurrently, the dynamic cold start strategy outlined previously must be engineered into the application logic.</li>
+            <li><strong>A/B Testing & Financial Impact Validation:</strong> Deploy the champion model in a controlled A/B test to a sample group of active users. This is a vital prerequisite to validate the current theoretical financial impacts. Specifically, the A/B test should track actual changes in Average Order Value (AOV), Conversion Rate, and Customer Churn against a control group.</li>
+            <li><strong>Latency & Load Testing:</strong> Assess the model's real-time inference latency. The system must populate the widget seamlessly during peak traffic hours without disrupting the shopping experience.</li>
+        </ul>
+
+        <h2>2. Opportunities for Improvement</h2>
+        <p>While the current champion model delivers substantial business value, there are multiple avenues to consider to further enhance performance and increase profit lift:</p>
+
+        <ul>
+            <li><strong>Widget UI Expansion (Top 10+):</strong> The champion model's Recall@5 scores in the high 0.3s represent strong performance within a strict constraint, but also indicate that roughly 60% of a user's reorders are left on the table. Expanding the UI to a horizontally scrolling Top 10 or Top 15 carousel would capture more reorders, increasing the financial lift without fundamentally changing the model architecture.</li>
+            <li><strong>More Extensive Hyperparameter Tuning & Class Weighting:</strong> Allocating more computational resources to deeper, more exhaustive hyperparameter tuning—such as running Optuna trials for more iterations, exploring expanded tree architectures, or evaluating class-imbalance hyperparameters (<code>scale_pos_weight</code> in XGBoost and <code>is_unbalance</code> / <code>scale_pos_weight</code> in LightGBM)—could yield additional top-of-list ranking refinements. At the scale of a business like Instacart, even a slight improvement in Recall@5 could translate into significant profit increases.</li>
+            <li><strong>Timestamps & Global Features:</strong> The current model is limited by the lack of dates/timestamps in the dataset. Accessing real-world date/time data would unlock powerful global features—such as tracking top-selling/trending products, modeling seasonal shifts, and calculating global average purchase cycles. This could substantially boost predictive power.</li>
+            <li><strong>Real-Time "In-Session" Context:</strong> Incorporating the current state of a user's cart would enable dynamic recommendations. For example, if a user adds hot dogs to their cart mid-session, the model could recalculate predictions and push hot dog buns to the #1 rank based on real-time context.</li>
+            <li><strong>Price & Promotion Features:</strong> Integrating item price histories, active promotions, and a user's historical response to discounts could improve model predictions (price fluctuations could influence customer reorder decisions).</li>
+        </ul>
+
+        <div class="footer">
+            Instacart Market Basket Reorder Engine • Master README Document
+        </div>
+    </section>
+
+</div>
+
+</body>
+</html>

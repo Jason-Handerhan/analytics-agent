@@ -98,11 +98,15 @@ headers) and `/` no longer resolves.
 
 Next: Phase 3, the tool-calling loop and its guardrails.
 
-**Phase 3, item 1 (data prep) — `agent_safe` sub-part done, two tables not
-three.** Real upstream tables confirmed against the ML repo's own `.sqlx`
+**Phase 3, item 1 (data prep) — `agent_safe` sub-part done and verified live,
+two tables not three.** Real upstream tables confirmed against the ML repo's
+own `.sqlx`
 (github.com/Jason-Handerhan/Kaggle-Instacart-Reorder-Engine-Portfolio-Project),
-not the placeholder in `docs/data-pipeline.md`'s original example:
-`definitions/sources/instacart_declarations.sqlx` declares eight real tables;
+not the placeholder in `docs/data-pipeline.md`'s original example: eight flat
+`definitions/sources_*.sqlx` declarations (one file per table — a `.sqlx`
+file compiles to exactly one action, confirmed against a real compile
+failure when they were first stacked in one file; also flat, not nested in a
+`sources/` subfolder, matching the ML repo's own proven layout).
 `definitions/agent_safe/product_order_analysis.sqlx` enriches
 `base_analytical_table` (already carries `product_name`/`aisle`/`department`,
 no dimension re-join needed) with all six `prelim_*` silver feature tables,
@@ -110,11 +114,21 @@ no dimension re-join needed) with all six `prelim_*` silver feature tables,
 candidate_reorder_features.sqlx` supplements `final_ml_features_table` with
 names only, kept at its native (user, candidate product, anchor order) grain
 for feature/label correlation questions — a deliberately different grain
-from `product_order_analysis`, not a duplicate. `docs/data-pipeline.md`'s
-Part 1 example updated to match. **Not yet pulled/compiled/executed in
-BigQuery Studio** — that's the user's step per the doc's own split of
-responsibilities. **`vector_db.chunks_docs` and `context/schema/
-model_schema.json` — the other two data sources item 1 needs — not started.**
+from `product_order_analysis`, not a duplicate. Both tables carry a
+table-level `description`, and `candidate_reorder_features` replicates
+`final_ml_features_table`'s real `rowConditions` assertions from the ML
+repo, extended with three null checks on the new name columns.
+`product_order_analysis` gets an equivalent `rowConditions` set (no ML-repo
+precedent to replicate) plus a standalone assertion confirming its row count
+matches `base_analytical_table` — that pattern only proved correct after a
+real compile failure (`SELECT 1` produces an unnamed column; BigQuery's
+`CREATE VIEW`, which is what Dataform compiles every assertion into, rejects
+that — fixed to `SELECT n`, and the same fix applied to `docs/
+data-pipeline.md`'s vector_db assertion template, which had the identical
+bug). **Compiled, executed, and all assertions passing in BigQuery Studio.**
+`docs/data-pipeline.md`'s Part 1 example updated to match all of this.
+**`vector_db.chunks_docs` and `context/schema/model_schema.json` — the other
+two data sources item 1 needs — not started.**
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,

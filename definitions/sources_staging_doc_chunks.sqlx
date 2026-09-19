@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "staging",
+  name: "doc_chunks",
+  description: "README chunks loaded by scripts/build_vector_db.py -- built outside Dataform, WRITE_TRUNCATE on every run."
+}

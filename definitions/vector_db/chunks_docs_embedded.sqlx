@@ -1,0 +1,28 @@
+config {
+  type: "table",
+  schema: "vector_db",
+  name: "chunks_docs_embedded",
+  tags: ["vector_db"],
+  description: "Embedded README chunks for search_docs -- project methodology grounding, excluding the orientation-bundle content already served statically.",
+  assertions: {
+    rowConditions: [
+      "chunk_id IS NOT NULL",
+      "chunk_text IS NOT NULL",
+      "embedding IS NOT NULL"
+    ]
+  }
+}
+
+-- staging.embedding_model wraps gemini-embedding-001 (best MTEB retrieval
+-- quality among current Google options, confirmed 2026-09-19) via the
+-- vertex_conn BigQuery -> Vertex AI connection -- one-time setup, not
+-- Dataform-managed:
+--   CREATE OR REPLACE MODEL `instacart-ml-model.staging.embedding_model`
+--   REMOTE WITH CONNECTION `instacart-ml-model.US.vertex_conn`
+--   OPTIONS (ENDPOINT = 'gemini-embedding-001');
+SELECT chunk_id, doc_source, file_path, section, length, chunk_text,
+       ml_generate_embedding_result AS embedding
+FROM ML.GENERATE_EMBEDDING(
+  MODEL `instacart-ml-model.staging.embedding_model`,
+  (SELECT *, chunk_text AS content FROM ${ref("doc_chunks")}),
+  STRUCT(TRUE AS flatten_json_output))

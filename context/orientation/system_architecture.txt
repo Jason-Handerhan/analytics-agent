@@ -1,0 +1,72 @@
+INSTACART REORDER ENGINE — SYSTEM ARCHITECTURE
+================================================
+
+Kaggle Source Data
+  Instacart Market Basket Analysis (kaggle.com/datasets/psparks/instacart-market-basket-analysis)
+        |
+        v
++==================== Google Cloud Platform (IAM-secured) ====================+
+|                                                                              |
+|  DATA WAREHOUSE & PIPELINE ORCHESTRATION                                    |
+|  +----------------+        +---------------------------------------+       |
+|  | Cloud Storage  | -----> | BigQuery                              |       |
+|  | raw Kaggle     |        |  - dbt / Dataform pipeline            |       |
+|  | dataset landing|        |  - data cleansing                     |       |
+|  +----------------+        |  - feature engineering                |       |
+|                             |  - automated assertions                |       |
+|                             +---------------------------------------+       |
+|                                          |                                  |
+|                                          v                                  |
+|  AGENT PLATFORM (16 vCPU | 64GB RAM | 1x NVIDIA L4 GPU)                     |
+|  +-------------+   +-------------+   +-------------+   +----------------+  |
+|  |     EDA     |-->| Base Models |-->| Ensembling  |-->|   Evaluation   |  |
+|  | long-tail   |   | LightGBM &  |   | Rank        |   | Recall@5,      |  |
+|  | sparsity,   |   | XGBoost     |   | Reciprocal  |   | NDCG@5,        |  |
+|  | cyclical    |   | (Ranker +   |   | Fusion (RRF)|   | Precision@5,   |  |
+|  | order       |   | Classifier);|   | + Optuna    |   | F1@5.          |  |
+|  | patterns,   |   | 3-fold CV,  |   | weight      |   | Tuning/        |  |
+|  | feature     |   | stratified  |   | optimization|   | ensembling by  |  |
+|  | screening   |   | GroupKFold  |   | -> exports  |   | NDCG@5;        |  |
+|  | (cumulative |   |             |   | .pkl        |   | champion by    |  |
+|  | gain)       |   |             |   |             |   | Recall@5.      |  |
+|  |             |   |             |   |             |   | SHAP: mean-abs |  |
+|  |             |   |             |   |             |   | importance +   |  |
+|  |             |   |             |   |             |   | beeswarm       |  |
+|  +-------------+   +-------------+   +-------------+   +----------------+  |
+|                                          |                                  |
+|                                          v                                  |
+|  RESULTS STORAGE                                                            |
+|  +----------------+        +---------------------------------------+       |
+|  | Cloud Storage  |        | BigQuery                              |       |
+|  | base ranker &  |        |  - model evaluation metrics           |       |
+|  | classifier     |        |  - SHAP mean-abs-importance bar data  |       |
+|  | .pkl files     |        |  - SHAP beeswarm plot data            |       |
+|  +----------------+        |  - Power BI dimension tables          |       |
+|                             +---------------------------------------+       |
+|                                          |                                  |
++==========================================|===================================+
+                                           v
+                            +---------------------------+
+                            |         Power BI          |
+                            | .pbip (CI/CD format) +    |
+                            | .pbix                     |
+                            |  - champion model select  |
+                            |  - model evaluation       |
+                            |    metrics                |
+                            |  - SHAP feature           |
+                            |    importance viz         |
+                            |  - financial impact       |
+                            |    analysis                |
+                            +---------------------------+
+
+SDLC, INFRASTRUCTURE PROVISIONING & SECURITY
+  GitHub Repository   — version control + CI/CD blueprint (dev/main branches,
+                         PR merge into main; automated CI/CD not deployed for
+                         this portfolio, but the structure supports it —
+                         e.g. GitHub Actions running tests or triggering
+                         Dataform on merge to main)
+  Google Cloud Shell  — VM setup & provisioning
+  IAM Roles           — role-based access control
+  Google-Managed
+    Encryption Keys   — GMEK
+  Secret Manager      — secret storage & management

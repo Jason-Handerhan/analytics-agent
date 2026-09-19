@@ -1,0 +1,48 @@
+PROJECT NAVIGATOR — full documentation table of contents
+
+- System Architecture: end-to-end architecture, Kaggle source data through
+  GCP to Power BI. BigQuery orchestrates transformation and feature
+  engineering; Agent Platform runs EDA and modeling; Power BI delivers BI
+  insights.
+- Environment Setup & Provisioning: configuring the GCP ecosystem, Kaggle
+  API ingestion into BigQuery, deploying a GPU-accelerated Agent Platform
+  Workbench instance with automated multi-region fallbacks.
+- Execution Order: the sequential nine-step execution workflow.
+- Data Sources: the Kaggle Instacart Market Basket Analysis dataset and its
+  limitations — no dates/timestamps, so global features (e.g. popular/
+  trending products, average time between reorders) can't be built without
+  leakage.
+- Preliminary EDA: foundational behavioral insights — long-tail product
+  sparsity, cyclical order patterns, user exploratory ratios — that inform
+  feature engineering.
+- BigQuery Dataform Pipeline & Feature Engineering: modular medallion ELT
+  (Bronze to Gold) in BigQuery. The "Anchor Order" strategy for leakage
+  prevention, and data-quality assertions on the 39 generated features.
+- Feature EDA & Screening: secondary EDA and feature screening — boxplots,
+  distribution visualizations, bivariate analysis of features against the
+  target; the cumulative-gain strategy for final feature selection.
+- Machine Learning Modeling & Ensembling: 3-fold Stratified Group K-Fold
+  cross-validation, Bayesian hyperparameter tuning via Optuna, experiment
+  tracking via MLflow, blending LightGBM and XGBoost via Rank Reciprocal
+  Fusion (RRF).
+- Model Evaluation: primary metrics (Recall@5, NDCG@5, Precision@5, F1@5)
+  against the prior-cart heuristic baseline; model selection via Recall@5 on
+  the validation split; test-set generalization check.
+- Financial Impact Analysis: projected financial impact of the champion
+  model on unseen test data — ~$118M annual profit lift vs. "no widget,"
+  $33.5M vs. the heuristic baseline; churn reduction is the largest driver.
+- Power BI Business Intelligence Dashboard: the interactive dashboard, .pbip
+  format for CI/CD, model evaluation, feature-importance interpretability,
+  financial sensitivity analysis, star-schema semantic model.
+- Path to Production: MLOps Blueprint: current implementation (GitHub
+  version control, Dataform ELT, MLflow tracking, automated shell training,
+  BigQuery feature storage) vs. target production architecture (CI/CD GitHub
+  Actions, Agent Platform Feature Store, Agent Platform Pipelines CT
+  orchestration, drift monitoring).
+- Cold Start Strategy: heuristic-based fallback logic for the 5-slot widget
+  for new/infrequent users (fewer than 4 prior orders).
+- Next Steps & Opportunities: prerequisites before production rollout —
+  automated ingestion via Airflow, A/B testing, latency/load testing,
+  CI/CD and retraining pipelines. Also: widget UI expansion (Top 10+
+  carousel), timestamp access for global features, real-time in-session
+  context.

@@ -49,8 +49,10 @@ package = false
 dev = [
     "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
+    "plotly>=7.1.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "scikit-learn>=1.9.1",
 ]
 
 [tool.pytest.ini_options]
