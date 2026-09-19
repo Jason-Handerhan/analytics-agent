@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "building_blocks",
+  name: "prelim_user_aisle_features",
+  description: "One row per (user, order, aisle): cumulative products bought in that aisle and its share of the user's total."
+}

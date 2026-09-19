@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "building_blocks",
+  name: "prelim_user_order_dow_wide",
+  description: "One row per (user, order, product): that product's cumulative purchase count broken out by day of week (0-6)."
+}

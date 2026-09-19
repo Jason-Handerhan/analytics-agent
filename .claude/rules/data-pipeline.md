@@ -30,7 +30,7 @@ out of habit — #3 re-embeds the corpus and bills Vertex AI for it.
 
 ```
 definitions/
-├── sources/          declare() blocks only — no tag
+├── sources_*.sqlx    declaration blocks only — no tag, flat, one file per table
 ├── agent_safe/       tags: ["agent_safe"]
 └── vector_db/        tags: ["vector_db"]
 ```
@@ -43,8 +43,9 @@ the islands and breaks tag-based execution.
 **Always execute by tag, never "run all."**
 
 **This project has its own Dataform repository.** Not an extension of the
-Instacart ML pipeline. Reference its tables with `declare()` in
-`definitions/sources/`; **never copy its `.sqlx` files here.**
+Instacart ML pipeline. Reference its tables with `type: "declaration"`
+blocks, one flat file per table directly under `definitions/`; **never copy
+its `.sqlx` files here.**
 
 ## Pipeline 1 — `agent_safe` holds tables
 

@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "ml_model_feature_table",
+  name: "final_ml_features_table",
+  description: "ML training grain: one row per (user, candidate product, anchor order), with the reorder label and every engineered feature."
+}

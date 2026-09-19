@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "building_blocks",
+  name: "prelim_user_department_features",
+  description: "One row per (user, order, department): cumulative products bought in that department and its share of the user's total."
+}

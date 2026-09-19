@@ -81,10 +81,16 @@ connects them.
 
 ```
 definitions/
-├── sources/          declare() blocks only — no tag
+├── sources_*.sqlx    declaration blocks only — no tag, flat, one file per table
 ├── agent_safe/       tags: ["agent_safe"]
 └── vector_db/        tags: ["vector_db"]
 ```
+
+**Declarations are flat files directly under `definitions/`, not a `sources/`
+subfolder** — matches the ML repo's own proven layout, and required either
+way: a `.sqlx` file compiles to exactly one action, so multiple declarations
+can't be stacked in one file (confirmed against a real compile failure, not
+assumed).
 
 **Pipeline 2 has nothing here** — it produces a committed JSON file, not a
 BigQuery table, so there's no `.sqlx` and no tag to execute.
@@ -97,15 +103,18 @@ output; the islands merge and `includeDependencies`/`includeDependents` start
 to matter. Don't create that edge.
 
 **This repo has its own Dataform repository** — not an extension of the
-Instacart ML pipeline. Reference its tables with `declare()`; never copy its
-`.sqlx` files here.
+Instacart ML pipeline. Reference its tables with `type: "declaration"`
+blocks; never copy its `.sqlx` files here.
 
 ```javascript
-// definitions/sources/instacart_declarations.sqlx
-declare({ database: "YOUR_PROJECT", schema: "gold",   name: "base_analytical_table" });
-declare({ database: "YOUR_PROJECT", schema: "bronze", name: "products" });
-declare({ database: "YOUR_PROJECT", schema: "bronze", name: "aisles" });
-declare({ database: "YOUR_PROJECT", schema: "bronze", name: "departments" });
+// definitions/sources_base_analytical_table.sqlx — one file, one declaration
+config {
+  type: "declaration",
+  database: "YOUR_PROJECT",
+  schema: "building_blocks",
+  name: "base_analytical_table",
+  description: "Order-line grain: one row per order x product, names already joined in."
+}
 ```
 
 ---

@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "building_blocks",
+  name: "prelim_user_product_features",
+  description: "One row per (user, order, product): cumulative purchases, cart position, reorder streak for that product."
+}

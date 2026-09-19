@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "building_blocks",
+  name: "base_analytical_table",
+  description: "Order-line grain: one row per order x product, with product/aisle/department names already joined in."
+}

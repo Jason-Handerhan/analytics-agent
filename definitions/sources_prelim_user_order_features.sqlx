@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "building_blocks",
+  name: "prelim_user_order_features",
+  description: "One row per (user, order): cumulative basket size, reorder ratio, organic affinity, days between orders."
+}
