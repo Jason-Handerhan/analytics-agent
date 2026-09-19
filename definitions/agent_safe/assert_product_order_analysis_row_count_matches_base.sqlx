@@ -1,0 +1,9 @@
+-- product_order_analysis is a 1:1 enrichment of base_analytical_table (every
+-- join key is unique in its child table -- see the SELECT's own comment) --
+-- so a row-count mismatch means an unexpected fan-out (a join key wasn't as
+-- unique as assumed) or accidental row loss (an INNER JOIN where a LEFT JOIN
+-- was intended).
+config { type: "assertion", tags: ["agent_safe"] }
+SELECT 1
+WHERE (SELECT COUNT(*) FROM ${ref("product_order_analysis")})
+   != (SELECT COUNT(*) FROM ${ref("base_analytical_table")})

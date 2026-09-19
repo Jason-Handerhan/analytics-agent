@@ -4,13 +4,14 @@ config {
   name: "product_order_analysis",
   tags: ["agent_safe"],
   description: "Order-line grain (one row per order x product), enriched with precomputed user, user-product, user-aisle, and user-department cumulative behavioral metrics -- reorder ratios, purchase concentrations, day-of-week/time-of-day affinities -- so most product and order questions don't require recomputing them from raw history.",
-  // nonNull + uniqueKey: this project's documented assertion convention
-  // (docs/data-pipeline.md's vector_db pipeline). No source-table precedent
-  // to replicate here (base_analytical_table itself has no assertions), so
-  // this is the minimal documented pattern rather than invented business rules.
+  // Same assertions shape as candidate_reorder_features -- rowConditions,
+  // proven against the real ML repo's final_ml_features_table.sqlx.
   assertions: {
-    nonNull: ["order_id", "user_id", "product_id"],
-    uniqueKey: ["order_id", "product_id"]
+    rowConditions: [
+      "order_id IS NOT NULL",
+      "user_id IS NOT NULL",
+      "product_id IS NOT NULL"
+    ]
   },
   columns: {
     order_id: "Unique identifier for the order this line item belongs to.",

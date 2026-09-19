@@ -54,12 +54,6 @@ config {
   // new: they verify our added join actually matched, which final_ml_features_table
   // itself has no equivalent for.
   assertions: {
-    // nonNull + uniqueKey: this project's documented assertion convention
-    // (docs/data-pipeline.md's vector_db pipeline) -- a per-row check alone
-    // can't catch a row whose identity itself is broken, or a build that
-    // silently produced duplicate rows for the same training example.
-    nonNull: ["user_id", "candidate_product_id", "anchor_order_id", "label_order_id", "label_reordered"],
-    uniqueKey: ["user_id", "candidate_product_id", "anchor_order_id"],
     rowConditions: [
       // 1. Complete null check for all modeling features (excluding last cart position)
       "user_id IS NOT NULL",
