@@ -8,7 +8,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
-    "fastmcp>=4.0.3",
+    "fastmcp>=3.4.6,<4.0",  # 4.x requires mcp>=2.0, incompatible with langchain-mcp-adapters
     "google-cloud-bigquery>=3.45.0",
     "google-cloud-firestore>=2.30.0",
     "google-cloud-secret-manager>=2.30.0",

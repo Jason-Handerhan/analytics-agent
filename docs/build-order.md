@@ -2,7 +2,7 @@
 
 ## Current status — update this as we go
 
-**Phase: 1 complete — Phase 2 next**
+**Phase: 2 complete — Phase 3 in progress (item 1, data prep)**
 
 _Last updated: 2026-09-18._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
@@ -62,7 +62,59 @@ later. **Phase 3 item 4 (the graph skeleton) needs to call `write_telemetry_row`
 from `finalize`, not just build the node fresh** — flagging here so that
 isn't missed when this phase starts.
 
-**Phase 1 complete.** Next: Phase 2, standing up the real FastMCP server.
+**Phase 1 complete.**
+
+**Phase 2, both items done.** Proven first in `notebooks/phase2_mcp_server.ipynb`
+(FastMCP server + trivial `ping` tool, `MultiServerMCPClient` over `transport:
+"http"`, `ToolNode`/`tools_condition` — not a hand-rolled router), then moved
+to real files: `app/mcp_server/server.py` (the `FastMCP` instance + `ping`,
+placeholder until Phase 3 registers real tools) and `app/main.py`.
+
+One real deviation from `.claude/rules/mcp-tools.md`: the MCP server runs as
+its **own `uvicorn.Server`** alongside the gateway's, both launched via
+`asyncio.gather()` in `app/main.py` — not mounted into the gateway's FastAPI
+app. Decided to keep the MCP server genuinely separable (closer to a
+lift-and-shift if it's ever split into its own Cloud Run service) without
+taking on a second Dockerfile now. This raised the real risk it was chosen
+to flag: a bare SIGTERM only stops one `uvicorn.Server`, which would leave
+Cloud Run unable to scale to 0. Fixed with a watcher coroutine that polls all
+servers' `should_exit` and propagates it to the others — public API only,
+no private uvicorn methods. Verified with a real `docker build` +
+`docker run` + `docker stop`: both servers logged a full independent
+shutdown sequence and the container exited 0. `tests/test_main.py` covers
+`_propagate_shutdown`'s own mirroring logic with plain fakes (no real
+`uvicorn.Server`, no Docker) — it doesn't retest uvicorn's own
+signal-to-`should_exit` wiring inside `serve()`, which is public and already
+reliable; only the propagation code this project actually wrote.
+
+That same verification pass caught a second bug before anything depended on
+it: `app/main.py` called `mcp.http_app(path="/")`, which mounts the MCP
+protocol endpoint at `/` instead of FastMCP's default `/mcp` — silently
+breaking the client URL documented in `mcp-tools.md`
+(`http://localhost:PORT/mcp`). Fixed by dropping the explicit `path`
+argument; confirmed via `docker exec` that `/mcp` now returns the expected
+`406` (endpoint alive, rejecting the plain GET only for missing MCP `Accept`
+headers) and `/` no longer resolves.
+
+Next: Phase 3, the tool-calling loop and its guardrails.
+
+**Phase 3, item 1 (data prep) — `agent_safe` sub-part done, two tables not
+three.** Real upstream tables confirmed against the ML repo's own `.sqlx`
+(github.com/Jason-Handerhan/Kaggle-Instacart-Reorder-Engine-Portfolio-Project),
+not the placeholder in `docs/data-pipeline.md`'s original example:
+`definitions/sources/instacart_declarations.sqlx` declares eight real tables;
+`definitions/agent_safe/product_order_analysis.sqlx` enriches
+`base_analytical_table` (already carries `product_name`/`aisle`/`department`,
+no dimension re-join needed) with all six `prelim_*` silver feature tables,
+52 columns, real descriptions on every one; `definitions/agent_safe/
+candidate_reorder_features.sqlx` supplements `final_ml_features_table` with
+names only, kept at its native (user, candidate product, anchor order) grain
+for feature/label correlation questions — a deliberately different grain
+from `product_order_analysis`, not a duplicate. `docs/data-pipeline.md`'s
+Part 1 example updated to match. **Not yet pulled/compiled/executed in
+BigQuery Studio** — that's the user's step per the doc's own split of
+responsibilities. **`vector_db.chunks_docs` and `context/schema/
+model_schema.json` — the other two data sources item 1 needs — not started.**
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,

@@ -1,0 +1,69 @@
+config {
+  type: "table",
+  schema: "agent_safe",
+  name: "candidate_reorder_features",
+  tags: ["agent_safe"],
+  columns: {
+    user_id: "Unique identifier for the customer this training example belongs to.",
+    anchor_order_id: "Order used as the reference point for this row's cumulative features — the order immediately before the label order.",
+    anchor_order_number: "Sequential order number of the anchor order within this user's order history.",
+    candidate_product_id: "Product being evaluated as a reorder candidate — any product this user has ordered at least once before the anchor order.",
+    department_id: "Unique identifier for the candidate product's department.",
+    aisle_id: "Unique identifier for the candidate product's aisle.",
+    product_name: "Human-readable name of the candidate product.",
+    aisle: "Human-readable aisle name for the candidate product.",
+    department: "Human-readable department name for the candidate product.",
+    anchor_days_since_first_order: "Cumulative days since this user's first order, as of the anchor order.",
+    label_order_id: "The order immediately following the anchor order — whether the candidate product appears in this order is what label_reordered records.",
+    label_order_number: "Sequential order number of the label order (always anchor_order_number + 1).",
+    label_reordered: "1 if the candidate product appears in the label order, 0 if not — the reorder outcome for this row.",
+    label_order_dow: "Day of week the label order was placed (0 = Sunday through 6 = Saturday).",
+    label_order_hour_of_day: "Hour of day the label order was placed, 24-hour format.",
+    label_days_since_prior_order: "Days elapsed between the anchor order and the label order.",
+    label_time_of_day: "Label order hour bucketed into morning, afternoon, evening, or nighttime.",
+    label_days_since_first_order: "Cumulative days since this user's first order, as of the label order.",
+    user_avg_days_between_orders: "This user's average days between orders, as of the anchor order.",
+    user_distinct_product_count: "Count of distinct products this user has ever ordered, as of the anchor order.",
+    user_organic_affinity_ratio: "Share of this user's cumulative product line items that are organic, as of the anchor order.",
+    user_avg_basket_size: "This user's average number of products per order, as of the anchor order.",
+    user_reorder_ratio: "Share of this user's cumulative product line items that were reorders, as of the anchor order.",
+    label_dow_user_product_same_dow_count: "Cumulative times this user has purchased the candidate product on the same day of week as the label order.",
+    label_tod_user_product_same_tod_count: "Cumulative times this user has purchased the candidate product during the same time-of-day bucket as the label order.",
+    user_aisle_share: "Share of this user's cumulative product line items that come from the candidate product's aisle, as of the anchor order.",
+    user_deptartment_share: "Share of this user's cumulative product line items that come from the candidate product's department, as of the anchor order. Column name is misspelled in the source ML table — preserved as-is rather than renamed.",
+    user_product_cumulative_purchases: "Number of times this user has purchased the candidate product, as of the anchor order.",
+    user_product_avg_cart_position: "This user's average add-to-cart position for the candidate product, as of the anchor order.",
+    user_product_avg_relative_cart_position: "Same as user_product_avg_cart_position, but as a fraction of each order's basket size.",
+    user_product_cart_position_last_order: "Add-to-cart position of the candidate product in the anchor order specifically, if it was purchased then; null otherwise.",
+    user_product_purchase_concentration: "Share of this user's cumulative product line items that are the candidate product.",
+    user_product_reorder_concentration: "Share of this user's cumulative reordered line items that are the candidate product.",
+    user_product_order_penetration_ratio: "Share of this user's orders, up to the anchor order, that contained the candidate product.",
+    user_product_consecutive_order_skips: "Number of orders since this user last purchased the candidate product, as of the anchor order.",
+    user_product_last3order_streak: "How many of this user's last 3 consecutive orders, as of the anchor order, included the candidate product (0-3).",
+    label_user_product_days_since_last_purchased: "Days between the user's last purchase of the candidate product, as of the anchor order, and the label order.",
+    user_prod_avg_days_between_purchases: "This user's average days between purchases of the candidate product, as of the anchor order.",
+    user_product_nearing_reorder_ratio: "How close this user is to their typical repurchase interval for the candidate product — days since last purchase divided by their average days between purchases of it. Values near or above 1 suggest a reorder is due.",
+    days_since_last_ordered_vs_user_pace_ratio: "Days since the candidate product was last purchased, relative to this user's typical days between any order.",
+    user_product_day_of_week_affinity: "Share of this user's purchases of the candidate product that happened on the label order's day of week.",
+    user_product_time_of_day_affinity: "Share of this user's purchases of the candidate product that happened during the label order's time-of-day bucket."
+  }
+}
+
+-- Grain: one row per (user, candidate product, anchor order) — kept at its
+-- native ML-training grain, unlike product_order_analysis. This is the
+-- table for questions correlating features against the reorder label;
+-- collapsing to one row per (user, product) would destroy that history.
+-- Only addition vs the source ML table: product_name/aisle/department,
+-- looked up from base_analytical_table (a stable 1:1 mapping, deduped
+-- before the join so it can't fan out this table's rows).
+SELECT
+  f.*,
+  p.product_name,
+  p.aisle,
+  p.department
+FROM ${ref("final_ml_features_table")} f
+LEFT JOIN (
+  SELECT DISTINCT product_id, product_name, aisle, department
+  FROM ${ref("base_analytical_table")}
+) p
+  ON f.candidate_product_id = p.product_id

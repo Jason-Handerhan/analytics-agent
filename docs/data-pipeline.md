@@ -110,7 +110,7 @@ declare({ database: "YOUR_PROJECT", schema: "bronze", name: "departments" });
 
 ---
 
-## Part 1 — `agent_safe` (Phase 0)
+## Part 1 — `agent_safe` (Phase 3)
 
 **Why a curated dataset at all.** Two lineages answering the same question
 differently is a non-determinism risk, not flexibility. `agent_safe` fixes one
@@ -136,31 +136,60 @@ bq mk --dataset YOUR_PROJECT:staging
 ```
 
 ```javascript
-// 2. definitions/agent_safe/product_order_analysis.sqlx
+// definitions/agent_safe/product_order_analysis.sqlx — real shape, confirmed
+// against the ML repo's actual .sqlx (github.com/Jason-Handerhan/
+// Kaggle-Instacart-Reorder-Engine-Portfolio-Project), not a placeholder.
 config {
-  type: "table",                      // always a table in agent_safe
+  type: "table",
   schema: "agent_safe",
   name: "product_order_analysis",
   tags: ["agent_safe"],
   columns: {
     product_id: "Unique product identifier.",
-    product_name: "Human-readable product name — join precomputed so the agent never needs to know the dimension tables exist.",
+    product_name: "Human-readable product name.",
     aisle: "Human-readable aisle name.",
     department: "Human-readable department name.",
-    penetration_ratio: "Share of a user's orders containing this product, out of all their orders."
+    user_reorder_ratio: "Share of this user's cumulative product line items that were reorders.",
+    // ...49 more columns, one real description each — full list in the file.
   }
 }
-SELECT b.*, p.product_name, a.aisle, d.department
+// Grain: one row per order x product — base_analytical_table's own grain.
+// Every join key below is unique in the child table for that grain, so this
+// is a 1:1 enrichment, never a fan-out.
+SELECT b.*, o.*, upf.*, a.*, d.*, dow.*, tod.*
 FROM ${ref("base_analytical_table")} b
-JOIN ${ref("products")}    p USING (product_id)
-JOIN ${ref("aisles")}      a USING (aisle_id)
-JOIN ${ref("departments")} d USING (department_id)
+LEFT JOIN ${ref("prelim_user_order_features")} o
+  ON b.user_id = o.user_id AND b.order_id = o.order_id
+LEFT JOIN ${ref("prelim_user_product_features")} upf
+  ON b.user_id = upf.user_id AND b.order_id = upf.order_id AND b.product_id = upf.product_id
+LEFT JOIN ${ref("prelim_user_aisle_features")} a
+  ON b.user_id = a.user_id AND b.order_id = a.order_id AND b.aisle_id = a.aisle_id
+LEFT JOIN ${ref("prelim_user_department_features")} d
+  ON b.user_id = d.user_id AND b.order_id = d.order_id AND b.department_id = d.department_id
+LEFT JOIN ${ref("prelim_user_order_dow_wide")} dow
+  ON b.user_id = dow.user_id AND b.order_id = dow.order_id AND b.product_id = dow.product_id
+LEFT JOIN ${ref("prelim_user_order_tod_wide")} tod
+  ON b.user_id = tod.user_id AND b.order_id = tod.order_id AND b.product_id = tod.product_id
 ```
 
-**The ML gold tables carry IDs, not names** — correct for model training, wrong
-for answering *"which product has the most orders?"*. The id→name mappings
-almost certainly already exist as bronze tables; this is **a new join, not new
-ingestion**. Check bronze before assuming otherwise.
+**`base_analytical_table` already carries `product_name`/`aisle`/`department`**
+— it's the ML repo's own order-line fact table, not a bare-IDs gold table, so
+no dimension re-join is needed. The real enrichment is the ML repo's own
+**silver-layer feature tables** (`prelim_user_order_features`,
+`prelim_user_product_features`, `prelim_user_aisle_features`,
+`prelim_user_department_features`, and the day-of-week/time-of-day wide
+variants) — each already at a grain that joins onto `base_analytical_table`
+1:1 with no aggregation needed. This is what makes the agent's job easier:
+reorder ratios, cumulative purchase counts, and day/time affinities are
+already computed, not something the agent has to derive with window
+functions per question.
+
+`final_ml_features_table` (ML's own gold training matrix) is a **separate**
+`agent_safe` table, kept at its native (user, candidate product, anchor
+order) grain — supplemented with `product_name`/`aisle`/`department` only.
+It answers a different question shape (correlating features against the
+reorder label), so collapsing it to `product_order_analysis`'s grain would
+destroy the history that question needs.
 
 **Those `columns:` descriptions are the agent's schema grounding, not
 documentation.** The `bigquery_schema` MCP resource reads them live from
