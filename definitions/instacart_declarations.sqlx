@@ -1,6 +1,6 @@
-// Real upstream tables from the Instacart ML repo this project reuses
-// (github.com/Jason-Handerhan/Kaggle-Instacart-Reorder-Engine-Portfolio-Project).
-// Reference them here with declare() — never copy their .sqlx files into this repo.
+-- Real upstream tables from the Instacart ML repo this project reuses
+-- (github.com/Jason-Handerhan/Kaggle-Instacart-Reorder-Engine-Portfolio-Project).
+-- Reference them here with declare() — never copy their .sqlx files into this repo.
 
 declare({
   database: "instacart-ml-model", schema: "building_blocks", name: "base_analytical_table",
