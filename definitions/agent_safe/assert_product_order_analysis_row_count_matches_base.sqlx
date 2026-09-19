@@ -4,6 +4,10 @@
 -- unique as assumed) or accidental row loss (an INNER JOIN where a LEFT JOIN
 -- was intended).
 config { type: "assertion", tags: ["agent_safe"] }
-SELECT 1
-WHERE (SELECT COUNT(*) FROM ${ref("product_order_analysis")})
-   != (SELECT COUNT(*) FROM ${ref("base_analytical_table")})
+SELECT product_order_analysis_count, base_analytical_table_count
+FROM (
+  SELECT
+    (SELECT COUNT(*) FROM ${ref("product_order_analysis")}) AS product_order_analysis_count,
+    (SELECT COUNT(*) FROM ${ref("base_analytical_table")}) AS base_analytical_table_count
+)
+WHERE product_order_analysis_count != base_analytical_table_count

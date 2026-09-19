@@ -2,5 +2,5 @@
 -- nothing, no error anywhere. rowConditions can't catch this -- there are no
 -- rows to fail a per-row check against.
 config { type: "assertion", tags: ["agent_safe"] }
-SELECT 1 FROM (SELECT COUNT(*) AS n FROM ${ref("candidate_reorder_features")})
+SELECT n FROM (SELECT COUNT(*) AS n FROM ${ref("candidate_reorder_features")})
 WHERE n = 0

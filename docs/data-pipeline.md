@@ -669,12 +669,14 @@ The third needs its own file:
 -- An empty table fails SILENTLY at runtime: search_docs just returns
 -- nothing, no error anywhere.
 config { type: "assertion", tags: ["vector_db"] }
-SELECT 1 FROM (SELECT COUNT(*) AS n FROM ${ref("chunks_docs")})
+SELECT n FROM (SELECT COUNT(*) AS n FROM ${ref("chunks_docs")})
 WHERE n = 0
 ```
 
-**Confirm assertion syntax at build time** — same category as
-`query_job.result()`'s parameter name.
+**`SELECT n`, not `SELECT 1`** — confirmed against a real compile failure (not
+assumed): Dataform compiles every assertion into a `CREATE VIEW`, and
+BigQuery rejects a view with an unnamed column. A bare `1` has no name;
+reusing the already-named `n` does.
 
 **Indexes are optional and probably unnecessary** — see the row-count note
 above. Only if a table proves large enough to need one:
