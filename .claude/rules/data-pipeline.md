@@ -21,7 +21,7 @@ parse to a committed file.
 |---|---|---|---|
 | **1** `agent_safe` | Dataform (`agent_safe` tag) | BigQuery tables | Source data changed |
 | **2** Model schema | `scripts/build_model_context.py` — **no Dataform** | `context/schema/model_schema.json`, committed | Semantic model changed |
-| **3** Docs index | `scripts/build_vector_db.py` → Dataform (`vector_db` tag) | `vector_db.chunks_docs` | Docs changed |
+| **3** Docs index | `scripts/build_vector_db.py` → Dataform (`vector_db` tag) | `vector_db.chunks_docs_embedded` | Docs changed |
 
 A measure rename touches only #2. A docs edit only #3. Never re-run all three
 out of habit — #3 re-embeds the corpus and bills Vertex AI for it.
@@ -123,18 +123,30 @@ whole); the semantic model goes through pipeline 2; code is read live
 
 - `chunk_by_title` + **heading breadcrumb prepended to `chunk_text`**. Only
   `chunk_text` is embedded — a metadata column would be invisible to
-  retrieval. Build the breadcrumb from the *pre-chunked* elements.
+  retrieval. Build the breadcrumb from the *pre-chunked* elements. Look it up
+  per chunk via `chunk.metadata.orig_elements[0].id`, not `chunk.id` —
+  confirmed the two don't match (0/73), unlike the first original element,
+  which does (73/73).
 - `overlap=150` so a thought spanning a section boundary keeps its lead-in.
-- **One output table, no `source_type` filter.** A second embedded source
-  would get its own table, not a `WHERE` — a filter on a vector search may
-  apply *after* the nearest-neighbour scan, silently returning fewer than
-  `top_k`.
+- **`doc_source`, not `source_type`** — which document a chunk came from
+  (`"readme"`), not a content-type discriminator. A hypothetical future code
+  source gets its own table with its own schema, not a shared one.
+- Excludes the orientation-bundle block (Executive Summary, Project
+  Navigator, System Architecture) **by heading name from inside the one HTML
+  file**, not by skipping a separate file — `index.html` contains both.
 
-**Assertions** (build-time, before the app queries anything): `nonNull` on
-`chunk_id`/`chunk_text`/`embedding` and `uniqueKey` on `chunk_id` in the
-model's `config`, plus a non-empty assertion in its own file — an empty table
-returns nothing at runtime with no error. Confirm assertion syntax at build
-time.
+**Model: `gemini-embedding-001`** — current #1 on MTEB, ahead of
+`text-embedding-005` and the built-in `embeddinggemma-300m`. The
+`vertex_conn` connection's location must exactly match the dataset locations
+(`US`) — connection locations are fixed at creation time like datasets, so a
+mismatch means recreating it, not a query-side fix.
+
+**Assertions**: `rowConditions` (proven against the ML repo's own real
+`.sqlx`, unlike `nonNull`/`uniqueKey`), plus a non-empty assertion in its own
+file — an empty table returns nothing at runtime with no error, and no
+per-row check can catch zero rows. `SELECT n`, never `SELECT 1`, in that
+file — a bare `1` is an unnamed column, which BigQuery's `CREATE VIEW` (what
+every assertion compiles into) rejects.
 
 ## Ask before assuming
 

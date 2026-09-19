@@ -175,12 +175,6 @@ than the task needs.
   reducer replacing `add_messages` for `TimestampedMessage`. (Confirmed and
   already applied: `Command`'s shape, and the `astream` `StreamPart` format
   with `stream_mode="updates", version="v2"`.)
-- **`ML.GENERATE_EMBEDDING` vs the newer `AI.GENERATE_EMBEDDING`** — Google's
-  docs now show both. Check which is current before building the pipeline,
-  and whether the built-in `embeddinggemma-300m` model fits: it keeps data in
-  BigQuery with no Vertex AI call and no Vertex AI charges, unlike an
-  endpoint-based model such as `text-embedding-005`.
-
 ---
 
 ## Commands

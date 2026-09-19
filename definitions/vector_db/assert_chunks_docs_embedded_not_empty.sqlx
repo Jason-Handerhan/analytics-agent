@@ -1,0 +1,6 @@
+-- An empty table fails SILENTLY at runtime: search_docs just returns
+-- nothing, no error anywhere. rowConditions can't catch this -- there are no
+-- rows to fail a per-row check against.
+config { type: "assertion", tags: ["vector_db"] }
+SELECT n FROM (SELECT COUNT(*) AS n FROM ${ref("chunks_docs_embedded")})
+WHERE n = 0

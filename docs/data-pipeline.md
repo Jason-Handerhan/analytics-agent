@@ -12,7 +12,7 @@ committed file. Only project docs are chunked and embedded.
 |---|---|---|---|---|
 | **1** | Instacart bronze tables | Dataform (`agent_safe` tag) | `agent_safe.*` tables | `run_bigquery_sql`, `bigquery_schema` |
 | **2** | Live Power BI (`executeQueries` + Scanner API) | `scripts/build_model_context.py` (local, **no Dataform**) | `context/schema/model_schema.json`, committed | static context + `get_measure_dax` |
-| **3** | `context/docs/*.md`, `*.html` | `scripts/build_vector_db.py` → Dataform (`vector_db` tag) | `vector_db.chunks_docs` | `search_docs` |
+| **3** | `context/docs/*.md`, `*.html` | `scripts/build_vector_db.py` → Dataform (`vector_db` tag) | `vector_db.chunks_docs_embedded` | `search_docs` |
 
 **They refresh independently.** A measure rename touches only #2; a docs edit
 only #3; new source data only #1. Each part below ends with its own refresh
@@ -38,11 +38,8 @@ Run the script *before* executing the tag. An *empty* staging table is caught
 assertion passes and you get a cleanly-built index of outdated content, with
 no error anywhere.
 
-**Check the function name and model before building** — Google's docs show
-both `ML.GENERATE_EMBEDDING` and a newer `AI.GENERATE_EMBEDDING`. Prefer the
-built-in `embeddinggemma-300m`: it keeps data inside BigQuery with no Vertex
-AI call or charge, where `text-embedding-005` sends data out and bills
-separately.
+Uses `ML.GENERATE_EMBEDDING` with `gemini-embedding-001` — see Part 3,
+"Embedding model + index," for why it isn't the built-in `embeddinggemma-300m`.
 
 ## Deployment: how `.sqlx` reaches BigQuery
 
@@ -420,12 +417,7 @@ The staging table stays a single `WRITE_TRUNCATE` load.
 ```python
 class Chunk(BaseModel):
     chunk_id: str          # content hash — makes reloads idempotent
-    doc_source: str        # which document this came from, e.g. "readme" —
-                           # deliberately NOT a content-type discriminator.
-                           # A separate hypothetical code-chunks source would
-                           # get its own table with its own schema, not a
-                           # shared generic one — decided 2026-09-19 rather
-                           # than build for a future that may never arrive.
+    doc_source: str        # which document this came from, e.g. "readme"
     file_path: str
     section: str | None    # heading breadcrumb, e.g. "Environment Setup &
                            # Provisioning > 2. IAM Security"
@@ -433,39 +425,32 @@ class Chunk(BaseModel):
     chunk_text: str
 ```
 
-No `start_line`/`end_line` — those are meaningful for code, not prose, and
-this schema isn't shared with a hypothetical code source (see `doc_source`
-above), so they'd always be `None` with no consumer. Dropped rather than
-carried as dead columns.
+No `start_line`/`end_line` — meaningful for code, not prose, and this schema
+isn't shared across content types: a hypothetical future code source would
+get its own table, not a column that's always `None` here.
 
 | `doc_source` | Table | Sources | Feeds |
 |---|---|---|---|
 | `readme` | `vector_db.chunks_docs_embedded` | Project methodology — the README (`context/docs/index.html`), minus the orientation-bundle block, which is always in static context. Heading breadcrumb prepended | `search_docs` |
 
-**One output table, not one-with-a-filter.** Should a second document ever be
-added, it gets its own `doc_source` value in the *same* table (not a new
-table) — `doc_source` exists precisely to make that distinguishable, unlike
-the old `source_type` design this replaced, which was a content-type
-discriminator for a shared-schema future this project deliberately isn't
-building toward.
+**One output table, not one-with-a-filter.** A second document gets its own
+`doc_source` value in the same table, not a new table or a `WHERE` clause —
+a filter on a vector search may apply *after* the nearest-neighbor scan
+rather than pushed into it, so `top_k => 5` could return fewer than 5.
 
-**`chunks_docs_embedded` is far too small for `CREATE VECTOR INDEX` —
-confirmed, not estimated.** BigQuery's IVF index has a **5,000-row minimum**
-(confirmed against Google's own docs, 2026-09-19); the real build produced
-**66 rows**. `VECTOR_SEARCH` works with no index at all — a brute-force exact
-scan — which is the *correct* outcome here, not a fallback: exact
-nearest-neighbor results, no index-maintenance overhead, at a scale where an
-approximate index would add cost for zero benefit.
+**Too small for `CREATE VECTOR INDEX`.** BigQuery's IVF index has a
+5,000-row minimum; this table has 66. `VECTOR_SEARCH` runs a brute-force
+exact scan with no index at all — the correct outcome at this scale, not a
+fallback.
 
 **Excludes the orientation-bundle content** (Executive Summary, Project
 Navigator, System Architecture — always in static context already, so
 indexing it wastes a retrieval slot) **by heading name, from inside the one
-HTML file** — not by excluding a separate file. `index.html` contains both the
-orientation content and everything else in one document; `chunk_docs` skips
-every element between the "Executive Summary" and "Environment Setup &
-Provisioning" depth-0 titles before chunking. Confirmed against the real file
-(85 of 499 elements excluded) — a heading-name rule, not a hardcoded line
-range, so it survives future edits to the document.
+HTML file** — `index.html` contains both the orientation content and
+everything else in one document, so `chunk_docs` skips every element between
+the "Executive Summary" and "Environment Setup & Provisioning" depth-0
+titles before chunking. A heading-name rule, not a line range, so it
+survives future edits to the document.
 
 ### Chunkers
 
@@ -516,11 +501,9 @@ def chunk_docs(path: pathlib.Path, doc_source: str) -> list[Chunk]:
 
     chunks = []
     for c in chunk_by_title(filtered, max_characters=1500, overlap=150):
-        # chunk_by_title's own chunk ids do NOT match any source element id
-        # (confirmed: 0/73 matched, against this installed unstructured
-        # version) — use the chunk's first ORIGINAL element instead, which
-        # DOES (confirmed: 73/73). A direct reference, not a guess by
-        # ordinal position.
+        # chunk_by_title's own chunk ids don't match any source element id.
+        # Use the chunk's first ORIGINAL element instead, which does — a
+        # direct reference, not a guess by ordinal position.
         first_orig = c.metadata.orig_elements[0]
         crumb = breadcrumbs.get(first_orig.id, "")
         text = f"[{crumb}]\n{c}" if crumb else str(c)
@@ -536,13 +519,6 @@ def chunk_docs(path: pathlib.Path, doc_source: str) -> list[Chunk]:
             length=len(text), chunk_text=text))
     return chunks
 ```
-
-**`element.id`, `metadata.category_depth`, and `overlap` all confirmed present
-and correctly named** against the real installed `unstructured` version — not
-assumed. **`chunk_by_title`'s own chunk ids do not match source element ids**
-— confirmed as a real gap, not a hypothetical one — fixed via
-`orig_elements[0].id` as shown above, rather than the element-order fallback
-originally proposed here.
 
 **Why the breadcrumb is prepended rather than stored in a column:** only
 `chunk_text` reaches `ML.GENERATE_EMBEDDING` (`file_path`/`section` ride
@@ -641,45 +617,77 @@ if __name__ == "__main__":
     main()
 ```
 
-**This is the real, verified implementation** — built, run end-to-end against
-the real `index.html` (66 chunks, 0 missing breadcrumbs), not a sketch.
 `python scripts/build_vector_db.py` is the exact command referenced
 throughout this doc's refresh sequence below.
 
 ### Embedding model + index
 
+**`gemini-embedding-001`** — Google's current #1 MTEB retrieval-quality
+model, ahead of `text-embedding-005` (legacy) and the built-in
+`embeddinggemma-300m` (a lighter open model built for
+on-device/resource-constrained use, not for best-in-class quality).
+
 ```sql
 -- one-time: BigQuery → Vertex AI connection
--- bq mk --connection --location=YOUR_REGION --connection_type=CLOUD_RESOURCE vertex_conn
+-- bq mk --connection --location=US --connection_type=CLOUD_RESOURCE vertex_conn
 -- then grant that connection's service account roles/aiplatform.user
+--   (shown in the IAM console/newer docs as "Agent Platform User" — same role)
+--
+-- The connection's location must exactly match the dataset's location
+-- (US) — connection locations are fixed at creation time, same as
+-- datasets, so a mismatch means deleting and recreating, not a query fix.
 
 CREATE OR REPLACE MODEL `YOUR_PROJECT.staging.embedding_model`
-REMOTE WITH CONNECTION `YOUR_PROJECT.YOUR_REGION.vertex_conn`
-OPTIONS (ENDPOINT = 'text-embedding-005');   -- verify current model name
+REMOTE WITH CONNECTION `YOUR_PROJECT.US.vertex_conn`
+OPTIONS (ENDPOINT = 'gemini-embedding-001');
 ```
 
 **One model.** It embeds everything in staging — there's a single source now,
-so no `source_type` filter is needed at build time or search time.
+so no `doc_source` filter is needed at build time or search time.
 
 ```sql
--- definitions/vector_db/chunks_docs.sqlx
+-- definitions/vector_db/chunks_docs_embedded.sqlx
 config {
-  type: "table", schema: "vector_db", name: "chunks_docs",
+  type: "table", schema: "vector_db", name: "chunks_docs_embedded",
   tags: ["vector_db"],
   assertions: {
-    nonNull: ["chunk_id", "chunk_text", "embedding"],
-    uniqueKey: ["chunk_id"]
+    rowConditions: [
+      "chunk_id IS NOT NULL",
+      "chunk_text IS NOT NULL",
+      "embedding IS NOT NULL"
+    ]
   }
 }
 
-SELECT chunk_id, source_type, file_path, symbol_name,
-       start_line, end_line, chunk_text,
+SELECT chunk_id, doc_source, file_path, section, length, chunk_text,
        ml_generate_embedding_result AS embedding
 FROM ML.GENERATE_EMBEDDING(
   MODEL `YOUR_PROJECT.staging.embedding_model`,
-  (SELECT *, chunk_text AS content FROM ${ref("staging", "doc_chunks")}),
+  (SELECT *, chunk_text AS content FROM ${ref("doc_chunks")}),
   STRUCT(TRUE AS flatten_json_output))
 ```
+
+**`rowConditions`, not `nonNull`/`uniqueKey`** — same pattern as `agent_safe`'s
+assertions: proven against the ML repo's own real `.sqlx`, unlike
+`nonNull`/`uniqueKey`.
+
+**`${ref("doc_chunks")}`, single-arg** — `staging.doc_chunks` needs its own
+declaration for this to resolve at all, since it's built by
+`scripts/build_vector_db.py` entirely outside Dataform (same reason
+`base_analytical_table` needed one):
+
+```sql
+-- definitions/sources_staging_doc_chunks.sqlx
+config {
+  type: "declaration", database: "YOUR_PROJECT", schema: "staging",
+  name: "doc_chunks",
+  description: "README chunks loaded by scripts/build_vector_db.py -- built outside Dataform, WRITE_TRUNCATE on every run."
+}
+```
+
+Once declared, `ref("doc_chunks")` (no schema argument) resolves correctly —
+Dataform looks up the schema from the declaration itself, the same reason
+`ref("base_analytical_table")` needs no schema either.
 
 It carries the `vector_db` tag, so the refresh workflow below is unchanged.
 
@@ -690,35 +698,34 @@ the Dataform run; it doesn't stop the app querying a stale table from an
 earlier good build. Complementary to the manual gates in
 `docs/success-criteria.md`, which only fire when someone runs a search.
 
-`nonNull` and `uniqueKey` above cover two of three checks:
+`rowConditions` above covers null-checking; row-count parity or uniqueness
+checks (if ever needed) would follow the same standalone-file pattern below,
+same as `agent_safe`'s row-count-matches-source assertion.
 
-| Check | Catches |
-|---|---|
-| `nonNull: [embedding, ...]` | A *per-row* null embedding in an otherwise-successful batch — a wholesale failure is loud, one bad row isn't |
-| `uniqueKey: [chunk_id]` | Content-hash not actually varying with content — breaks reload idempotency |
-
-The third needs its own file:
+Emptiness needs its own file — no `rowConditions`/`nonNull` check can catch
+it, since there are no rows to evaluate a per-row condition against:
 
 ```sql
--- definitions/vector_db/assert_chunks_docs_not_empty.sqlx
+-- definitions/vector_db/assert_chunks_docs_embedded_not_empty.sqlx
 -- An empty table fails SILENTLY at runtime: search_docs just returns
 -- nothing, no error anywhere.
 config { type: "assertion", tags: ["vector_db"] }
-SELECT n FROM (SELECT COUNT(*) AS n FROM ${ref("chunks_docs")})
+SELECT n FROM (SELECT COUNT(*) AS n FROM ${ref("chunks_docs_embedded")})
 WHERE n = 0
 ```
 
-**`SELECT n`, not `SELECT 1`** — confirmed against a real compile failure (not
-assumed): Dataform compiles every assertion into a `CREATE VIEW`, and
-BigQuery rejects a view with an unnamed column. A bare `1` has no name;
-reusing the already-named `n` does.
+**`SELECT n`, not `SELECT 1`** — Dataform compiles every assertion into a
+`CREATE VIEW`, and BigQuery rejects a view with an unnamed column. A bare `1`
+has no name; reusing the already-named `n` does.
 
-**Indexes are optional and probably unnecessary** — see the row-count note
-above. Only if a table proves large enough to need one:
+**No vector index** — BigQuery's IVF index has a 5,000-row minimum; this
+table has 66. `VECTOR_SEARCH` runs a brute-force exact scan with no index at
+all, which is strictly better here: exact results, zero index-maintenance
+cost. If the corpus ever legitimately grows past that threshold:
 
 ```sql
-CREATE VECTOR INDEX chunks_docs_idx
-ON `YOUR_PROJECT.vector_db.chunks_docs`(embedding)
+CREATE VECTOR INDEX chunks_docs_embedded_idx
+ON `YOUR_PROJECT.vector_db.chunks_docs_embedded`(embedding)
 OPTIONS(index_type = 'IVF', distance_type = 'COSINE');
 ```
 
@@ -729,9 +736,9 @@ there's one content type.
 
 ```python
 SEARCH_SQL = """
-SELECT base.chunk_text, base.file_path, base.symbol_name, distance
+SELECT base.chunk_text, base.file_path, base.section, distance
 FROM VECTOR_SEARCH(
-  TABLE `{project}.vector_db.chunks_docs`, 'embedding',
+  TABLE `{project}.vector_db.chunks_docs_embedded`, 'embedding',
   (SELECT ml_generate_embedding_result AS embedding
    FROM ML.GENERATE_EMBEDDING(
      MODEL `{project}.staging.embedding_model`,
@@ -740,6 +747,11 @@ FROM VECTOR_SEARCH(
   top_k => @top_k, distance_type => 'COSINE')
 """
 ```
+
+**Must use the same model as the corpus embedding** — `staging.embedding_model`
+(`gemini-embedding-001`), not a different one. Query and corpus vectors from
+different models live in incompatible spaces; this isn't a style preference,
+it's a hard requirement for `VECTOR_SEARCH` to return anything meaningful.
 
 **`search_docs` is the only vector-search tool.** Schema comes from static
 context and `get_measure_dax` (`.claude/rules/mcp-tools.md`), code search is

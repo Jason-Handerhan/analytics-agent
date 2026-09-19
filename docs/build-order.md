@@ -127,8 +127,37 @@ that — fixed to `SELECT n`, and the same fix applied to `docs/
 data-pipeline.md`'s vector_db assertion template, which had the identical
 bug). **Compiled, executed, and all assertions passing in BigQuery Studio.**
 `docs/data-pipeline.md`'s Part 1 example updated to match all of this.
-**`vector_db.chunks_docs` and `context/schema/model_schema.json` — the other
-two data sources item 1 needs — not started.**
+**`vector_db.chunks_docs_embedded` — in progress, real deviations from the
+original design.** Real README source is `context/docs/index.html` (one
+file, not several) with `context/orientation/*.txt` holding the
+already-manually-extracted Executive Summary/Project Navigator/System
+Architecture pieces — `chunk_docs()` excludes that same block from
+`index.html` by heading name (not a separate excluded file) before chunking,
+confirmed against the real file (85/499 elements excluded, no trace of the
+excluded prose survives). `Chunk` schema changed from the doc's original
+`source_type`/`symbol_name`/`start_line`/`end_line` shape to
+`doc_source`/`section`/`length` — deliberately not a generic
+multi-content-type schema (decided 2026-09-19: a hypothetical future code
+source would get its own table, not share this one). `chunk_by_title`'s own
+chunk ids don't match source element ids (confirmed: 0/73) — fixed via
+`orig_elements[0].id`, which does (73/73), not the element-order fallback
+the doc originally proposed. `scripts/build_vector_db.py` built and verified
+identical to the notebook proof (66 chunks, 0 missing breadcrumbs).
+Embedding model is `gemini-embedding-001` (current #1 MTEB retrieval
+quality — compared against `text-embedding-005` and `embeddinggemma-300m`
+deliberately, not defaulted to the doc's original placeholder), needing
+`vertex_conn` recreated in `US` after a real region-mismatch failure
+(connection locations are fixed at creation time, same as datasets).
+`definitions/vector_db/chunks_docs_embedded.sqlx` and
+`definitions/sources_staging_doc_chunks.sqlx` (the missing declaration for
+`staging.doc_chunks`, same category of fix as `agent_safe`'s tables) written
+with `rowConditions` assertions, matching `agent_safe`'s proven pattern
+rather than the doc's original unverified `nonNull`/`uniqueKey`. No vector
+index — confirmed unnecessary (BigQuery's IVF minimum is 5,000 rows; the
+real build has 66), not deferred. **Not yet confirmed compiled/executed in
+BigQuery Studio** — in progress as of this writing.
+`context/schema/model_schema.json` — the third data source item 1 needs —
+not started.
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,

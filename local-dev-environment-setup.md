@@ -674,12 +674,19 @@ instead of failing on a missing API you then have to go enable and re-run.
    BigQuery→Vertex connection, plus `roles/aiplatform.user` on *that
    connection's* auto-created service account — a separate identity from
    `agent-sa`, and an easy one to miss.
+   **`YOUR_REGION` here must exactly match the location of every dataset this
+   connection will be used with** (`staging`/`agent_safe`/`vector_db` — `US`
+   for this project) — a mismatch fails `CREATE MODEL` with `Dataset ... was
+   not found in location ...`. Connection locations are fixed at creation
+   time, same as datasets, so fixing a mismatch means deleting and
+   recreating the connection, not a query-side fix.
    ```bash
    bq mk --connection --location=YOUR_REGION \
      --connection_type=CLOUD_RESOURCE vertex_conn
 
    # The connection's service account is AUTO-GENERATED — look it up, don't
    # guess it. Without this grant, ML.GENERATE_EMBEDDING fails at query time.
+   # (Shown in the IAM console/newer docs as "Agent Platform User" — same role.)
    CONN_SA=$(bq show --format=prettyjson --connection \
      YOUR_PROJECT.YOUR_REGION.vertex_conn \
      | python -c "import json,sys; print(json.load(sys.stdin)['cloudResource']['serviceAccountId'])")
