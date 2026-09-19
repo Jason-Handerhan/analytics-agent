@@ -1,0 +1,112 @@
+config {
+  type: "table",
+  schema: "agent_safe",
+  name: "product_order_analysis",
+  tags: ["agent_safe"],
+  columns: {
+    order_id: "Unique identifier for the order this line item belongs to.",
+    user_id: "Unique identifier for the customer who placed the order.",
+    order_number: "Sequential count of this order within the user's order history (1 = their first order).",
+    order_dow: "Day of week the order was placed (0 = Sunday through 6 = Saturday).",
+    order_hour_of_day: "Hour of day the order was placed, 24-hour format (0-23).",
+    time_of_day: "Order hour bucketed into morning, afternoon, evening, or nighttime.",
+    days_since_prior_order: "Days elapsed since this user's previous order (0 for a user's first order).",
+    days_since_first_order: "Cumulative days elapsed since this user's very first order, as of this order.",
+    product_id: "Unique identifier for the product on this order line.",
+    product_name: "Human-readable product name.",
+    aisle_id: "Unique identifier for the aisle this product belongs to.",
+    aisle: "Human-readable aisle name.",
+    department_id: "Unique identifier for the department this product belongs to.",
+    department: "Human-readable department name.",
+    is_organic: "1 if the product name matches an organic-product text pattern, 0 otherwise.",
+    add_to_cart_order: "Position in which this product was added to the cart within this order (1 = added first).",
+    reordered: "1 if the user had ordered this exact product in a previous order, 0 if this was the first time.",
+
+    user_cumulative_products: "Total product line items this user has ordered across all orders up to and including this one.",
+    user_cumulative_products_reordered: "Total product line items marked as reordered across this user's orders up to and including this one.",
+    user_cumulative_organic_products: "Total organic product line items this user has ordered up to and including this order.",
+    user_distinct_product_count: "Count of distinct products this user has ever ordered, as of this order (each product counted once, at its first purchase).",
+    user_organic_affinity_ratio: "Share of this user's cumulative product line items that are organic.",
+    user_avg_basket_size: "This user's average number of products per order, across all orders up to and including this one.",
+    user_reorder_ratio: "Share of this user's cumulative product line items that were reorders.",
+    user_avg_days_between_orders: "This user's average number of days between orders, as of this order.",
+
+    user_product_cumulative_purchases: "Number of times this user has purchased this specific product, counting this order.",
+    user_product_avg_cart_position: "This user's average add_to_cart_order position for this product, across their orders containing it up to this one.",
+    user_product_avg_relative_cart_position: "Same as user_product_avg_cart_position, but as a fraction of each order's total basket size rather than a raw position.",
+    user_product_last3order_streak: "How many of this user's last 3 consecutive orders included this product (0-3); resets when a purchase is skipped.",
+    user_product_same_dow_count: "Number of times this user has purchased this product on the same day of week as this order.",
+    user_product_same_tod_count: "Number of times this user has purchased this product during the same time-of-day bucket as this order.",
+    user_product_last_purchased_day: "days_since_first_order of the most recent order (up to and including this one) in which this user purchased this product.",
+    user_product_first_purchase_day: "days_since_first_order of the first order in which this user ever purchased this product.",
+    user_product_prev_purchase_day: "days_since_first_order of this user's purchase of this product immediately prior to this order (null if this is the first purchase).",
+    user_product_cumulative_reorders: "Number of times this specific product has been marked as a reorder for this user, up to and including this order.",
+    user_product_reorder_vs_total_reorders_ratio: "Share of this user's total reorders across all products that belong to this specific product.",
+    user_product_last_purchased_order_number: "order_number of the most recent order (up to and including this one) in which this user purchased this product.",
+
+    user_cumulative_aisle_products: "Total product line items this user has ordered from this aisle, up to and including this order.",
+    user_aisle_share: "Share of this user's cumulative product line items that come from this aisle.",
+    user_cumulative_department_products: "Total product line items this user has ordered from this department, up to and including this order.",
+    user_department_share: "Share of this user's cumulative product line items that come from this department.",
+
+    user_product_same_dow_count_0: "Cumulative times this user has purchased this product on a Sunday, as of this order.",
+    user_product_same_dow_count_1: "Cumulative times this user has purchased this product on a Monday, as of this order.",
+    user_product_same_dow_count_2: "Cumulative times this user has purchased this product on a Tuesday, as of this order.",
+    user_product_same_dow_count_3: "Cumulative times this user has purchased this product on a Wednesday, as of this order.",
+    user_product_same_dow_count_4: "Cumulative times this user has purchased this product on a Thursday, as of this order.",
+    user_product_same_dow_count_5: "Cumulative times this user has purchased this product on a Friday, as of this order.",
+    user_product_same_dow_count_6: "Cumulative times this user has purchased this product on a Saturday, as of this order.",
+
+    user_product_same_tod_count_morning: "Cumulative times this user has purchased this product during the morning time-of-day bucket, as of this order.",
+    user_product_same_tod_count_afternoon: "Cumulative times this user has purchased this product during the afternoon time-of-day bucket, as of this order.",
+    user_product_same_tod_count_evening: "Cumulative times this user has purchased this product during the evening time-of-day bucket, as of this order.",
+    user_product_same_tod_count_nighttime: "Cumulative times this user has purchased this product during the nighttime time-of-day bucket, as of this order."
+  }
+}
+
+-- Grain: one row per order x product (base_analytical_table's own grain).
+-- Every join key is unique in the child table for a given base row, so this
+-- is a 1:1 enrichment -- no fan-out, no aggregation needed here.
+SELECT
+  b.order_id, b.user_id, b.order_number, b.order_dow, b.order_hour_of_day,
+  b.time_of_day, b.days_since_prior_order, b.days_since_first_order,
+  b.product_id, b.product_name, b.aisle_id, b.aisle, b.department_id,
+  b.department, b.is_organic, b.add_to_cart_order, b.reordered,
+
+  o.user_cumulative_products, o.user_cumulative_products_reordered,
+  o.user_cumulative_organic_products, o.user_distinct_product_count,
+  o.user_organic_affinity_ratio, o.user_avg_basket_size, o.user_reorder_ratio,
+  o.user_avg_days_between_orders,
+
+  upf.user_product_cumulative_purchases, upf.user_product_avg_cart_position,
+  upf.user_product_avg_relative_cart_position, upf.user_product_last3order_streak,
+  upf.user_product_same_dow_count, upf.user_product_same_tod_count,
+  upf.user_product_last_purchased_day, upf.user_product_first_purchase_day,
+  upf.user_product_prev_purchase_day, upf.user_product_cumulative_reorders,
+  upf.user_product_reorder_vs_total_reorders_ratio,
+  upf.user_product_last_purchased_order_number,
+
+  a.user_cumulative_aisle_products, a.user_aisle_share,
+  d.user_cumulative_department_products, d.user_department_share,
+
+  dow.user_product_same_dow_count_0, dow.user_product_same_dow_count_1,
+  dow.user_product_same_dow_count_2, dow.user_product_same_dow_count_3,
+  dow.user_product_same_dow_count_4, dow.user_product_same_dow_count_5,
+  dow.user_product_same_dow_count_6,
+
+  tod.user_product_same_tod_count_morning, tod.user_product_same_tod_count_afternoon,
+  tod.user_product_same_tod_count_evening, tod.user_product_same_tod_count_nighttime
+
+FROM ${ref("base_analytical_table")} b
+LEFT JOIN ${ref("prelim_user_order_features")} o
+  ON b.user_id = o.user_id AND b.order_id = o.order_id
+LEFT JOIN ${ref("prelim_user_product_features")} upf
+  ON b.user_id = upf.user_id AND b.order_id = upf.order_id AND b.product_id = upf.product_id
+LEFT JOIN ${ref("prelim_user_aisle_features")} a
+  ON b.user_id = a.user_id AND b.order_id = a.order_id AND b.aisle_id = a.aisle_id
+LEFT JOIN ${ref("prelim_user_department_features")} d
+  ON b.user_id = d.user_id AND b.order_id = d.order_id AND b.department_id = d.department_id
+LEFT JOIN ${ref("prelim_user_order_dow_wide")} dow
+  ON b.user_id = dow.user_id AND b.order_id = dow.order_id AND b.product_id = dow.product_id
+LEFT JOIN ${ref("prelim_user_order_tod_wide")} tod
+  ON b.user_id = tod.user_id AND b.order_id = tod.order_id AND b.product_id = tod.product_id

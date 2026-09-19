@@ -1,1 +1,20 @@
+<<<<<<< HEAD
 node_modules/
+=======
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+.DS_Store
+.pytest_cache/
+*-key.json
+github-deployer-key.json
+*.png
+!docs/**/*.png
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+node_modules/
+>>>>>>> refs/heads/main

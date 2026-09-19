@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 defaultProject: instacart-ml-model
 defaultDataset: dataform
 defaultAssertionDataset: dataform_assertions
 dataformCoreVersion: 3.0.52
+=======
+>>>>>>> refs/heads/main

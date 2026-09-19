@@ -1,0 +1,61 @@
+[project]
+name = "analytics-agent"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Jason-Handerhan", email = "jmhlax4@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "fastmcp>=3.4.6,<4.0",  # 4.x requires mcp>=2.0, incompatible with langchain-mcp-adapters
+    "google-cloud-bigquery>=3.45.0",
+    "google-cloud-firestore>=2.30.0",
+    "google-cloud-secret-manager>=2.30.0",
+    "google-cloud-storage>=3.14.1",
+    "langchain-anthropic>=1.7.2",
+    "langchain-core>=1.6.3",
+    "langchain-google-genai>=4.4.0",
+    "langchain-mcp-adapters>=0.3.1",
+    "langchain-openai>=1.6.2",
+    "langgraph>=1.2.11",
+    "matplotlib>=3.11.2",
+    "mistune>=3.3.4",
+    "msal>=1.38.0",
+    "numpy>=2.5.3",
+    "pandas>=3.0.5",
+    "pydantic>=2.13.5",
+    "pyjwt[crypto]>=2.14.0",
+    "pysbd>=0.3.4",
+    "requests>=2.34.2",
+    "seaborn>=0.13.2",
+    "unstructured[md]>=0.27.5",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+# This is a service (run via uvicorn), not a distributable library — no
+# package for uv to build or install, just dependencies to manage. Without
+# this, `uv run`/`uv sync` try to build a package matching the project name
+# ("analytics_agent") and expect it at src/analytics_agent/, a leftover
+# `uv init` scaffold nothing in this project actually uses.
+package = false
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+# tests/ has no __init__.py, so pytest's default import-mode rootpath
+# resolves to tests/ itself, not the repo root — `from app...` fails
+# without this. Needed for `uv run pytest tests/` (CLAUDE.md's own
+# documented command) to work at all.
+pythonpath = ["."]
