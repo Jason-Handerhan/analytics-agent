@@ -729,8 +729,13 @@ forced tool choice → *then* sub-agents. Decide from eval metrics, not feel.
 ## LangSmith tracing — local and deployed
 
 `LANGSMITH_TRACING`/`LANGSMITH_API_KEY` give a per-turn trace of the agent
-loop: every LLM call, tool call, and iteration, nested in order. Set them
-locally and in the Cloud Run deploy command.
+loop: every LLM call, tool call, and iteration, nested in order. **Not deploy
+flags** — `LANGSMITH_TRACING` and `LANGCHAIN_CALLBACKS_BACKGROUND` are
+literals in `app/config.py` (identical in every environment), and
+`LANGSMITH_API_KEY` is fetched via `get_secret()` at startup like every other
+secret. All three get pushed to `os.environ` once before any
+LangChain/LangGraph import, since the SDK only reads them from there
+(`CLAUDE.md` Commands section).
 
 **`LANGCHAIN_CALLBACKS_BACKGROUND=false` is required wherever it's deployed.**
 Trace uploads go through a background callback by default; Cloud Run freezes
@@ -740,6 +745,11 @@ already solved for telemetry writes.
 **Separate from `agent_telemetry`, not a replacement**
 (`.claude/rules/telemetry.md`). Traces are a per-turn debugging view; the
 BigQuery table is the queryable record that feeds the judge. Different jobs.
+
+**Traces are queryable programmatically, not just via the LangSmith UI** —
+`langsmith.Client().list_runs(...)` (a separate package from `langchain-core`)
+filters by project/time/tags/metadata against the same data already being
+sent. No setup beyond the tracing config above.
 
 Setup: `local-dev-environment-setup.md` Step 17. Why tracing runs in
 production here rather than Cloud Trace: component reference §3.

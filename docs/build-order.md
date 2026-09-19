@@ -2,23 +2,67 @@
 
 ## Current status — update this as we go
 
-**Phase: 1 (in progress — items 1–3 of 7 done)**
+**Phase: 1 complete — Phase 2 next**
 
-_Last updated: 2026-09-16._ **Phase 0 (2026-09-13): all nine items verified
+_Last updated: 2026-09-18._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
 verification detail if ever needed; kept brief here since it's done, not
-current. One item remains by design, not as a gap: Entra registration B
-(connector app) can't be end-to-end tested until Phase 1 item 4 builds the
-actual connector.
+current.
 
-**Phase 1, items 1–3 of 7 done.** Items 1+2 (echo `/ask`, `/conversation` +
+**Phase 1, all 7 items done.** Items 1+2 (echo `/ask`, `/conversation` +
 ownership check) built and Layer 1 tested (`tests/test_gateway_auth.py`,
-9 tests). Item 3 (`Dockerfile` + deploy) done and verified live — deployed
-to `https://analytics-gateway-551802026956.us-central1.run.app`, confirmed
-reachable with a real `401` from `agent-sa` successfully reaching Secret
-Manager via Cloud Run's ambient credentials (the exact thing that fails in
-a local, credential-less container — expected, not a bug). Next: item 4,
-the custom connector, generated from this URL's OpenAPI.
+9 tests). Item 3 (`Dockerfile` + deploy) done and verified live. Item 4
+(custom connector) done and verified live — both operations return real
+`200`s through real OAuth. Two real deviations from plan, both now reflected
+in `docs/auth.md`:
+- FastAPI emits OpenAPI 3.1.0, which Power Platform's importer can't parse
+  at all — hand-wrote an equivalent Swagger 2.0 spec instead
+  (`gateway-swagger2.json`, not committed — a one-off Power Platform import
+  artifact, not app code).
+- A single self-referencing Entra app (as both OAuth client and resource)
+  hit a persistent `AADSTS90008` regardless of permissions/consent — fixed
+  by splitting into two apps: `analytics-agent-connector` (resource) and a
+  new `analytics-agent-connector-client` (OAuth client). Phase 0's "two
+  Entra registrations" is now three.
+
+Also fixed along the way: `validate_entra_token` checked the v2-endpoint
+issuer format, but Power Platform's OAuth provider issues v1-format tokens
+(`sts.windows.net`, not `login.microsoftonline.com/.../v2.0`) — confirmed
+against a real token and corrected in `app/gateway/gateway.py`.
+
+**Items 5+6 done together** — basic canvas app built (connector data source,
+`App.OnStart` minting `varConversationId`, `TextInput`/Send/Gallery/New chat),
+and a real message round-trips end to end (confirmed against the current
+canned `Echo: ...` response — real synthesis is Phase 3). One real deviation
+from `docs/frontend.md`, now fixed there too: **both** message roles render
+through an HTML text control, not just the agent's — a plain Label couldn't
+support the scrollable-long-message fix below, and user questions turned out
+not to be reliably short. User text is manually HTML-escaped
+(`&`→`&amp;` before `<`/`>`, order matters) before rendering, closing the
+markup-injection gap a Label would otherwise have sidestepped. Also: gallery
+rows are fixed-height (`TemplateSize`), so both message types wrap long
+content in a `max-height` + `overflow-y: auto` div rather than growing the
+row — and `TextInput1` uses `TextMode.MultiLine` for wrapping, with typed
+newlines flattened to spaces before use (Power Apps ties wrapping and
+Enter-inserts-newline together; this decouples them).
+
+**Item 7 done.** `telemetry.agent_telemetry` created (location `US`, matching
+the other three datasets — confirmed via `bq show`, not assumed) with the
+full schema from `.claude/rules/telemetry.md`, including the three nested
+`RECORD` fields. `app/telemetry/writer.py` builds a row and writes it via an
+awaited `asyncio.to_thread(insert_rows_json, ...)` call — confirmed this is
+genuinely not backgrounded (Cloud Run sees the request as in-flight for the
+whole duration, same as any other awaited I/O). One Layer 1 test
+(`tests/test_telemetry.py`), 10 passing overall.
+
+**Deliberately not wired anywhere yet.** `orchestrator.md` already specifies
+`finalize` as the real caller, but `finalize` doesn't exist until Phase 3
+builds the graph — wiring it into the gateway now would just mean moving it
+later. **Phase 3 item 4 (the graph skeleton) needs to call `write_telemetry_row`
+from `finalize`, not just build the node fresh** — flagging here so that
+isn't missed when this phase starts.
+
+**Phase 1 complete.** Next: Phase 2, standing up the real FastMCP server.
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,
@@ -65,6 +109,10 @@ trusting a static tree that could drift from it.
      settings, **Contributor** on the workspace.
    - **Connector app** — Application ID URI + scope + secret. Its redirect URI
      can't be set until Phase 1 creates the connector; that's expected.
+     **Became two apps in Phase 1** — this one stayed the OAuth *resource*;
+     a second app (`analytics-agent-connector-client`) had to be added as
+     the OAuth *client*, since a single self-referencing app hit a
+     persistent `AADSTS90008` (`docs/auth.md`).
 6. Create `agent-sa` + IAM (needs #4 first — `dataViewer` targets `agent_safe`).
 7. **Secret Manager — all ten, one setup step** (setup guide Step 15),
    even though several aren't needed until later phases: `power-bi-sp-client-id`,
@@ -165,9 +213,15 @@ layer failed.
      agentic, `docs/code-search.md`).
    - **`context/schema/model_schema.json`** — run
      `scripts/build_model_context.py` and **commit the result**. Not a
-     BigQuery table and not embedded: it's parsed from the `.pbip` and read
-     into static context at startup. This is what makes the semantic model
-     deterministic to query rather than retrieved.
+     BigQuery table and not embedded: it's built by querying live Power BI
+     (`executeQueries`/`INFO.VIEW.*` for tables, columns, measure names,
+     relationships; the Scanner API for DAX expressions and parameter
+     detection — decided 2026-09-17, replacing an earlier `.pbip`/TMDL-parsing
+     design, `docs/data-pipeline.md`) and read into static context at
+     startup. This is what makes the semantic model deterministic to query
+     rather than retrieved. **Two open gaps, not yet resolved:** a table-count
+     mismatch between the two APIs, and no confirmed source for a what-if
+     parameter's `range` (`docs/data-pipeline.md`).
 
    **This has to precede the static context bundle**, not just the tools:
    four of its seven components (`TABLE_REGISTRY`, `MEASURE_REGISTRY`,
@@ -234,6 +288,9 @@ layer failed.
    every call site (`.claude/rules/gateway.md`). Status *strings* land in
    Phase 4; the *plumbing* has to be right now. Standing this up first is
    what lets every tool below be tested end-to-end the moment it's written.
+   **`finalize` must call `app/telemetry/writer.py`'s `write_telemetry_row`**
+   (built and tested in Phase 1, deliberately left unwired until this node
+   exists) — not a new write path, just the first real caller.
 5. **`bigquery_schema` MCP resource + TTL cache**, then **`run_bigquery_sql`
    with every guardrail — tool-scoped *and* global — in the same step.**
    Debugging a tool-calling loop against ungated BigQuery is how you generate
@@ -333,16 +390,22 @@ XMLA is a documented backup only. REST is the plan.
 
 ## Phase 7 — Optional (no strong ordering)
 
+- **Scheduled model-schema rebuild, replacing the manual script.** A periodic
+  Cloud Scheduler + Cloud Run Job (same pattern as the Phase 6 judge) reruns
+  the live-API build from `docs/data-pipeline.md` Part 2 and writes the
+  artifact somewhere the gateway reads at startup — staleness stops being
+  possible at all, rather than just less fragile to detect. The better
+  production answer; deferred because it's more infrastructure than this
+  portfolio project's current scope justifies. Decided 2026-09-17 alongside
+  the TMDL-parsing → live-API swap.
 - User-forced tool choice (dropdown, `forced_tools` field, ~30–45 min).
 - Preset layout modes (2–3 fixed width ratios, ~20 min). Skip drag-to-resize.
-- **Replace LangSmith with Cloud Trace — building the production path for
-  real.** The shipped design keeps LangSmith on in production as a stated
-  trade-off (component reference §3): tool inputs and outputs, real
-  `agent_safe` results, reach a third-party cloud through a path the IAM
-  design doesn't cover. Cloud Trace is the GCP-native answer — nothing leaves
-  the boundary. **Optional, and if it isn't built the trade-off simply
-  stands** as documented rather than becoming an unacknowledged gap. If it
-  is built, update §3 and drop `langsmith-api-key` from Secret Manager.
+- **Replace LangSmith with Cloud Trace** — keeps tool inputs/outputs and real
+  `agent_safe` results inside GCP instead of a third-party cloud (component
+  reference §3, an accepted trade-off if never built). Scoped to LangSmith's
+  role only — `agent_telemetry` is untouched. Optional; the trade-off stands
+  if not built. Full plan, verified endpoint/IAM facts, and a real fidelity
+  test already run: `docs/cloud-trace-migration.md`.
 - `run_projection` — a plain deterministic tool (no LLM or sandbox inside),
   `is_projection` response field, distinct "unverified" card. Default stays
   "decline forecasts outright."

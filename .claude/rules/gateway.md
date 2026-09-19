@@ -489,14 +489,16 @@ actual benefit.
      types, and descriptions. Includes *disconnected* tables (measure-only
      and parameter tables), which never appear in relationships, so this is
      their only source.
-  3. **`MEASURE_REGISTRY`** — every measure's name and `///` description.
+  3. **`MEASURE_REGISTRY`** — every measure's name and description.
      **Names and descriptions only — never the DAX bodies**, which are
      fetched per-measure by `get_measure_dax`
      (`.claude/rules/mcp-tools.md`).
   4. **`RELATIONSHIPS`** — join paths, parsed from the same artifact. Needed
      on nearly every composition, so present rather than retrieved.
      **`PARAMETERS`** rides along here too: what-if/field parameters with
-     their filter column, range, and value measure.
+     their filter column and value measure — **`range` currently unavailable**,
+     an open gap in the build itself, not a rendering choice
+     (`docs/data-pipeline.md`).
   5. **`BIGQUERY_SCHEMA`** — read once at startup.
   6. **System instructions.**
   7. **Few-shot examples.**
@@ -536,8 +538,10 @@ actual benefit.
 ## Model schema — one parse, six artifacts
 
 `context/schema/model_schema.json` is built locally by
-`scripts/build_model_context.py` and committed (`docs/data-pipeline.md`). The
-gateway reads it **once at import**, never the `.pbip`.
+`scripts/build_model_context.py` — querying live Power BI (`executeQueries` +
+the Scanner API), not `.pbip`/TMDL parsing — and committed
+(`docs/data-pipeline.md`). The gateway reads it **once at import**, never
+Power BI directly.
 
 ```python
 # app/gateway/model_schema.py — module level, evaluated at import

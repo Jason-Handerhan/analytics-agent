@@ -124,6 +124,7 @@ that area, rather than reconstructing the design from memory:
 | `docs/golden-dataset.md` | Hand-verified correctness regression tests |
 | `docs/success-criteria.md` | What proves a phase works — read before building, not just at the end |
 | `docs/build-order.md` | What phase we're in and what's next |
+| `docs/cloud-trace-migration.md` | Phase 7's LangSmith → Cloud Trace swap — read before building it |
 | `conversational-analytics-platform-COMPONENT-REFERENCE.md` | The *why* behind any decision; full design reasoning |
 | `local-dev-environment-setup.md` | Environment, credentials, GCP/Entra setup |
 
@@ -135,13 +136,11 @@ than the task needs.
 ## Ask me — don't decide alone
 
 - Which results tables get excluded from `agent_safe`.
-- Real measure/table names from the `.pbip` model — documented DAX examples use
-  placeholders.
+- Real measure/table names from the live semantic model — documented DAX
+  examples use placeholders.
 - Anything that changes the verification contract.
 - **The `extract_numeric_tokens` rule** — year/version/index vs. real value.
   Propose a rule with accept/reject examples; confirm before locking a test.
-- Which repo/`.pbip` paths `build_model_context.py` walks; whether the TMDL
-  regex fits the real files.
 - Whether Instacart bronze already has `products`/`aisles`/`departments` with
   id→name mappings — check before assuming new ingestion is needed.
 - **The three cost thresholds**: `BIG_QUERY_THRESHOLD` (per *batch*, not per
@@ -188,7 +187,7 @@ than the task needs.
 
 ```bash
 # Local dev — uv run finds .venv automatically, no activation needed
-uv run uvicorn app.gateway.main:app --reload --port 8000
+uv run uvicorn app.gateway.gateway:app --reload --port 8000
 
 # Tests — Layer 1 only, no credentials needed. A test needing real
 # credentials is Layer 2: run it manually, don't put it here.
@@ -209,18 +208,19 @@ gcloud run deploy analytics-gateway \
   --source . \
   --service-account=agent-sa@YOUR_PROJECT.iam.gserviceaccount.com \
   --allow-unauthenticated \
-  --region=YOUR_REGION \
-  --set-env-vars=GCP_PROJECT_ID=...,GCP_REGION=...,TENANT_ID=...,EXPECTED_AUDIENCE=...,GCS_CHART_BUCKET=...,POWER_BI_DATASET_ID=...,MODEL=claude-sonnet-5-...
+  --region=YOUR_REGION
 ```
 
-**No `--set-secrets` flag, and `LANGSMITH_TRACING`/`LANGCHAIN_CALLBACKS_BACKGROUND`
-aren't deploy flags either.** `LANGSMITH_API_KEY` is fetched via `get_secret()`
-at startup exactly like every other secret — no Cloud-Run-native secret
-mounting needed for it specifically. The two LangSmith flags are literals in
-`app/config.py` instead, since they're identical in every environment rather
-than genuinely deploy-time config. One remaining wrinkle: the LangSmith SDK
-itself only reads these three off `os.environ`, so app startup pushes all
-three there once, before any LangChain/LangGraph import
+**No `--set-env-vars`, no `--set-secrets`.** Every non-secret config value
+(`GCP_PROJECT_ID`, `TENANT_ID`, `EXPECTED_AUDIENCE`, `GCS_CHART_BUCKET`,
+`POWER_BI_DATASET_ID`, `POWER_BI_WORKSPACE_ID`, `LANGSMITH_TRACING`,
+`LANGCHAIN_CALLBACKS_BACKGROUND`) is a **hardcoded literal in
+`app/config.py`**, not read from an env var — confirmed live (2026-09-16),
+this deploy command. `LANGSMITH_API_KEY` is fetched via `get_secret()` at
+startup exactly like every other secret — no Cloud-Run-native secret
+mounting needed for it specifically. One remaining wrinkle: the LangSmith SDK
+itself only reads its three settings off `os.environ`, so app startup pushes
+them there once, before any LangChain/LangGraph import
 (`local-dev-environment-setup.md` Step 17).
 
 **Deployed gateway URL:** `https://analytics-gateway-551802026956.us-central1.run.app`
@@ -229,9 +229,13 @@ purely for the Power Apps connector's Host setting and manual curl tests.
 Stable across redeploys (Cloud Run URLs are per-service, not per-revision).
 
 **Config values I provide — never invent these:** `GCP_PROJECT_ID`,
-`GCP_REGION`, `TENANT_ID`, `EXPECTED_AUDIENCE`, `GCS_CHART_BUCKET`,
-`POWER_BI_DATASET_ID`. All non-secret, all read from env vars in
-`app/config.py`. Secrets live in Secret Manager: `power-bi-sp-client-id`,
+`TENANT_ID`, `EXPECTED_AUDIENCE`, `GCS_CHART_BUCKET`, `POWER_BI_DATASET_ID`,
+`POWER_BI_WORKSPACE_ID`. All non-secret, all hardcoded literals in
+`app/config.py` (not env vars — see Commands above). `GCP_REGION` doesn't
+exist there today; it's only used as the `--region` deploy flag, never read
+by app code — flag it if something in a later phase (e.g. the Vertex AI
+connection) actually needs it as a config constant rather than a deploy-time
+value. Secrets live in Secret Manager: `power-bi-sp-client-id`,
 `power-bi-sp-client-secret`, `azure-tenant-id`, `entra-client-secret`,
 `gateway-api-key`, `github-read-token`, `anthropic-api-key`,
 `langsmith-api-key`, `gemini-api-key`, `openai-api-key`.

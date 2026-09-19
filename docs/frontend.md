@@ -66,19 +66,40 @@ report.
     needed.
 - **`TextInput` + send `Button` + `Gallery`**, the Gallery bound to a
   `colChat` collection.
-- **Custom connector call on send:**
-  `AnalyticsAgent.Ask({question, image_base64, filter_context, active_page, conversation_id})`.
+- **Custom connector call on send — positional arguments, not a record:**
+  `AnalyticsAgent.PostAsk(question, conversation_id)` — confirmed empirically
+  (2026-09-18): a flat request-body schema like `AskRequest`'s gets flattened
+  into separate positional parameters by Power Apps' connector generation,
+  not exposed as one inline record. Optional fields (`image_base64`,
+  `filter_context`, `active_page`) can be omitted entirely.
 
-**The Gallery template needs two shapes, not one.** A user's message is plain
-text and must render in a `Label`; an agent's message is HTML from the gateway
-and must render in an **HTML text control**. Putting user text through the HTML
-control would interpret anything angle-bracketed as markup.
+**Both roles render through an HTML text control — not the Label-for-user
+split originally planned here.** A plain Label can't support the
+scrollable-long-message fix below, and user questions turned out not to be
+reliably short (confirmed against real usage, not assumed). The
+markup-injection risk a Label would have sidestepped is instead closed by
+**manually HTML-escaping user text before rendering**:
+`&` → `&amp;` first, then `<` → `&lt;`, then `>` → `&gt;` — that order
+matters, since escaping `<`/`>` before `&` would double-escape the entities
+just created.
 
 ```
 colChat record:  { role: "user" | "agent",
-                   body: <plain text for user, HTML for agent>,
+                   body: <escaped plain text for user, HTML for agent>,
                    chart_url: <optional, agent only> }
 ```
+
+**Gallery rows are fixed-height (`TemplateSize`), not auto-growing.** Both
+message types wrap their content in a `max-height` + `overflow-y: auto` div
+in the `HtmlText` formula rather than relying on the row itself growing —
+Power Apps galleries don't natively support per-row auto-height.
+
+**`TextInput` uses `TextMode.MultiLine` for word-wrap, with typed newlines
+flattened to spaces before use.** Power Apps ties visual wrapping and
+Enter-inserts-a-newline together in one property — there's no wrap-only
+mode. Stripping `Char(13)`/`Char(10)` to spaces before storing or sending
+decouples them: the box wraps visually, but a manually-typed line break
+never becomes semantically meaningful data.
 
 **Store the gateway's HTML, not `answer_markdown`.** Power Apps can't convert
 Markdown, so the conversion happens once in the gateway and the client holds

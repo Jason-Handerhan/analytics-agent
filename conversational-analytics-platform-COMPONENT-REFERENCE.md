@@ -512,10 +512,12 @@ Workload Identity Federation to remove the long-lived credential."*
   prove locally against Power BI Desktop first, if it's ever actually needed.
 - Current Vertex AI text-embedding model for `ML.GENERATE_EMBEDDING` — check
   availability at build time.
-- TMDL parsing against the **full** `.pbip`, not just the four shapes sampled
-  into `tests/fixtures/` (data table, measure holder, parameter, auto date
-  table). The regexes are written and snapshot-tested (`docs/testing.md`); what
-  isn't confirmed is that no fifth shape exists in the real model.
+- Model schema now built from live Power BI, not `.pbip`/TMDL parsing
+  (decided 2026-09-17, `docs/data-pipeline.md`) — proven against the real
+  dashboard in a notebook, but `scripts/build_model_context.py` itself isn't
+  rewritten to this design yet. Two open gaps: a table-count mismatch between
+  `executeQueries` and the Scanner API, and no confirmed source for a
+  what-if parameter's `range`.
 - Which HTML tags the Power Apps HTML text control renders reliably — test
   before locking the system prompt's formatting instruction.
 - Whether monospace rendering (inline `font-family` + `white-space:
@@ -543,7 +545,7 @@ Workload Identity Federation to remove the long-lived credential."*
   equivalent for the REST path.
 - Confirm the Power Apps Developer Plan actually permits custom connectors in
   practice — sources disagree; cheap to verify.
-- Real measure/table names from the actual `.pbip` TMDL files, to replace the
+- Real measure/table names from the live semantic model, to replace the
   illustrative DAX few-shot examples in `.claude/rules/gateway.md`.
 
 ---

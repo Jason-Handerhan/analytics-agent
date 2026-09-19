@@ -270,7 +270,7 @@ analytics-agent/
 ├── scripts/
 ├── notebooks/
 └── tests/
-    └── fixtures/                  ← TMDL samples + expected artifact
+    └── fixtures/                  ← model-schema API-response samples + expected artifact
 ```
 
 **Twenty documents to copy in: the three `.md` files at the root, the five in
@@ -299,10 +299,12 @@ What each directory is for, and where its spec lives:
 | `notebooks/` | Throwaway validation of isolated logic against real data | — |
 | `tests/` | pytest suite (+ `conftest.py` fixtures) | `docs/testing.md` |
 
-**`context/` is source material, not code** — the docs and TMDL files get
-chunked into the vector index, the orientation bundle gets read into every
-prompt, and the schema snapshots exist so Claude Code can see your real table
-structure while building without a `bq` round-trip per question. You'll
+**`context/` is source material, not code** — the docs get chunked into the
+vector index, `model_schema.json` is built from live Power BI (not chunked or
+embedded — it's small and fully enumerable, so it goes straight into static
+context), the orientation bundle gets read into every prompt, and the schema
+snapshots exist so Claude Code can see your real table structure while
+building without a `bq` round-trip per question. You'll
 populate these as you go, not during setup; creating them now just means the
 structure is settled before anyone has to guess at it.
 
@@ -845,6 +847,24 @@ Contributor is the minimum role that satisfies `executeQueries`' documented
 the dataset. **Confirmed empirically (2026-09-13)** — the "Verify A worked"
 script below returned 200 with the service principal at exactly this role,
 ahead of schedule (Phase 0, not Phase 1).
+
+**A7. Enable admin API access for the model-schema build (Phase 3, added
+2026-09-17).** A separate concern from A5/A6 — `executeQueries` can't return
+a measure's actual DAX `Expression` at any workspace role, confirmed up to
+Admin (`docs/data-pipeline.md`). Getting it needs the **Scanner API**
+instead, gated by three tenant settings under **Admin API settings** (search
+each by name in Tenant settings rather than scrolling):
+- **Allow service principals to use read-only admin APIs** → Enabled →
+  **Specific security groups** → the same `powerbi-api-service-principals`
+  group from A4.
+- **Enhance admin APIs responses with detailed metadata** → Enabled.
+- **Enhance admin APIs responses with DAX and mashup expressions** → Enabled.
+
+The first setting's scope is **tenant-wide read access to every workspace's
+metadata**, not just this one — the one meaningfully broader grant in this
+project's auth model. Read-only by nature (no write operation exists on this
+API), so no risk of the agent modifying anything through it, but worth being
+deliberate about rather than granting reflexively.
 
 ---
 

@@ -12,4 +12,4 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY app ./app
 
 # exec + shell form: real $PORT expansion, proper SIGTERM handling
-CMD exec uv run --no-sync uvicorn app.gateway.main:app --host 0.0.0.0 --port $PORT
+CMD exec uv run --no-sync uvicorn app.gateway.gateway:app --host 0.0.0.0 --port $PORT

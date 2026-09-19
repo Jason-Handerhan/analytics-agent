@@ -42,7 +42,7 @@ reading its own report, which you do every run anyway.
 | `sample_chart_df()` | Small DataFrame for chart dispatch tests |
 | `MULTI_STEP_EXPENSIVE_QUESTION` | Needs further tool calls *after* the approved query |
 | `telemetry_rows_for(conv_id)` | The (pause, response) row pair for one conversation |
-| `tests/fixtures/tmdl/` | One `.tmdl` per shape, trimmed from the real `.pbip` — plus the hand-verified expected artifact |
+| `tests/fixtures/model_schema/` | Small, hand-trimmed `INFO.VIEW.*`/Scanner API response shapes — plus the hand-verified expected artifact |
 | `create_conversation(as_user)` | Calls `POST /conversation` as a given identity |
 | `get_status(conv_id, as_user)` | Calls `GET /ask/status` as a given identity |
 | `respond_to_approval(conv_id, decision)` | Calls `POST /ask/respond` |
@@ -108,51 +108,39 @@ def test_caching_dispatch_matches_the_model(model, expects_marker):
 
 ```
 
-## 3. TMDL parser — snapshot over one fixture per shape
+## 3. Model schema build — fixture-driven assembly, real API calls stay Layer 2
 
-```python
-# tests/test_model_schema_parser.py
-"""Snapshot test for the TMDL parser.
+**Decided 2026-09-17:** the model schema is now built from live Power BI
+(`executeQueries` + the Scanner API), not TMDL parsing — `docs/data-pipeline.md`.
+`scripts/build_model_context.py` itself isn't rewritten to this design yet;
+this section describes the test shape it needs, carrying forward the same
+split the old TMDL parser had: **fetching is Layer 2 (real credentials,
+real network calls), assembling the artifact from an already-fetched
+response is Layer 1 (fixture-driven, no credentials).**
 
-TO REGENERATE after an intentional parser change:
-    python tests/test_model_schema_parser.py
-Then READ THE DIFF before committing. A regenerated file nobody reviewed
-asserts only that the parser does what the parser does.
-"""
-from scripts.build_model_context import build_artifact   # docs/data-pipeline.md
+Once the script exists, its assembly function should take already-fetched
+API response shapes as plain arguments — the `INFO.VIEW.*` rows and the
+Scanner API's `scanResult` JSON — the same way `build_artifact` used to take
+file paths. Point the test at a small, hand-trimmed fixture of each API's
+real response shape, assert the assembled artifact matches expected values
+(not just expected shape), regenerate deliberately and **read the diff**
+before committing.
 
-FIXTURES  = pathlib.Path(__file__).parent / "fixtures" / "tmdl"
-EXPECTED  = pathlib.Path(__file__).parent / "fixtures" / "model_schema_expected.json"
-TABLES_DIR    = FIXTURES / "definition" / "tables"
-RELATIONSHIPS = FIXTURES / "definition" / "relationships.tmdl"
+**What the fixture needs to cover, carried forward from the old design's real
+bugs, plus what's new:** DAX bodies free of fences; HTML-display measures
+excluded (`Financial_Assumptions_HTML` is a real one, confirmed present); the
+strict-vs-broad `SELECTEDVALUE` distinction for parameter detection — a
+fixture with an ordinary measure that merely *uses* `SELECTEDVALUE` on a
+plain data column must NOT be classified as a parameter; `LocalDateTable_*`
+skipped from tables and relationships; and, until `docs/data-pipeline.md`'s
+two open gaps are resolved, a parameter missing `range` should assert `null`
+there rather than silently passing with an absent key.
 
-def _build() -> dict:
-    return build_artifact(list(TABLES_DIR.glob("*.tmdl")), RELATIONSHIPS)
-
-def test_tmdl_parses_to_the_expected_artifact():
-    """One assertion covering: the four-way classification; DAX bodies free
-    of fences and of the following block; multi-line and absent ///
-    descriptions; real dataTypes and the "unknown" fallback; parameter
-    filter_column/range/value_measure; HTML-display measures excluded; the
-    measure table's dummy column dropped; LocalDateTable_* skipped from
-    tables AND relationships."""
-    assert _build() == json.loads(EXPECTED.read_text())
-
-if __name__ == "__main__":        # regeneration; pytest imports, so skipped
-    EXPECTED.write_text(json.dumps(_build(), indent=2, sort_keys=True))
-```
-
-**Fixtures:** `tests/fixtures/tmdl/definition/` — one `.tmdl` per shape (data
-table, measure holder, parameter, auto date table) plus `relationships.tmdl`,
-all trimmed from the real `.pbip` rather than invented.
-
-**Don't put the HTML-display measure last** in the measure-holder fixture. It's
-excluded before it can exercise anything, and the fixture then tests less than
-it appears to.
-
-**Values, not shape.** Asserting `kind == "parameter"` passes while `range` is
-missing or a DAX body still carries a fence — both real bugs found against the
-actual `.pbip`.
+**Layer 2, run manually, not fixture-covered:** the actual `executeQueries`
+and Scanner API calls succeeding against the real dataset, and the two open
+gaps (table-count mismatch between the two APIs; no confirmed source for a
+what-if parameter's range) — those need the real dashboard to investigate,
+not something a fixture can stand in for.
 
 ## 4. Chat history reaches the prompt via Firestore
 

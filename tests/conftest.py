@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from app.config import EXPECTED_AUDIENCE, TENANT_ID
 
 # v1 endpoint issuer — matches what validate_entra_token actually checks
-# (app/gateway/main.py), since Power Platform's OAuth provider issues v1
+# (app/gateway/gateway.py), since Power Platform's OAuth provider issues v1
 # tokens regardless of our own config.
 _REAL_ISSUER = f"https://sts.windows.net/{TENANT_ID}/"
 
@@ -59,14 +59,14 @@ def patch_jwks(monkeypatch, signing_key):
     """Serve our test key's public half instead of hitting Entra's real
     JWKS endpoint — this is the whole reason validate_entra_token is
     testable with no real Entra dependency."""
-    import app.gateway.main as gateway_main
+    import app.gateway.gateway as gateway
 
     class _FakeSigningKey:
         def __init__(self, key):
             self.key = key
 
     monkeypatch.setattr(
-        gateway_main._jwks_client,
+        gateway._jwks_client,
         "get_signing_key_from_jwt",
         lambda token: _FakeSigningKey(signing_key.public_key()),
     )

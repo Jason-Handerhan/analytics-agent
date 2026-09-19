@@ -1,4 +1,4 @@
-"""Layer 1 tests for app/gateway/main.py auth — no real credentials needed.
+"""Layer 1 tests for app/gateway/gateway.py auth — no real credentials needed.
 
 Lean by design: scoped to auth-bypass prevention specifically, not every
 failure mode that exists. Protocol/format checks (missing "Bearer " prefix,
@@ -22,8 +22,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-import app.gateway.main as gateway_main
-from app.gateway.main import app, validate_api_key, validate_entra_token
+import app.gateway.gateway as gateway
+from app.gateway.gateway import app, validate_api_key, validate_entra_token
 
 client = TestClient(app)
 
@@ -83,7 +83,7 @@ def test_tampered_payload_rejected(make_token, patch_jwks):
 
 
 def test_wrong_api_key_rejected(monkeypatch):
-    monkeypatch.setattr(gateway_main, "get_gateway_api_key", lambda: "expected-key")
+    monkeypatch.setattr(gateway, "get_gateway_api_key", lambda: "expected-key")
     with pytest.raises(HTTPException) as exc:
         validate_api_key("wrong-key")
     assert exc.value.status_code == 401
@@ -99,10 +99,10 @@ async def test_wrong_owner_rejected(monkeypatch):
     snapshot.to_dict.return_value = {"user_id": "someone-elses-oid"}
     fake_db = MagicMock()
     fake_db.collection.return_value.document.return_value.get = AsyncMock(return_value=snapshot)
-    monkeypatch.setattr(gateway_main, "get_db", lambda: fake_db)
+    monkeypatch.setattr(gateway, "get_db", lambda: fake_db)
 
     with pytest.raises(HTTPException) as exc:
-        await gateway_main.assert_owns_conversation("some-id", {"oid": "my-oid"})
+        await gateway.assert_owns_conversation("some-id", {"oid": "my-oid"})
     assert exc.value.status_code == 404
 
 
@@ -128,8 +128,8 @@ def auth_headers(make_token):
 
 
 def _patch_gateway(monkeypatch, fake_db):
-    monkeypatch.setattr(gateway_main, "get_gateway_api_key", lambda: "expected-key")
-    monkeypatch.setattr(gateway_main, "get_db", lambda: fake_db)
+    monkeypatch.setattr(gateway, "get_gateway_api_key", lambda: "expected-key")
+    monkeypatch.setattr(gateway, "get_db", lambda: fake_db)
 
 
 def test_post_conversation_success(monkeypatch, patch_jwks, fake_db, auth_headers):

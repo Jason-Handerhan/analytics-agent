@@ -11,7 +11,7 @@ committed file. Only project docs are chunked and embedded.
 | # | Source | Built by | Output | Read by |
 |---|---|---|---|---|
 | **1** | Instacart bronze tables | Dataform (`agent_safe` tag) | `agent_safe.*` tables | `run_bigquery_sql`, `bigquery_schema` |
-| **2** | ML repo `.pbip` → `*.tmdl` | `scripts/build_model_context.py` (local, **no Dataform**) | `context/schema/model_schema.json`, committed | static context + `get_measure_dax` |
+| **2** | Live Power BI (`executeQueries` + Scanner API) | `scripts/build_model_context.py` (local, **no Dataform**) | `context/schema/model_schema.json`, committed | static context + `get_measure_dax` |
 | **3** | `context/docs/*.md`, `*.html` | `scripts/build_vector_db.py` → Dataform (`vector_db` tag) | `vector_db.chunks_docs` | `search_docs` |
 
 **They refresh independently.** A measure rename touches only #2; a docs edit
@@ -182,336 +182,116 @@ data changes.
 
 ## Part 2 — Model schema (Phase 3)
 
-**A pipeline, but not a Dataform one.** Parse `.pbip` → one committed JSON →
-read into static context at startup. No SQL, no BigQuery, no embeddings. It
-shares the `.pbip` source and the manual-refresh discipline with the others,
-which is why it lives here.
+**A pipeline, but not a Dataform one.** Query live Power BI → one committed
+JSON → read into static context at startup. No SQL, no BigQuery, no
+embeddings. It shares the manual-refresh discipline with the others, which is
+why it lives here.
 
-### The extraction script — `scripts/build_model_context.py`
+**Decided 2026-09-17, replacing an earlier `.pbip`/TMDL-parsing design** —
+removes a fragile hand-written regex parser and an undetectable staleness
+risk, at the cost of two APIs instead of one file. **Artifact shape and the
+manual refresh discipline are unchanged**; this is a data-source swap, not a
+pipeline redesign.
 
-Parses the same `.pbip` the chunkers used to read, into **one committed
-JSON**. Rationale is in the docstring.
+### Two APIs, split by what each can see
 
-```python
-# scripts/build_model_context.py
-"""Parse the semantic model's TMDL into ONE committed json artifact.
+**`executeQueries`** (already used by `run_dax_query`, Contributor role, no
+Premium) runs `INFO.VIEW.TABLES()` / `INFO.VIEW.COLUMNS()` /
+`INFO.VIEW.MEASURES()` / `INFO.VIEW.RELATIONSHIPS()` as plain DAX queries.
+Covers tables, columns, measure names + descriptions, and relationships
+(including cardinality and cross-filter direction) — but **the actual DAX
+`Expression` text comes back `null`, confirmed empirically up to and
+including Admin workspace role.** Microsoft's own docs say `Expression` only
+shows for callers with "write permission on the semantic model" — that
+turned out to mean something else entirely (next paragraph), not a role you
+can grant on a workspace.
 
-Runs LOCALLY. Committing it keeps a parse failure off Cloud Run startup and
-makes a schema change a reviewable diff.
+**The Scanner API** (`POST admin/workspaces/getInfo?datasetExpressions=true`
+→ poll `scanStatus` → fetch `scanResult`) is what actually returns
+`Expression`. It needs its own, separate authorization: the tenant setting
+**"Allow service principals to use read-only admin APIs"**, plus **"...
+detailed metadata"** and **"...DAX and mashup expressions"**, all three
+scoped to the same security group `power-bi-sp-client-id` already belongs to
+(`local-dev-environment-setup.md` Step 14, A7). This is a genuinely separate
+permission gate from workspace roles, not a stronger version of Contributor —
+confirmed by Admin role alone doing nothing for `Expression` visibility.
+**Read-only by nature** (no write operation exists on this API), but its
+scope is tenant-wide — it can see every workspace's metadata, not just this
+one — which is why it's the one meaningfully broader grant in this project's
+auth model, and worth knowing about if this dashboard ever isn't the only
+thing in the tenant.
 
-Re-run whenever the semantic model changes, then commit the result.
-"""
-import json
-import pathlib
-import re
+### Auto date tables still need filtering
 
-OUT_PATH = pathlib.Path("context/schema/model_schema.json")
+Power BI's hidden auto-date tables (named `LocalDateTable_...` or
+`DateTableTemplate_...`) show up in `INFO.VIEW.TABLES()` and
+`INFO.VIEW.RELATIONSHIPS()` the same way they showed up in TMDL — they're a
+model-level artifact, not a parsing quirk. Still exclude them by name from
+both `tables[]` and `relationships[]`: join paths the agent should never
+take, same reasoning as before, just checked against `[Name]` instead of a
+filename.
 
-# The .pbip lives in the ML repo, read via `github-read-token` — the same
-# secret the code tools use. No local copy, no drift, nothing to gitignore.
-# relationships.tmdl sits one level ABOVE tables/ in definition/.
-TABLES_GLOB = "**/definition/tables/*.tmdl"
-RELATIONSHIPS_GLOB = "**/definition/relationships.tmdl"
+### Parameter detection — a text pattern, not a flag
 
-# Two mechanisms keep a measure's DAX clean; TRAIL is the load-bearing one.
-#
-# TRAIL cuts from the first metadata line to the END of the capture (`.*`
-# under DOTALL). Since every real measure carries a lineageTag, that removes
-# any following column/partition as a side effect — which is what actually
-# stops a measure table's trailing dummy `column` landing in the last
-# measure's DAX.
-#
-# MEASURE_RE's top-level lookahead is defence-in-depth for the case TRAIL
-# can't reach: a measure with NO trailing metadata at all. Keep both.
-MEASURE_RE = (r"^\s*measure\s+'?([^'\n=]+?)'?\s*=\s*(.*?)"
-              r"(?=^\s*(?:measure|column|partition|hierarchy|annotation"
-              r"|extendedProperty)\s|\Z)")
-TRAIL = (r"\n\s*(?:formatString|lineageTag|displayFolder|isHidden|annotation"
-         r"|extendedProperty)\b.*")
+Neither API exposes an `IsParameterTable` property. What-if and field
+parameter tables are just calculated tables under the hood, and their
+auto-generated "value measure" has a distinctive, reliable shape:
 
-# Power BI's hidden auto date tables. Two signals because a file may carry
-# either. Excluded from tables AND relationships — they're join paths the
-# agent should never take.
-SKIP_TABLE = r"__PBI_LocalDateTable|^\s*table\s+'?(?:LocalDateTable_|DateTableTemplate_)"
-
-
-def fetch_tmdl_from_github(glob: str) -> list[pathlib.Path]:
-    """Matching .tmdl files, written to a temp dir and returned as paths.
-
-    Trees API for the listing, Contents API per file — same two endpoints as
-    list_repo_files / read_repo_file (docs/code-search.md), and never the
-    Search API, which is rate-limited and indexes lazily.
-    """
-    raise NotImplementedError("Trees API listing + Contents API per match.")
-
-
-def _description_above(lines: list[str], start_line: int) -> str | None:
-    """Walk backward over consecutive /// lines.
-
-    TMDL's native description syntax — written in Desktop's Properties pane
-    or TMDL view. Optional: an undescribed object still parses, it just gives
-    the model less to go on.
-    """
-    i = start_line
-    while i > 0 and lines[i - 1].strip().startswith("///"):
-        i -= 1
-    if i == start_line:
-        return None
-    return " ".join(l.strip().lstrip("/").strip() for l in lines[i:start_line])
-
-
-def _measures(text: str, lines: list[str]) -> list[dict]:
-    out = []
-    for m in re.finditer(MEASURE_RE, text, re.MULTILINE | re.DOTALL):
-        dax = re.sub(TRAIL, "", m.group(2), flags=re.DOTALL).strip()
-        # Desktop wraps long measures in ``` fences. Not DAX, and leaving
-        # them in breaks markdown rendering of the returned body.
-        if dax.startswith("```"):
-            dax = dax[3:].removesuffix("```").strip()
-        # HTML-display measures render a string for a visual. Never
-        # referenced in a SUMMARIZECOLUMNS, so listing them spends the
-        # model's attention on something it should never pick. Check the DAX
-        # only — a description that merely MENTIONS html must not exclude a
-        # real measure.
-        if re.search(r"<[a-z]+[ >]", dax, re.I):
-            continue
-        out.append({
-            "name": m.group(1).strip(),
-            "description": _description_above(lines, text[:m.start()].count("\n")),
-            "dax": dax,
-        })
-    return out
-
-
-def _columns(text: str, lines: list[str]) -> list[dict]:
-    out = []
-    for m in re.finditer(r"^\s*column\s+'?([^'\n]+?)'?\s*$", text, re.MULTILINE):
-        blk = text[m.end():]
-        nxt = re.search(r"^\s*(?:column|measure|partition)\s", blk, re.MULTILINE)
-        blk = blk[:nxt.start()] if nxt else blk
-        dt = re.search(r"^\s*dataType:\s*(\w+)", blk, re.MULTILINE)
-        out.append({
-            "name": m.group(1).strip(),
-            # Calculated columns often omit dataType — "unknown" is accurate,
-            # not a parse failure.
-            "type": dt.group(1) if dt else "unknown",
-            "description": _description_above(lines, text[:m.start()].count("\n")),
-        })
-    return out
-
-
-def parse_table_file(path: pathlib.Path) -> tuple[str, dict | None]:
-    """-> (kind, payload). kind: 'skip' | 'table' | 'measures' | 'parameter'.
-
-    Classification keys on STRUCTURE, never on naming convention:
-      - `extendedProperty ParameterMetadata` -> a what-if / field parameter
-      - a `Binary.Decompress` placeholder partition -> a measure holder, whose
-        lone dummy column exists only because measures need a table to live on
-      - anything else -> a real data table
-
-    "Has measures -> it's a measure table" would be wrong: parameters have
-    measures AND a meaningful column.
-    """
-    text = path.read_text()
-    lines = text.split("\n")
-    if re.search(SKIP_TABLE, text, re.MULTILINE):
-        return "skip", None
-    tm = re.search(r"^\s*table\s+'?([^'\n]+?)'?\s*$", text, re.MULTILINE)
-    if not tm:
-        return "skip", None
-
-    name = tm.group(1).strip()
-    tdesc = _description_above(lines, text[:tm.start()].count("\n"))
-    measures = _measures(text, lines)
-    columns = _columns(text, lines)
-
-    if re.search(r"extendedProperty ParameterMetadata", text):
-        rng = re.search(r"source = (GENERATESERIES\(.*?\))\s*$", text,
-                        re.MULTILINE | re.DOTALL)
-        return "parameter", {
-            "name": name,
-            "description": tdesc,
-            # The column the slicer filters — this is what appears in
-            # filter_context, so without it the agent can't connect an
-            # incoming filter to the parameter it represents.
-            "filter_column": columns[0]["name"] if columns else None,
-            "range": " ".join(rng.group(1).split()) if rng else None,
-            # Its DAX is boilerplate SELECTEDVALUE — nothing to look up, so
-            # this measure stays OUT of the measures list.
-            "value_measure": measures[0]["name"] if measures else None,
-        }
-
-    if measures and re.search(r"Binary\.Decompress", text):
-        return "measures", {"measures": measures}      # dummy columns dropped
-
-    return "table", {
-        "table": {"name": name, "description": tdesc, "columns": columns},
-        "measures": measures,
-    }
-
-
-def parse_relationships(path: pathlib.Path) -> list[dict]:
-    """from -> to, as table.column pairs. GUIDs dropped; they carry nothing.
-
-    LocalDateTable_* relationships are excluded for the same reason their
-    tables are.
-    """
-    out = []
-    for m in re.finditer(r"fromColumn:\s*(\S+)\s*\n\s*toColumn:\s*(\S+)",
-                         path.read_text()):
-        frm, to = m.group(1), m.group(2)
-        if "LocalDateTable_" in frm or "LocalDateTable_" in to:
-            continue
-        out.append({"from": frm, "to": to})
-    return out
-
-
-def build_artifact(table_paths: list[pathlib.Path],
-                   relationships_path: pathlib.Path) -> dict:
-    """Paths in, artifact out. No network, no file writing — so the test can
-    call it against fixtures and cover the real assembly, not a copy of it.
-
-    Iterate table_paths SORTED: measure order follows file order, and the
-    committed artifact has to be byte-stable or every rebuild is a diff.
-    """
-    tables, measures, parameters = [], [], []
-    for path in sorted(table_paths):
-        kind, payload = parse_table_file(path)
-        if kind == "table":
-            tables.append(payload["table"])
-            measures.extend(payload["measures"])
-        elif kind == "measures":
-            measures.extend(payload["measures"])
-        elif kind == "parameter":
-            parameters.append(payload)
-
-    return {
-        "tables": tables,
-        "measures": measures,
-        "parameters": parameters,
-        "relationships": parse_relationships(relationships_path),
-    }
-
-
-def main() -> None:
-    table_paths = fetch_tmdl_from_github(TABLES_GLOB)
-    rel_paths = fetch_tmdl_from_github(RELATIONSHIPS_GLOB)
-    artifact = build_artifact(table_paths, rel_paths[0])
-
-    # Any of these empty means a glob matched nothing — which would otherwise
-    # write a valid artifact and leave the agent silently ungrounded.
-    if not all(artifact[k] for k in ("tables", "measures", "relationships")):
-        raise SystemExit(
-            f"Refusing to write: {len(artifact['tables'])} tables, "
-            f"{len(artifact['measures'])} measures, "
-            f"{len(artifact['relationships'])} relationships. Check the globs.")
-
-    undescribed = [m["name"] for m in artifact["measures"] if not m["description"]]
-    if undescribed:
-        # Not fatal — but these are the measures the model is most likely to
-        # misuse, since the name is all it has to go on.
-        print(f"WARNING: {len(undescribed)} measures have no /// description: "
-              f"{', '.join(undescribed[:5])}{'...' if len(undescribed) > 5 else ''}")
-
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(artifact, indent=2, sort_keys=True))
-
-    cols = sum(len(t["columns"]) for t in artifact["tables"])
-    print(f"Wrote {OUT_PATH}: {len(artifact['tables'])} tables ({cols} columns), "
-          f"{len(artifact['measures'])} measures, "
-          f"{len(artifact['parameters'])} parameters, "
-          f"{len(artifact['relationships'])} relationships.")
-    print("Commit it — the gateway reads this at startup, not the .pbip.")
-
-
-if __name__ == "__main__":
-    main()
+```
+SELECTEDVALUE('Conversion Rate'[Conversion Rate], 0.06)
 ```
 
-**`build_artifact` takes paths instead of fetching and guarantees sort order**,
-so the snapshot test can point the same assembly at fixtures and get a
-byte-stable result (`docs/testing.md`).
-
-**Every `.tmdl` lives in one folder** (`definition/tables/`), with
-`relationships.tmdl` one level above. There's no tables-vs-measures split to
-rely on — and don't create one by reorganizing the `.pbip`, which Desktop
-regenerates.
-
-**Classify on structure, never on naming.** Four kinds come out of that
-folder:
-
-| Kind | Signal | Contributes |
-|---|---|---|
-| Data table | none of the below | `tables[]` (name, description, columns) |
-| Measure holder | `Binary.Decompress` placeholder partition | `measures[]` only — its lone dummy column is dropped |
-| Parameter | `extendedProperty ParameterMetadata` on a column | `parameters[]`, whole |
-| Auto date table | `__PBI_LocalDateTable`, or a `LocalDateTable_` / `DateTableTemplate_` name | nothing — skipped |
-
-**"Has measures → it's a measure table" would be wrong.** Parameters have
-measures *and* a meaningful column; that rule would destroy them.
-
-**Output shape:**
-
-```json
-{
-  "tables":   [{"name": "evaluation_metrics", "description": "...",
-                "columns": [{"name": "Recall_at_5", "type": "double",
-                             "description": "..."}]}],
-  "measures": [{"name": "Recall", "description": "Out of the total reorders...",
-                "dax": "SUM(evaluation_metrics[Recall_at_5])"}],
-  "parameters": [{"name": "AOV Lift per 10% Recall",
-                  "filter_column": "AOV Lift per 10% Recall",
-                  "range": "GENERATESERIES(CURRENCY(0.00), CURRENCY(0.26), CURRENCY(0.01))",
-                  "value_measure": "AOV Lift per 10% Recall Value"}],
-  "relationships": [{"from": "evaluation_metrics.Model",
-                     "to": "models_dimension.Model"}]
-}
-```
-
-**Parameters go into context whole, not split across registries.**
-`filter_column` is what appears in `filter_context` — without it the agent
-can't connect an incoming filter to its parameter. `range` supplies valid
-bounds, which matters because these tables carry no `///` descriptions. Their
-`value_measure` stays **out** of `measures[]`: boilerplate
-`SELECTEDVALUE(...)`, nothing to look up.
-
-**Relationships are parsed, not copied** — the raw file is mostly GUIDs plus
-auto-generated `LocalDateTable_*` joins the agent should never take. This
-replaces the old manual copy into `context/tmdl/`, the one piece of
-semantic-model context that wasn't script-produced.
-
-**How the gateway splits it** — registries plus a DAX lookup, all from one
-parse at startup (`.claude/rules/gateway.md`). The `dax` field is the only
-part *not* in static context; it's returned solely by `get_measure_dax`.
+**A measure whose entire `Expression` is exactly one bare `SELECTEDVALUE(...)`
+call is a parameter's value measure** — the table and column names, and the
+default, are read directly out of the call. Confirmed against this project's
+real dashboard: cleanly found all 5 what-if parameters this way
+(`notebooks/dax_schema_exploration.ipynb`). A broader pass — `SELECTEDVALUE`
+appearing *anywhere* in an expression, not just as the whole thing — also
+catches field-parameter usage inside larger measures, but is **not** a clean
+signal on its own: it also matched two ordinary measures reading a plain data
+column with `SELECTEDVALUE`, unrelated to any parameter. Use the strict form
+for `parameters[]`; treat the broad form as a lead to inspect, not a fact.
 
 ### Excluding HTML-display measures from the registry
 
 Some Power BI measures return a rendered HTML/markdown string for a visual
-rather than an aggregation. **They must not reach the measure registry.** The
-registry is what the model picks measure names from; a display measure is
-never referenced in a `SUMMARIZECOLUMNS` the way `[Recall at 5]` is, so
-listing it spends attention on something the model should never choose — and
-`strict=True` would accept it as a valid `get_measure_dax` argument.
+rather than an aggregation — confirmed still present in the real dashboard
+(`Financial_Assumptions_HTML`, seen directly in a Scanner API scan result).
+**They must not reach the measure registry.** It's what the model picks
+measure names from; a display measure is never referenced in a
+`SUMMARIZECOLUMNS` the way `[Recall at 5]` is, so listing it spends attention
+on something the model should never choose — and `strict=True` would accept
+it as a valid `get_measure_dax` argument.
 
-**Primary mechanism: manual exclusion.** Keep a small list of measure names to
-skip, or simply don't include those `.tmdl` files in the walked paths. Only a
-handful exist and they change rarely.
+**Primary mechanism: manual exclusion** — a small list of measure names to
+skip. Only a handful exist and they change rarely.
 
-```python
-EXCLUDED_MEASURES = {"Page Info HTML", "..."}   # confirm real names from the .pbip
-```
-
-**Backstop: the `re.search(r"<[a-z]+[ >]", ...)` check in `parse_measures`**
-above. Not a replacement for the list — a cheap guard so a *newly added* HTML
-measure doesn't silently slip in before anyone updates it. If the regex ever
-fires on a measure that isn't display-only, drop the check rather than
-contorting it; the manual list is the mechanism of record.
+**Backstop: check the Scanner API's `expression` text** for
+`re.search(r"<[a-z]+[ >]", expression, re.I)`, same regex as before, just
+against this field instead of TMDL-parsed DAX. Not a replacement for the
+list — a cheap guard so a *newly added* HTML measure doesn't silently slip in
+before anyone updates it.
 
 **Their content isn't lost** — the same page-info HTML lives in
 `context/page_info/`, returned whole by `get_page_info`.
 
-**Ask before assuming:** which repo/`.pbip` paths to walk, and whether the TMDL
-regex matches the real file format.
+### Two open gaps — real, not yet resolved
+
+**Table count mismatch.** `INFO.VIEW.TABLES()` returns 25 tables for the real
+dashboard; the Scanner API's `scanResult` returns 23 for the same dataset.
+Not yet reconciled — don't assume either list is complete until this is
+explained.
+
+**No source for a what-if parameter's range.** The old TMDL parser read a
+calculated table's own `source = GENERATESERIES(min, max, step)` definition
+to populate `parameters[].range`. Scanner API's `tables[]` shows **zero**
+non-`Import`-storage-mode tables for this dataset — the 5 known parameter
+tables don't appear as calculated tables in that list at all, only
+indirectly, through the value measures that reference them. There is
+currently no confirmed way to recover `range` from either API. Until this is
+solved, `parameters[]` can carry `filter_column`, `value_measure`, and
+`default` (from the `SELECTEDVALUE` call), but not `range` — flag it as
+`null` rather than guessing a plausible-looking bound.
 
 ### Refreshing the artifact
 
@@ -519,26 +299,23 @@ regex matches the real file format.
 # Semantic model changed (measure renamed, column added, description edited):
 python scripts/build_model_context.py   # rewrites context/schema/model_schema.json
 git add context/schema/model_schema.json && git commit    # the app reads THIS
-# then redeploy — it's read once at startup, not per request
+# then redeploy — it's read once at startup, not the live APIs
 ```
 
-**No embedding, no Dataform, no BigQuery.**
+**No embedding, no Dataform, no BigQuery.** `scripts/build_model_context.py`
+itself is not yet rewritten to this design — the two API calls, the
+`SELECTEDVALUE` extraction, and the artifact assembly are proven in
+`notebooks/dax_schema_exploration.ipynb`; turning that into the actual script
+is later work, not done here.
 
-### Staleness has no signal
-
-Rename a measure in Desktop, forget to rerun the script, and the registry
-advertises a name `get_measure_dax` will reject. Loud rather than silent, but
-still wrong.
-
-**Fix: stamp the build and check it.**
-
-```python
-# Written once per successful build, in the same script.
-build_metadata = {"model_schema_last_built": datetime.now(timezone.utc)}
-```
-
-Print it at the top of every run against the `.pbip`'s last-modified time — if
-the model changed more recently, say so before proceeding.
+**Deferred, not rejected: a scheduled rebuild job instead of a manual
+script.** The ideal version of this pipeline needs no human to remember
+anything — a periodic job (same Cloud Scheduler + Cloud Run Job pattern as
+the Phase 6 judge) reruns the live-API build and writes the artifact
+somewhere the gateway reads at startup, so staleness stops being possible at
+all rather than just less fragile to detect. Not built now — more
+infrastructure than this portfolio project's current scope justifies —
+tracked in `docs/build-order.md` Phase 7.
 
 ## Part 3 — Docs vector index (Phase 3)
 
@@ -762,12 +539,11 @@ CHUNKER_BY_DIR = {
 }
 
 # NOT here, and why:
-#   TMDL                -> scripts/build_model_context.py instead. The semantic
-#                          model is small and fully enumerable, so it goes in
-#                          static context, not behind a retrieval call.
-#   relationships.tmdl  -> build_model_context.py parses it into the same
-#                          artifact. Join paths are structural and needed on
-#                          nearly every DAX composition — never retrieved.
+#   Semantic model      -> scripts/build_model_context.py instead, queried
+#                          live from Power BI. Small and fully enumerable, so
+#                          it goes in static context, not behind a retrieval
+#                          call. Relationships too — structural, needed on
+#                          nearly every DAX composition, never retrieved.
 #   page_info HTML      -> served whole by get_page_info.
 #   ML repo .py / .sqlx -> read live via list_repo_files / read_repo_file.
 

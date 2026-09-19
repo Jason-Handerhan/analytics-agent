@@ -19,7 +19,7 @@ doc set for personal reference, and is not part of the build.
 | Authentication accepts valid creds, rejects invalid | Automated | `test_gateway_auth.py` |
 | One user can't reach another's conversation (404, not 403) | Automated | `test_gateway_auth.py` |
 | Static context has all seven components, with no DAX bodies in the measure registry | Automated | `test_static_context.py` |
-| TMDL parses to the expected artifact — values, not just shape | Automated | `test_model_schema_parser.py` |
+| Model schema assembles to the expected artifact — values, not just shape | Automated | `test_model_schema_build.py` |
 | Static context actually caches (`cache_read` non-zero on turn 2) | **Manual** — needs two real turns | Phase 3 |
 | All 8 tools return a sensible result, called through the MCP server | Automated (parametrized) | `test_tools.py` |
 | Chat history reaches the assembled prompt | Automated | `test_conversation_state.py` |
@@ -95,10 +95,10 @@ A phase isn't done because the code runs — it's done when the guarantee holds.
       text must be present in `chunk_text`, not just in the source file.
       This is the silent-failure case (`docs/data-pipeline.md`).
 - [ ] **No HTML display measure appears in `MEASURE_REGISTRY`** after a
-      real build against the actual `.pbip`. The unit test uses a fixture;
-      this confirms the manual exclusion list matches reality. A display
-      measure in the registry is one `strict=True` would accept as a valid
-      `get_measure_dax` argument (`docs/data-pipeline.md`).
+      real build against the live Power BI dataset. The unit test uses a
+      fixture; this confirms the manual exclusion list matches reality. A
+      display measure in the registry is one `strict=True` would accept as a
+      valid `get_measure_dax` argument (`docs/data-pipeline.md`).
 
 *Filter context*
 - [ ] A DAX question answers **against the active dashboard filters**, not
@@ -163,7 +163,7 @@ A phase isn't done because the code runs — it's done when the guarantee holds.
       silently wrong. The model writes the DAX; the error path is the
       guardrail (`.claude/rules/mcp-tools.md`).
 - [ ] **Ask how a measure is calculated** — confirm `get_measure_dax` is
-      called and the returned DAX matches the `.pbip`. Then ask about a
+      called and the returned DAX matches what's live in Power BI. Then ask about a
       measure with a near-identical sibling (`Recall at 5` vs `Recall at
       10`) and confirm the right formula comes back, not a blend.
 

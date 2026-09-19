@@ -5,7 +5,7 @@ paths:
   - 'scripts/build_model_context.py'
   - 'scripts/dump_schemas.sh'
   - 'tests/test_static_context.py'
-  - 'tests/test_model_schema_parser.py'
+  - 'tests/test_model_schema_build.py'
 ---
 
 # Data pipelines: Dataform, model schema, vector index
@@ -61,55 +61,45 @@ that's how `run_bigquery_sql` knows what a column means. Write them as if
 explaining to a new analyst; never restate the column name. **A table without
 descriptions is one the agent will query badly.**
 
-## Pipeline 2 — model schema, parsed not embedded
+## Pipeline 2 — model schema, queried live not parsed
 
-`scripts/build_model_context.py` reads the ML repo's `.pbip` via GitHub
-(`github-read-token`) and writes **one committed JSON** with four keys:
-`tables`, `measures`, `parameters`, `relationships`. The gateway reads it at
-startup and splits it into static-context registries plus a DAX lookup
-(`.claude/rules/gateway.md`).
+**Decided 2026-09-17, replacing an earlier `.pbip`/TMDL-parsing design**
+(`docs/data-pipeline.md` has the full rationale and the two still-open gaps).
+`scripts/build_model_context.py` queries live Power BI and writes **one
+committed JSON** with four keys: `tables`, `measures`, `parameters`,
+`relationships`. The gateway reads it at startup and splits it into
+static-context registries plus a DAX lookup (`.claude/rules/gateway.md`).
 
-**Two globs.** `**/definition/tables/*.tmdl` and
-`**/definition/relationships.tmdl` — the latter sits one level above.
+**Two APIs, not one file format:**
+- `executeQueries` (`INFO.VIEW.TABLES/COLUMNS/MEASURES/RELATIONSHIPS()`) —
+  tables, columns, measure names + descriptions, relationships. No Premium,
+  works on Contributor.
+- Scanner API (`admin/workspaces/getInfo?datasetExpressions=true`, async
+  submit→poll→fetch) — the actual DAX `Expression` text, which
+  `executeQueries` returns `null` for regardless of role. Needs its own
+  tenant-setting grant, separate from workspace roles
+  (`local-dev-environment-setup.md` Step 14, A7).
 
-**Every table lives in the same folder. Classify on structure, never naming:**
+**Parameter detection is a text pattern, not a flag.** A measure whose entire
+`Expression` is exactly `SELECTEDVALUE('Table'[Column], default)` is a
+parameter's value measure — table, column, and default read straight out of
+the call. A broader search for the same pattern *inside* a larger expression
+also exists but is **not** a clean signal alone — it also matches ordinary
+measures reading a plain data column, unrelated to any parameter.
 
-| Kind | Signal | Contributes |
-|---|---|---|
-| Data table | none of the below | `tables[]` |
-| Measure holder | `Binary.Decompress` placeholder partition | `measures[]` only — drop its dummy column |
-| Parameter | `extendedProperty ParameterMetadata` | `parameters[]`, whole |
-| Auto date table | `__PBI_LocalDateTable` or `LocalDateTable_`/`DateTableTemplate_` name | nothing — skip, in tables *and* relationships |
+**Auto date tables (`LocalDateTable_*`/`DateTableTemplate_*`) still need
+filtering** from both tables and relationships — a model-level artifact, not
+a parsing quirk, so it shows up in `INFO.VIEW.*` results the same as it did
+in TMDL.
 
-**"Has measures → measure table" is wrong** — parameters have measures *and* a
-meaningful column.
+**HTML-display measures are still excluded** the same way — manual list as
+the mechanism of record, a `<[a-z]` check on the `Expression` text as backstop.
 
-**Parsing rules that matter:**
-
-- **Strip trailing `formatString` / `lineageTag` / `annotation` lines — this
-  is what keeps DAX bodies clean.** The cut runs to the end of the capture,
-  so it also removes any following `column`/`partition`, which every measure
-  table has. Don't narrow it to single lines.
-- **Measure bodies also stop at the next top-level keyword** — defence-in-depth
-  for a measure with no trailing metadata, which the strip above can't reach.
-- **Strip triple-backtick fences.** Desktop wraps long measures in them;
-  they aren't DAX, and they break markdown rendering downstream.
-- **Anchor descriptions on `measure`, walk backward for `///`. Never anchor
-  on `///`** — that silently skips every undescribed measure.
-- **`dataType` is often absent** on calculated columns. `"unknown"` is
-  accurate, not a parse failure.
-- **HTML-display measures are excluded** by a `<[a-z]` check on the DAX only —
-  a description merely *mentioning* html must not exclude a real measure.
-  Manual list is the mechanism of record; the regex is a backstop.
-- **Parameters keep `filter_column`** — that's what appears in
-  `filter_context`. Their `value_measure` stays **out** of `measures[]`: its
-  DAX is boilerplate `SELECTEDVALUE(...)`, nothing to look up.
-- **Relationships parse to `table.column → table.column`**, GUIDs dropped.
-- **Refuse to write if tables, measures, or relationships are empty.** A glob
-  typo would otherwise leave the agent silently ungrounded.
-
-**Changing any parse rule means regenerating the snapshot** (`docs/testing.md`)
-and reading the diff — the only place a subtle capture change is visible.
+**Two open gaps, not yet resolved (`docs/data-pipeline.md`):** a table-count
+mismatch between the two APIs, and no confirmed source for a what-if
+parameter's `range` — the Scanner API shows zero calculated tables for this
+dataset, so the old TMDL parser's `GENERATESERIES(...)` capture has no
+equivalent yet.
 
 **Committed, so a schema change is a reviewable diff — and needs a redeploy**,
 since it's read once at import.
@@ -147,7 +137,4 @@ time.
 
 ## Ask before assuming
 
-- Which repo and `.pbip` paths to walk.
-- Whether the TMDL regex matches the real file format (it's tab-indented; the
-  leading `\s*` is required).
 - Whether bronze already has `products` / `aisles` / `departments`.
