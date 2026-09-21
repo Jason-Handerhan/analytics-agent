@@ -1,8 +1,8 @@
-"""Layer 1 test for app/gateway/context.py — no real credentials needed
+"""Layer 1 test for app/orchestrator/context.py — no real credentials needed
 (docs/testing.md). get_bigquery_schema is monkeypatched so this never
 touches a real BigQuery client.
 """
-import app.gateway.context as context
+import app.orchestrator.context as context
 
 
 def test_static_context_contains_all_seven_components(monkeypatch):
@@ -39,7 +39,7 @@ def test_static_context_contains_all_seven_components(monkeypatch):
 
     # No measure's DAX body leaked into the registry meant to hold only
     # names and descriptions.
-    from app.gateway.model_schema import MEASURE_DAX, MEASURE_REGISTRY
+    from app.model_schema import MEASURE_DAX, MEASURE_REGISTRY
 
     for dax in MEASURE_DAX.values():
         assert dax.strip() not in MEASURE_REGISTRY

@@ -6,16 +6,16 @@ BIGQUERY_SCHEMA and the final assembly need a live BigQuery call, so both
 are lazy (@lru_cache-decorated functions, called on first real use) rather
 than bare module-level constants -- eager construction at import would make
 importing this module require live credentials, breaking Layer 1 tests
-(the same reasoning already applied to Firestore elsewhere in the gateway).
-Everything else here is either a plain file read or authored text, so it's
-safe to compute eagerly at import.
+(the same reasoning already applied to a Firestore client elsewhere in this
+project). Everything else here is either a plain file read or authored text,
+so it's safe to compute eagerly at import.
 """
 from functools import lru_cache
 
 from google.cloud import bigquery
 
 from app.config import AGENT_SAFE_DATASET, CONTEXT_DIR, GCP_PROJECT_ID, MODEL
-from app.gateway.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_REGISTRY
+from app.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_REGISTRY
 
 ORIENTATION_DIR = CONTEXT_DIR / "orientation"
 ORIENTATION_FILES = ["executive_summary.txt", "project_navigator.txt", "system_architecture.txt"]

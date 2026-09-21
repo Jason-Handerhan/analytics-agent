@@ -2,7 +2,7 @@
 
 ## Current status — update this as we go
 
-**Phase: 3 in progress — items 1-3 (data prep, dashboard state capture, static context bundle) complete, item 4 (graph skeleton) next**
+**Phase: 3 in progress — items 1-3 (data prep, dashboard state capture, static context bundle) complete, item 4 (graph skeleton) partially started next**
 
 _Last updated: 2026-09-18._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
@@ -238,15 +238,30 @@ Real values verified end to end in both the Power Apps editor and the live
 Power BI service report. `docs/frontend.md`'s embedding and "Visual
 grounding" sections are rewritten to match this real design.
 
-**Phase 3, item 3 (static context bundle) — complete, with two real
-deviations from the documented seven-component list.** Proven first in
-`notebooks/phase3_static_context.ipynb`, then moved to
-`app/gateway/model_schema.py` (`TABLE_REGISTRY`, `MEASURE_REGISTRY`,
-`RELATIONSHIPS`, `PARAMETERS`, `MEASURE_DAX`, `MEASURE_NAMES` — all parsed
-once from the committed `model_schema.json`) and `app/gateway/context.py`
+**Phase 3, item 3 (static context bundle) — complete, with real deviations
+from the documented seven-component list and its file locations.** Proven
+first in `notebooks/phase3_static_context.ipynb`, then moved to
+`app/model_schema.py` (`TABLE_REGISTRY`, `MEASURE_REGISTRY`, `RELATIONSHIPS`,
+`PARAMETERS`, `MEASURE_DAX`, `MEASURE_NAMES` — all parsed once from the
+committed `model_schema.json`) and `app/orchestrator/context.py`
 (orientation bundle, `BIGQUERY_SCHEMA`, `SYSTEM_INSTRUCTIONS`, both few-shot
 sets, and the final assembly).
 
+- **Neither file lives under `app/gateway/`, where the doc originally showed
+  them.** `context.py`'s only consumer is the orchestrator's `agent` node
+  (not yet built), so it moved to `app/orchestrator/context.py`.
+  `model_schema.py` has two consumers headed to two different future
+  services — the `agent` node and the `get_measure_dax` tool
+  (`app/mcp_server/`, `.claude/rules/mcp-tools.md`) — so it stays a
+  top-level, genuinely shared module (`app/model_schema.py`, a sibling to
+  `app/config.py`) rather than nested under either. Decided this way
+  specifically so a future gateway/orchestrator/MCP-server container split
+  (already the documented target shape, `.claude/rules/mcp-tools.md`) is a
+  lift-and-shift — each service's Dockerfile copies in whatever shared
+  top-level modules it needs — rather than a real refactor. The detailed
+  "Assembling the prompt"/"Model schema"/"Caching dispatch" content moved
+  from `.claude/rules/gateway.md` to `.claude/rules/orchestrator.md` to
+  match, so it auto-attaches for the files it actually describes.
 - **Component order revised**: `SYSTEM_INSTRUCTIONS` moved first (role and
   behavioral rules established before the model sees any reference
   material — no caching cost either way, since the whole block is one
@@ -257,9 +272,9 @@ sets, and the final assembly).
 - **`get_bigquery_schema()`/`get_static_context()` are lazy, `@lru_cache`-decorated
   functions, not the bare module-level constants the doc originally showed.**
   `BIGQUERY_SCHEMA` needs a live `bigquery.Client()` call; eager construction
-  at import would make importing `app/gateway/context.py` require live
-  credentials, breaking Layer 1 tests — the same reasoning already applied
-  to Firestore elsewhere in the gateway. `@lru_cache` still guarantees the
+  at import would make importing `context.py` require live credentials,
+  breaking Layer 1 tests — the same reasoning already applied to a Firestore
+  client elsewhere in this project. `@lru_cache` still guarantees the
   "computed once, not per turn" byte-identical-prefix requirement; it just
   moves *when* "once" happens from import time to first real use.
 - Real deviations found writing the few-shot examples, verified live against
@@ -275,6 +290,12 @@ sets, and the final assembly).
   under their own single-measure table header was pure duplication;
   `scripts/build_model_context.py` derives the exclusion set automatically
   from the parameters it just built, no manual list needed.
+
+**Phase 3, item 4 (graph skeleton) — partially started already, during
+Phase 1.** `app/orchestrator/models.py` implements `Claim`/`AgentResponse`
+exactly as specified in `.claude/rules/orchestrator.md`'s verification
+contract. The five nodes, graph wiring, and everything else in item 4 are
+still ahead.
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,

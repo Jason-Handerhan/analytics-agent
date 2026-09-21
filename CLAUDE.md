@@ -101,9 +101,9 @@ you don't need to open these:
 
 | Rule | Attaches when editing |
 |---|---|
-| `orchestrator.md` | `app/orchestrator/**`, `app/exceptions.py`, verification + guardrail tests |
+| `orchestrator.md` | `app/orchestrator/**`, `app/model_schema.py`, `app/exceptions.py`, verification + guardrail tests |
 | `gateway.md` | `app/gateway/**`, `app/config.py`, gateway tests |
-| `mcp-tools.md` | `app/mcp_server/**`, tool + row-cap tests |
+| `mcp-tools.md` | `app/mcp_server/**`, `app/model_schema.py`, tool + row-cap tests |
 | `telemetry.md` | `app/telemetry/**`, the judge + golden-runner scripts |
 | `data-pipeline.md` | `definitions/**`, `scripts/build_vector_db.py`, `scripts/build_model_context.py` |
 

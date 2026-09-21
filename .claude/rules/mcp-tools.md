@@ -1,6 +1,7 @@
 ---
 paths:
   - 'app/mcp_server/**'
+  - 'app/model_schema.py'
   - 'tests/test_tools.py'
   - 'tests/test_chart_tool.py'
   - 'tests/test_guardrails.py'
