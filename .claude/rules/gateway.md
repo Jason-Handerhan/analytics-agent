@@ -481,44 +481,54 @@ actual benefit.
 - Calling `build_static_context(model, static_text)` — the single caching
   adapter. **Takes the model name, not a provider**, so switching models is a
   one-line config change with nothing else to update. **Seven components in
-  the static block** — the orientation *bundle* is only the first of them,
-  not the whole thing:
+  the static block, two of them split further** — `SYSTEM_INSTRUCTIONS`
+  first, then reference material, with the few-shot examples interleaved
+  next to the schema each set demonstrates rather than trailing as one block:
 
-  1. **Orientation bundle** — exec summary + navigator + architecture diagram.
-  2. **`TABLE_REGISTRY`** — every semantic-model table with its columns,
+  1. **`SYSTEM_INSTRUCTIONS`** — role and behavioral rules, established
+     before the model sees any reference material.
+  2. **Orientation bundle** — exec summary + navigator + architecture diagram.
+  3. **`TABLE_REGISTRY`** — every semantic-model table with its columns,
      types, and descriptions. Includes *disconnected* tables (measure-only
      and parameter tables), which never appear in relationships, so this is
      their only source.
-  3. **`MEASURE_REGISTRY`** — every measure's name and description.
+  4. **`MEASURE_REGISTRY`** — every measure's name and description.
      **Names and descriptions only — never the DAX bodies**, which are
      fetched per-measure by `get_measure_dax`
-     (`.claude/rules/mcp-tools.md`).
-  4. **`RELATIONSHIPS`** — join paths, parsed from the same artifact. Needed
+     (`.claude/rules/mcp-tools.md`). Also excludes the numeric what-ifs'
+     value measures — `PARAMETERS` already covers them fully.
+  5. **`RELATIONSHIPS`** — join paths, parsed from the same artifact. Needed
      on nearly every composition, so present rather than retrieved.
      **`PARAMETERS`** rides along here too: what-if/field parameters with
-     their filter column and value measure — **`range` currently unavailable**,
-     an open gap in the build itself, not a rendering choice
-     (`docs/data-pipeline.md`).
-  5. **`BIGQUERY_SCHEMA`** — read once at startup.
-  6. **System instructions.**
-  7. **Few-shot examples.**
+     their filter column, value measure, and `range` (`{min, max, step}`,
+     read from each parameter table's real values, not its formula —
+     `docs/data-pipeline.md`).
+  6. **DAX few-shot examples** — real, verified query patterns against the
+     schema just shown.
+  7. **`BIGQUERY_SCHEMA`** — read from `agent_safe` on first real use.
+  8. **BigQuery few-shot examples** — same reasoning as 6, next to their schema.
 
-  **2 and 3 are why the semantic model isn't vector-searched.** With the whole
+  **3 and 4 are why the semantic model isn't vector-searched.** With the whole
   schema in context, measure discovery is deterministic: the model can't fail
   to find one, and can't invent one.
 
-  **Order is part of the contract.** A cache hit needs a byte-identical
-  prefix, so these seven go in a fixed order and everything varying per turn —
+  **Order is part of the contract, but the specific order is a choice, not a
+  caching requirement.** A cache hit needs a byte-identical prefix, so
+  whatever order is picked must be fixed and everything varying per turn —
   question, filter context, history — goes *after* the `cache_control`
-  marker:
+  marker. Interleaving the few-shot examples with their schema, or leading
+  with `SYSTEM_INSTRUCTIONS`, costs nothing: the whole block is one static,
+  contiguous prefix regardless of the order chosen inside it.
 
   ```python
   static_text = "\n\n".join([
+      SYSTEM_INSTRUCTIONS,
       ORIENTATION_BUNDLE,
       TABLE_REGISTRY, MEASURE_REGISTRY,   # from model_schema.json, at startup
       RELATIONSHIPS, PARAMETERS,          # same artifact, same parse
-      BIGQUERY_SCHEMA,                    # module constant, read at startup
-      SYSTEM_INSTRUCTIONS, FEW_SHOT_EXAMPLES,
+      DAX_FEW_SHOT_EXAMPLES,
+      get_bigquery_schema(),              # lazy, cached on first call
+      BIGQUERY_FEW_SHOT_EXAMPLES,
   ])
   ```
 
@@ -615,28 +625,39 @@ model directly, so there's nothing for it to intercept. It also caches
 conversation history, which here is a 5-turn window that changes every turn —
 churn, not savings.
 
-**Call it ONCE at import, not per turn.** Both inputs are invariant — the
-seven components are module constants read at startup, `MODEL` is config — so
-computing it once is what *guarantees* the byte-identical prefix a cache hit
-requires.
+**Call it ONCE per process, not per turn — but lazily, not at import.**
+Both inputs are invariant — the seven components are module constants,
+`MODEL` is config — so computing it once is what *guarantees* the
+byte-identical prefix a cache hit requires. It can't be a bare module-level
+constant the way that reasoning first suggests, though: `static_text`
+includes `get_bigquery_schema()`, which needs a live `bigquery.Client()`
+call, and constructing that at import time would make importing
+`app/gateway/context.py` require live credentials — breaking Layer 1 tests
+the same way an eager Firestore client would. `@lru_cache` on a zero-arg
+function gets the same "computed once" guarantee without that cost — it
+just moves *when* "once" happens from import time to first real use:
 
 ```python
-# app/gateway/context.py — module level, evaluated at import
-STATIC_CONTEXT = build_static_context(MODEL, static_text)   # static_text: the
-                                    # seven components, in the fixed order
-                                    # given under "Assembling the prompt"
+# app/gateway/context.py
+from functools import lru_cache
+
+@lru_cache
+def get_static_context() -> list[dict] | str:
+    static_text = "\n\n".join([...])   # the components, in the fixed order
+                                        # given under "Assembling the prompt"
+    return build_static_context(MODEL, static_text)
 ```
 
 **The component list lives in one place** — that section. Repeating it here
 would be a second list to keep in sync, and it drifted exactly that way once
 already.
 
-**Per-turn code just uses it** — the return value is the `system` argument,
+**Per-turn code just calls it** — the return value is the `system` argument,
 unchanged:
 
 ```python
 llm = init_chat_model(MODEL)          # app/config.py, from the MODEL env var
-response = await llm.ainvoke([SystemMessage(content=STATIC_CONTEXT), *messages])
+response = await llm.ainvoke([SystemMessage(content=get_static_context()), *messages])
 ```
 
 LangChain passes a list of content blocks through to Anthropic as-is, so the

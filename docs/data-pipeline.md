@@ -290,8 +290,10 @@ for `parameters[]`; treat the broad form as a lead to inspect, not a fact.
 ### Excluding HTML-display measures from the registry
 
 Some Power BI measures return a rendered HTML/markdown string for a visual
-rather than an aggregation — confirmed still present in the real dashboard
-(`Financial_Assumptions_HTML`, seen directly in a Scanner API scan result).
+rather than an aggregation — confirmed against the real dashboard:
+`Financial_Assumptions_HTML`, `HTML_Model_Evaluation_Info`,
+`HTML_Icon_Author_Credit`, `HTML_Financial_Impact_Info`
+(`scripts/build_model_context.py`'s `HTML_DISPLAY_MEASURES`).
 **They must not reach the measure registry.** It's what the model picks
 measure names from; a display measure is never referenced in a
 `SUMMARIZECOLUMNS` the way `[Recall at 5]` is, so listing it spends attention
@@ -310,23 +312,39 @@ before anyone updates it.
 **Their content isn't lost** — the same page-info HTML lives in
 `context/page_info/`, returned whole by `get_page_info`.
 
-### Two open gaps — real, not yet resolved
+### Table count mismatch — resolved
 
-**Table count mismatch.** `INFO.VIEW.TABLES()` returns 25 tables for the real
-dashboard; the Scanner API's `scanResult` returns 23 for the same dataset.
-Not yet reconciled — don't assume either list is complete until this is
-explained.
+`INFO.VIEW.TABLES()` returns 25 tables for the real dashboard; the Scanner
+API's `scanResult` returns 23. The two extras are Power BI's own
+auto-generated date tables (`LocalDateTable_<GUID>`,
+`DateTableTemplate_<GUID>`) — the Scanner API excludes them on its own, so
+its 23-table list is already the correct set. `build_model_context.py`
+excludes any `INFO.VIEW.TABLES()` row matching those two name prefixes
+before building `TABLE_REGISTRY`, rather than filtering by `IsHidden` — some
+legitimate tables (parameter tables) are also hidden, so a hidden-flag
+filter would wrongly drop those too.
 
-**No source for a what-if parameter's range.** The old TMDL parser read a
-calculated table's own `source = GENERATESERIES(min, max, step)` definition
-to populate `parameters[].range`. Scanner API's `tables[]` shows **zero**
-non-`Import`-storage-mode tables for this dataset — the 5 known parameter
-tables don't appear as calculated tables in that list at all, only
-indirectly, through the value measures that reference them. There is
-currently no confirmed way to recover `range` from either API. Until this is
-solved, `parameters[]` can carry `filter_column`, `value_measure`, and
-`default` (from the `SELECTEDVALUE` call), but not `range` — flag it as
-`null` rather than guessing a plausible-looking bound.
+### Parameter range — resolved, via the table's real values
+
+Neither API exposes a calculated table's defining formula (the old TMDL
+parser read `source = GENERATESERIES(min, max, step)` directly; Scanner
+API's DAX-expression capability covers measures, not calculated-table
+source). But the formula isn't actually needed — a what-if parameter's
+calculated table is a real, materialized table, so its values can be read
+directly with the same `executeQueries` call used for everything else:
+
+```python
+values = sorted(round(v, 9) for v in run_dax(f"EVALUATE VALUES('{table}'[{column}])"))
+step = round(values[1] - values[0], 9) if len(values) > 1 else None
+range_ = {"min": values[0], "max": values[-1], "step": step}
+```
+
+Confirmed against all 5 real parameter tables. `round(v, 9)` strips the
+floating-point noise `GENERATESERIES`'s repeated addition leaves behind
+(`0.030000000000000002`, `0.009000000000000001`) — float64 noise from
+repeated addition shows up around the 15th-17th digit, so 9 decimal places
+comfortably clears it while preserving real precision far finer than any
+what-if parameter here actually uses.
 
 ### Refreshing the artifact
 

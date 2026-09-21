@@ -1,0 +1,1037 @@
+{
+  "tables": [
+    {
+      "name": "beeswarm_plot_data",
+      "description": "One row per prediction, per input feature — the underlying points for the SHAP beeswarm plot.",
+      "columns": [
+        {
+          "name": "unique_plot_id",
+          "type": "Integer",
+          "description": "unique plot id for beeswarm chart"
+        },
+        {
+          "name": "user_id",
+          "type": "Integer",
+          "description": "Instacart user ID for this prediction row"
+        },
+        {
+          "name": "anchor_order_number",
+          "type": "Integer",
+          "description": "Order number used as the prediction's anchor point for this user"
+        },
+        {
+          "name": "label_reordered",
+          "type": "Integer",
+          "description": "Actual outcome: 1 if the product was reordered, 0 if not"
+        },
+        {
+          "name": "prediction",
+          "type": "Number",
+          "description": "Model-predicted probability of reorder for this product"
+        },
+        {
+          "name": "feature_name",
+          "type": "Text",
+          "description": "Name of the input feature being visualized for this point"
+        },
+        {
+          "name": "feature_value",
+          "type": "Number",
+          "description": "Raw value of the feature for this row"
+        },
+        {
+          "name": "shap_value",
+          "type": "Number",
+          "description": "SHAP value: this feature's contribution to the prediction"
+        },
+        {
+          "name": "model_name",
+          "type": "Text",
+          "description": "Name of the model that produced this prediction"
+        },
+        {
+          "name": "model_id",
+          "type": "Text",
+          "description": "Unique identifier for model, 1:1 with model name"
+        },
+        {
+          "name": "split",
+          "type": "Text",
+          "description": "Dataset split this row belongs to (e.g. Test, Validation)"
+        },
+        {
+          "name": "model_type",
+          "type": "Text",
+          "description": "Category of model architecture (e.g. LGBM ranker, XGBoost classifier)"
+        },
+        {
+          "name": "feature_value_normalized",
+          "type": "Number",
+          "description": "Feature value scaled 0–1 within this feature's own range, used to position color on the beeswarm plot"
+        },
+        {
+          "name": "mean_absolute_shap",
+          "type": "Number",
+          "description": "Average magnitude of this feature's SHAP value across all rows, used for feature-importance ranking"
+        },
+        {
+          "name": "feature_importance_rank",
+          "type": "Number",
+          "description": "Rank of this feature by mean absolute SHAP value (1 = most important)"
+        },
+        {
+          "name": "feature_unique_id",
+          "type": "Integer",
+          "description": "Unique identifier. Unique by model_name, split (test/validation), & feature_name"
+        }
+      ]
+    },
+    {
+      "name": "dataset_split_dimension",
+      "description": "Dimension table listing the dataset splits (Test, Validation) used to slice evaluation results.",
+      "columns": [
+        {
+          "name": "dataset_split",
+          "type": "Text",
+          "description": "Name of the dataset split (e.g. Test, Validation)"
+        }
+      ]
+    },
+    {
+      "name": "evaluation_metrics",
+      "description": "Model evaluation results — Recall, Precision, NDCG, and F1 at 5 — for every model and dataset split.",
+      "columns": [
+        {
+          "name": "split",
+          "type": "Text",
+          "description": "Dataset split this evaluation was computed on"
+        },
+        {
+          "name": "Type",
+          "type": "Text",
+          "description": "Model Type: Base, Ensemble, or Heuristic Baseline"
+        },
+        {
+          "name": "Model",
+          "type": "Text",
+          "description": "Name of the model"
+        },
+        {
+          "name": "Recall_at_5",
+          "type": "Number",
+          "description": "Recall at 5: percentage of actual reorders captured in the top 5 recommendations"
+        },
+        {
+          "name": "NDCG_at_5",
+          "type": "Number",
+          "description": "NDCG at 5: rewards models that rank true reorders higher within the top 5"
+        },
+        {
+          "name": "Precision_at_5",
+          "type": "Number",
+          "description": "Precision at 5: percentage of the top 5 recommendations that were actual reorders"
+        },
+        {
+          "name": "F1_at_5",
+          "type": "Number",
+          "description": "F1 at 5: harmonic mean of Precision at 5 and Recall at 5"
+        }
+      ]
+    },
+    {
+      "name": "model_types_dimension",
+      "description": "Dimension table for model type: LightGBM or XGBoost",
+      "columns": [
+        {
+          "name": "model_type",
+          "type": "Text",
+          "description": "LightGBM or XGBoost"
+        }
+      ]
+    },
+    {
+      "name": "models_dimension",
+      "description": "Dimension table listing every model name",
+      "columns": [
+        {
+          "name": "Model",
+          "type": "Text",
+          "description": "Name of the model"
+        }
+      ]
+    },
+    {
+      "name": "power_bi_shap_barplots",
+      "description": "Feature-importance data (mean absolute SHAP) for the bar chart, one row per feature/model/split combination.",
+      "columns": [
+        {
+          "name": "split",
+          "type": "Text",
+          "description": "Dataset split (Test or Validation) this SHAP value was computed on"
+        },
+        {
+          "name": "model_id",
+          "type": "Text",
+          "description": "model id (another name for the model... model name is preferred)"
+        },
+        {
+          "name": "model_name",
+          "type": "Text",
+          "description": "Name of the model"
+        },
+        {
+          "name": "feature_name",
+          "type": "Text",
+          "description": "Name of the feature"
+        },
+        {
+          "name": "mean_absolute_shap",
+          "type": "Number",
+          "description": "Average magnitude of this feature's SHAP value, used for feature-importance ranking"
+        },
+        {
+          "name": "model_type",
+          "type": "Text",
+          "description": "LightGBM or XGBoost"
+        }
+      ]
+    },
+    {
+      "name": "_Model_Evaluation_Measures",
+      "description": "Container table for the Model Evaluation page's measures — holds no real data, only DAX measures.",
+      "columns": [
+        {
+          "name": "Column1",
+          "type": "Text",
+          "description": "Placeholder column — this table exists only to host measures"
+        }
+      ]
+    },
+    {
+      "name": "Evaluation Metric Parameter",
+      "description": "Display label for the selected evaluation metric option (Model Evaluation page horizontal bar chart)",
+      "columns": [
+        {
+          "name": "Evaluation Metric Parameter",
+          "type": "Text",
+          "description": "Display label for the selected evaluation metric option"
+        },
+        {
+          "name": "Parameter Fields",
+          "type": "Text",
+          "description": "Internal field reference (NAMEOF) for the selected evaluation metric measure"
+        },
+        {
+          "name": "Parameter Order",
+          "type": "Integer",
+          "description": "Sort order for the evaluation metric options in the slicer"
+        }
+      ]
+    },
+    {
+      "name": "base_models_dimension",
+      "description": "Dimension table listing the base model names ",
+      "columns": [
+        {
+          "name": "model_name",
+          "type": "Text",
+          "description": "Name of the base model"
+        }
+      ]
+    },
+    {
+      "name": "optimal_ensemble_weights",
+      "description": "Optimal blending weight shares for each base-model ensemble combination. The ensemble model is the column and the rows are the base models. Each column sums to 1.",
+      "columns": [
+        {
+          "name": "model_name",
+          "type": "Text",
+          "description": "Name of the base model for this rows blending weight shares"
+        },
+        {
+          "name": "ens1_lgb_rank_xgb_class",
+          "type": "Number",
+          "description": "Optimal ensemble weight shares for the LightGBM Ranker + XGBoost Classifier ensemble"
+        },
+        {
+          "name": "ens2_lgb_rank_lgb_class",
+          "type": "Number",
+          "description": "Optimal ensemble weight shares for the LightGBM Ranker + LightGBM Classifier ensemble"
+        },
+        {
+          "name": "ens3_xgb_rank_lgb_class",
+          "type": "Number",
+          "description": "Optimal ensemble weight shares for the XGBoost Ranker + LightGBM Classifier ensemble"
+        },
+        {
+          "name": "ens4_xgb_rank_xgb_class",
+          "type": "Number",
+          "description": "Optimal ensemble weight shares for the XGBoost Ranker + XGBoost Classifier ensemble"
+        },
+        {
+          "name": "ens5_all_base_models",
+          "type": "Number",
+          "description": "Optimal ensemble weight shares for the ensemble of all base models (Full Ensemble)"
+        }
+      ]
+    },
+    {
+      "name": "Ensemble Weight Parameter",
+      "description": "Field parameter letting the user pick which base-model ensemble combination's weight is displayed (used in pop-up pie chart)",
+      "columns": [
+        {
+          "name": "Ensemble Weight Parameter",
+          "type": "Text",
+          "description": "Display label for the selected ensemble combination option"
+        },
+        {
+          "name": "Ensemble Weight Parameter Fields",
+          "type": "Text",
+          "description": "Internal field reference (NAMEOF) for the selected ensemble weight measure"
+        },
+        {
+          "name": "Ensemble Weight Parameter Order",
+          "type": "Integer",
+          "description": "Sort order for the ensemble combination options in the slicer"
+        }
+      ]
+    },
+    {
+      "name": "Conversion Rate",
+      "description": "What-if parameter table driving the sensitivity slider for baseline conversion rate.",
+      "columns": [
+        {
+          "name": "Conversion Rate",
+          "type": "Number",
+          "description": "Candidate conversion-rate value offered by the what-if slider"
+        }
+      ]
+    },
+    {
+      "name": "Churn Rate",
+      "description": "What-if parameter table driving the sensitivity slider for baseline churn rate.",
+      "columns": [
+        {
+          "name": "Churn Rate",
+          "type": "Number",
+          "description": "Candidate churn-rate value offered by the what-if slider"
+        }
+      ]
+    },
+    {
+      "name": "Conversion Lift per 10% Recall",
+      "description": "What-if parameter table driving the sensitivity slider for conversion lift per 10-point gain in Recall at 5.",
+      "columns": [
+        {
+          "name": "Conversion Lift per 10% Recall",
+          "type": "Number",
+          "description": "Candidate conversion-lift value offered by the what-if slider"
+        }
+      ]
+    },
+    {
+      "name": "AOV Lift per 10% Recall",
+      "description": "What-if parameter table driving the sensitivity slider for average-order-value lift per 10-point gain in Recall at 5.",
+      "columns": [
+        {
+          "name": "AOV Lift per 10% Recall",
+          "type": "Currency",
+          "description": "Candidate AOV-lift value offered by the what-if slider"
+        }
+      ]
+    },
+    {
+      "name": "Churn Reduction per 10% Recall",
+      "description": "What-if parameter table driving the sensitivity slider for churn reduction per 10-point gain in Recall at 5.",
+      "columns": [
+        {
+          "name": "Churn Reduction per 10% Recall",
+          "type": "Number",
+          "description": "Candidate churn-reduction value offered by the what-if slider"
+        }
+      ]
+    },
+    {
+      "name": "_Financial_Model_Constants",
+      "description": "Container table for the fixed, SEC-sourced financial constants used in the profit model — holds no real data, only DAX measures.",
+      "columns": [
+        {
+          "name": "Column1",
+          "type": "Text",
+          "description": "Placeholder column — this table exists only to host measures"
+        }
+      ]
+    },
+    {
+      "name": "_Financial_Impact_Measures",
+      "description": "Container table for the Financial Impact page's profit-lift calculations — holds no real data, only DAX measures.",
+      "columns": [
+        {
+          "name": "Column1",
+          "type": "Text",
+          "description": "Placeholder column — this table exists only to host measures"
+        }
+      ]
+    },
+    {
+      "name": "_Waterfall_Measures",
+      "description": "Container table for the profit waterfall chart's staged measures — holds no real data, only DAX measures.",
+      "columns": [
+        {
+          "name": "Column1",
+          "type": "Text",
+          "description": "Placeholder column — this table exists only to host measures"
+        }
+      ]
+    },
+    {
+      "name": "Waterfall_Dimensions",
+      "description": "Dimension table defining the stages and display order of the profit waterfall chart.",
+      "columns": [
+        {
+          "name": "Stage Name",
+          "type": "Text",
+          "description": "Name of the waterfall stage (e.g. Baseline Profit, Conversion Profit Lift)"
+        },
+        {
+          "name": "Sort Order",
+          "type": "Integer",
+          "description": "Left-to-right display order of this stage in the waterfall chart"
+        }
+      ]
+    },
+    {
+      "name": "Donut_Dimensions",
+      "description": "Dimension table defining the profit-lift drivers shown in the donut chart.",
+      "columns": [
+        {
+          "name": "Driver Name",
+          "type": "Text",
+          "description": "Name of the profit-lift driver (e.g. Conversion Profit Lift, Churn Profit Lift, AOV Profit Lift)"
+        },
+        {
+          "name": "Sort Order",
+          "type": "Integer",
+          "description": "Display order of this driver in the donut chart"
+        }
+      ]
+    },
+    {
+      "name": "dashboard_last_update_time",
+      "description": "Single-row table recording when the dashboard's underlying data was last refreshed.",
+      "columns": [
+        {
+          "name": "Status",
+          "type": "Text",
+          "description": "Label describing the refresh status (e.g. 'Last Update')"
+        },
+        {
+          "name": "Timestamp",
+          "type": "Date",
+          "description": "Date/time the underlying data was last refreshed"
+        }
+      ]
+    },
+    {
+      "name": "Validation_Evaluation_Metrics",
+      "description": "Validation split evaluation metrics by model",
+      "columns": [
+        {
+          "name": "split",
+          "type": "Text",
+          "description": "Dataset split this evaluation was computed on (Always 'validation' in this table)"
+        },
+        {
+          "name": "Type",
+          "type": "Text",
+          "description": "Base, Ensemble, or Heuristic Baseline"
+        },
+        {
+          "name": "Model",
+          "type": "Text",
+          "description": "Name of the model being evaluated"
+        },
+        {
+          "name": "Recall_at_5",
+          "type": "Number",
+          "description": "Recall at 5: percentage of actual reorders captured in the top 5 recommendations"
+        },
+        {
+          "name": "NDCG_at_5",
+          "type": "Number",
+          "description": "NDCG at 5 model evaluation metric"
+        },
+        {
+          "name": "Precision_at_5",
+          "type": "Number",
+          "description": "Precision at 5: percentage of the top 5 recommendations that were actual reorders"
+        },
+        {
+          "name": "F1_at_5",
+          "type": "Number",
+          "description": "F1 at 5: harmonic mean of Precision at 5 and Recall at 5"
+        }
+      ]
+    },
+    {
+      "name": "_SelectionMeasures",
+      "description": "Container table for the measures that feed the embedded chat app's dashboard-state capture — holds no real data, only DAX measures (docs/frontend.md).",
+      "columns": [
+        {
+          "name": "Column1",
+          "type": "Text",
+          "description": "Placeholder column — this table exists only to host measures"
+        }
+      ]
+    }
+  ],
+  "measures": [
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Recall",
+      "description": "Model Evaluation metric: Recall at 5",
+      "dax": "SUM(evaluation_metrics[Recall_at_5])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Precision",
+      "description": "Model evaluation metric: Precision at 5",
+      "dax": "SUM(evaluation_metrics[Precision_at_5])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "NDCG",
+      "description": "Model evaluation metric: NDCG at 5",
+      "dax": "SUM(evaluation_metrics[NDCG_at_5])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "F1",
+      "description": "Model evaluation metric: F1 at 5",
+      "dax": "SUM(evaluation_metrics[F1_at_5])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Dynamic_Metric_Description",
+      "description": "Plain-language definition of whichever evaluation metric is currently selected in Evaluation Metric Parameter",
+      "dax": "\nVAR SelectedMetricText = SELECTEDVALUE('Evaluation Metric Parameter'[Parameter Fields])\nVAR DescriptionText = \n    SWITCH(\n        TRUE(),\n        CONTAINSSTRING(SelectedMetricText, \"Precision\"), \"Out of the top 5 products recommended, what percentage were actual reorders.\",\n        CONTAINSSTRING(SelectedMetricText, \"Recall\"), \"Out of the total reorders, what percentage were captured in the top 5 recommendations.\",\n        CONTAINSSTRING(SelectedMetricText, \"F1\"), \"The harmonic mean of Precision and Recall, identifying if one metric is inflated at the expense of the other.\",\n        CONTAINSSTRING(SelectedMetricText, \"NDCG\"), \"Rewards models that place true reorders higher in the top 5 list (Order Matters).\",\n        \"Select a metric from the slicer to see its analytical definition.\"\n    )\nRETURN\n    DescriptionText & \"\""
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Champion Recall",
+      "description": "Recall at 5 for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    SUM(evaluation_metrics[Recall_at_5]),\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Champion Precision",
+      "description": "Precision at 5 for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    SUM(evaluation_metrics[Precision_at_5]),\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Champion NDCG",
+      "description": "NDCG at 5 for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    SUM(evaluation_metrics[NDCG_at_5]),\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Champion F1",
+      "description": "F1 at 5 for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    SUM(evaluation_metrics[F1_at_5]),\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Feature_Y_Axis_Position",
+      "description": "Vertical position for a beeswarm plot point, offset slightly within its feature's row to avoid perfect overlap",
+      "dax": "\n-- Step 1: Get the baseline rank of the feature (e.g., 1 through 15)\nVAR BaseRank = SELECTEDVALUE('beeswarm_plot_data'[feature_importance_rank])\n\n-- Step 2: Extract the unique plot ID integer for this specific dot\nVAR RowID = SELECTEDVALUE('beeswarm_plot_data'[unique_plot_id])\n\n-- Step 3: Add an incredibly tiny fraction to make the coordinate 100% unique to Power BI\nVAR Jitter = DIVIDE(RowID, 100000000) \n\nRETURN\n    BaseRank + Jitter"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "SHAP_Color_Scale",
+      "description": "This point's feature value, normalized 0–1 within that feature's own range, used to color the beeswarm plot",
+      "dax": "\n-- Step 1: Capture the current row's feature name and individual feature value\nVAR CurrentFeature = SELECTEDVALUE('beeswarm_plot_data'[feature_name])\nVAR IndividualValue = AVERAGE('beeswarm_plot_data'[feature_value])\n\n-- Step 2: Compute the min and max for ONLY this specific feature across the dataset\nVAR FeatureMin = \n    CALCULATE(\n        MIN('beeswarm_plot_data'[feature_value]), \n        REMOVEFILTERS('beeswarm_plot_data'), \n        'beeswarm_plot_data'[feature_name] = CurrentFeature,\n        'beeswarm_plot_data'[feature_value] < 999 -- Defensive drop for outliers/flags\n    )\n\nVAR FeatureMax = \n    CALCULATE(\n        MAX('beeswarm_plot_data'[feature_value]), \n        REMOVEFILTERS('beeswarm_plot_data'), \n        'beeswarm_plot_data'[feature_name] = CurrentFeature,\n        'beeswarm_plot_data'[feature_value] < 999 -- Defensive drop for outliers/flags\n    )\n\n-- Step 3: Run a 0-to-1 Min-Max calculation scaled strictly to this feature's domain\nVAR NormalizedValue = \n    DIVIDE(\n        IndividualValue - FeatureMin, \n        FeatureMax - FeatureMin, \n        0\n    )\nRETURN\n    NormalizedValue"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Baseline Recall",
+      "description": "Recall at 5 for the heuristic baseline (no ML model)",
+      "dax": "\nCALCULATE(\n    AVERAGE('evaluation_metrics'[Recall_at_5]),\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Pct_Diff_Recall",
+      "description": "Percentage improvement in Recall at 5 of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion Recall] - [Baseline Recall], [Baseline Recall], 0)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Baseline NDCG",
+      "description": "NDCG at 5 for the heuristic baseline (no ML model)",
+      "dax": "\nCALCULATE(\n    AVERAGE('evaluation_metrics'[NDCG_at_5]),\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Pct_Diff_NDCG",
+      "description": "Percentage improvement in NDCG at 5 of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion NDCG] - [Baseline NDCG], [Baseline NDCG], 0)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "ensemble_weights_lgbm_rank_xgb_class",
+      "description": "Sum of optimal ensemble weight shares for the LightGBM Ranker + XGBoost Classifier ensemble (sums to 1)",
+      "dax": "SUM('optimal_ensemble_weights'[ens1_lgb_rank_xgb_class])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "ensemble_weights_lgbm_rank_lgbm_class",
+      "description": "Sum of optimal ensemble weight shares for the LightGBM Ranker + LightGBM Classifier ensemble (sums to 1)",
+      "dax": "SUM('optimal_ensemble_weights'[ens2_lgb_rank_lgb_class])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "ensemble_weights_xgb_rank_lgbm_class",
+      "description": "Sum of optimal ensemble weight shares for the XGBoost Ranker + LightGBM Classifier ensemble (sums to 1)",
+      "dax": "SUM('optimal_ensemble_weights'[ens3_xgb_rank_lgb_class])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "ensemble_weights_xgb_rank_xgb_class",
+      "description": "Sum of optimal ensemble weight shares for the XGBoost Ranker + XGBoost Classifier ensemble (sums to 1)",
+      "dax": "SUM('optimal_ensemble_weights'[ens4_xgb_rank_xgb_class])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "ensemble_weights_all_base_models",
+      "description": "Sum of optimal ensemble weight shares for the Full ensemble (sums to 1)",
+      "dax": "SUM('optimal_ensemble_weights'[ens5_all_base_models])"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Baseline Precision",
+      "description": "Precision at 5 for the heuristic baseline (no ML model)",
+      "dax": "\nCALCULATE(\n    AVERAGE('evaluation_metrics'[Precision_at_5]),\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Pct_Diff_Precision",
+      "description": "Percentage improvement in Precision at 5 of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion Precision] - [Baseline Precision], [Baseline Precision], 0)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Baseline F1",
+      "description": "F1 at 5 for the heuristic baseline (no ML model)",
+      "dax": "\nCALCULATE(\n    AVERAGE('evaluation_metrics'[F1_at_5]),\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Pct_Diff_F1",
+      "description": "Percentage improvement in F1 at 5 of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion F1] - [Baseline F1], [Baseline F1], 0)"
+    },
+    {
+      "table": "_Model_Evaluation_Measures",
+      "name": "Champion_Model",
+      "description": "Name of the model with the highest validation Recall at 5 — treated as champion throughout the dashboard",
+      "dax": "\nVAR ModelSummary = \n    ADDCOLUMNS(\n        VALUES(Validation_Evaluation_Metrics[Model]),\n        \"@ValRecall\", \n        CALCULATE(\n            MAX(Validation_Evaluation_Metrics[Recall_at_5])\n        )\n    )\nVAR MaxRecallValue = \n    MAXX(ModelSummary, [@ValRecall])\nVAR BestModelName = \n    MAXX(\n        FILTER(ModelSummary, [@ValRecall] = MaxRecallValue),\n        Validation_Evaluation_Metrics[Model]\n    )\nRETURN \n    BestModelName"
+    },
+    {
+      "table": "_Financial_Model_Constants",
+      "name": "SEC_2025_Total_Revenue",
+      "description": "Instacart's total 2025 revenue, from its SEC filings — the base for all profit calculations",
+      "dax": "3742000000"
+    },
+    {
+      "table": "_Financial_Model_Constants",
+      "name": "SEC_2025_Annual_Orders",
+      "description": "Instacart's total 2025 order volume, from its SEC filings",
+      "dax": "338800000"
+    },
+    {
+      "table": "_Financial_Model_Constants",
+      "name": "SEC_2025_Active_Customers",
+      "description": "Instacart's total 2025 active customer count, from its SEC filings",
+      "dax": "14000000"
+    },
+    {
+      "table": "_Financial_Model_Constants",
+      "name": "SEC_2025_Profit_Margin",
+      "description": "Instacart's 2025 profit margin, from its SEC filings",
+      "dax": "0.737"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Baseline_Profit",
+      "description": "Projected annual profit with no recommendation model (heuristic baseline)",
+      "dax": "[SEC_2025_Total_Revenue] * [SEC_2025_Profit_Margin]"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Conversion_Profit_Lift",
+      "description": "Additional annual profit from extra orders driven by the model's Recall, via the conversion-lift assumption",
+      "dax": "\nVAR Annual_Orders = [SEC_2025_Annual_Orders]\nVAR Profit_Margin = [SEC_2025_Profit_Margin]\nVAR Base_AOV = [Base_AOV]\n\nVAR Recall = IF(SELECTEDVALUE(evaluation_metrics[Model]) = \"No Widget\", 0, [Recall])\nVAR RecallUnits = Recall / 0.10\n\nVAR Extra_Orders = Annual_Orders * (RecallUnits * [Conversion Lift per 10% Recall Value])\n\nRETURN\nExtra_Orders * Base_AOV * Profit_Margin"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Base_AOV",
+      "description": "Baseline average order value: total revenue divided by annual orders",
+      "dax": "DIVIDE([SEC_2025_Total_Revenue], [SEC_2025_Annual_Orders], 0)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Conversion_Rate",
+      "description": "Passthrough of the current conversion-rate assumption, for use in visit/traffic calculations",
+      "dax": "'Conversion Rate'[Conversion Rate Value]"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Annual_Visits",
+      "description": "Estimated annual site visits, derived from annual orders and the conversion-rate assumption",
+      "dax": "DIVIDE([SEC_2025_Annual_Orders], [Conversion_Rate], 0)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Annual_User_Orders",
+      "description": "Average number of orders per active customer per year",
+      "dax": "DIVIDE([SEC_2025_Annual_Orders], [SEC_2025_Active_Customers], 0)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Churn_Profit_Lift",
+      "description": "Additional annual profit from customers retained (reduced churn) due to the model's Recall, via the churn-reduction assumption",
+      "dax": "\nVAR Active_Users = [SEC_2025_Active_Customers]\nVAR Annual_User_Orders = [Annual_User_Orders]\nVAR Base_AOV = [Base_AOV]\nVAR Profit_Margin = [SEC_2025_Profit_Margin]\n\nVAR Recall = IF(SELECTEDVALUE(evaluation_metrics[Model]) = \"No Widget\", 0, [Recall])\nVAR RecallUnits = Recall / 0.10\n\nVAR New_Churn_Rate = MAX(0.01, [Churn Rate Value] - (RecallUnits * [Churn Reduction per 10% Recall Value]))\nVAR Extra_Customers_Retained = Active_Users * ([Churn Rate Value] - New_Churn_Rate)\n\nRETURN\nExtra_Customers_Retained * Annual_User_Orders * Base_AOV * Profit_Margin"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Annual_Profit_Lift",
+      "description": "Total additional annual profit from all three drivers combined: AOV, conversion, and churn",
+      "dax": "[AOV_Profit_Lift] + [Conversion_Profit_Lift] + [Churn_Profit_Lift]"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Annual_Profit",
+      "description": "Projected total annual profit: baseline profit plus the model's total profit lift",
+      "dax": "[Baseline_Profit] + [Annual_Profit_Lift]"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Champion Profit",
+      "description": "Projected annual profit for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    [Annual_Profit],\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Champion Profit Lift",
+      "description": "Total annual profit lift for the champion model, over the heuristic baseline",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    [Annual_Profit_Lift],\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Champion Conversion Profit Lift",
+      "description": "Conversion-driven profit lift for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    [Conversion_Profit_Lift],\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Champion Churn Profit Lift",
+      "description": "Churn-driven profit lift for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    [Churn_Profit_Lift],\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "AOV_Profit_Lift",
+      "description": "Additional annual profit from a higher average order value, driven by the model's Recall via the AOV-lift assumption",
+      "dax": "\nVAR Annual_Orders = [SEC_2025_Annual_Orders]\nVAR Active_Users = [SEC_2025_Active_Customers]\nVAR Annual_User_Orders = [Annual_User_Orders]\nVAR Base_AOV = [Base_AOV]\nVAR Profit_Margin = [SEC_2025_Profit_Margin]\n\nVAR Recall = IF(SELECTEDVALUE(evaluation_metrics[Model]) = \"No Widget\", 0, [Recall])\nVAR RecallUnits = Recall / 0.10\n\n-- 1. Calculate New AOV\nVAR New_AOV = Base_AOV + (RecallUnits * [AOV Lift per 10% Recall Value])\n\n-- 2. Extra Order AOV Lift (From Conversion)\nVAR Extra_Orders = Annual_Orders * (RecallUnits * [Conversion Lift per 10% Recall Value])\nVAR Extra_Order_AOV_Lift = (Extra_Orders * New_AOV * Profit_Margin) - [Conversion_Profit_Lift]\n\n-- 3. Extra Customer AOV Lift (From Retention)\nVAR New_Churn_Rate = MAX(0.01, [Churn Rate Value] - (RecallUnits * [Churn Reduction per 10% Recall Value]))\nVAR Extra_Customers_Retained = Active_Users * ([Churn Rate Value] - New_Churn_Rate)\nVAR Extra_Customer_AOV_Lift = (Extra_Customers_Retained * Annual_User_Orders * New_AOV * Profit_Margin) - [Churn_Profit_Lift]\n\n-- 4. Baseline Order AOV Lift (From existing transaction stream)\nVAR Baseline_Order_AOV_Lift = (Annual_Orders * New_AOV * Profit_Margin) - [Baseline_Profit]\n\nRETURN\nExtra_Order_AOV_Lift + Extra_Customer_AOV_Lift + Baseline_Order_AOV_Lift"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Champion AOV Profit Lift",
+      "description": "AOV-driven profit lift for the champion model",
+      "dax": "\nVAR Champion = [Champion_Model]\nRETURN\nCALCULATE(\n    [AOV_Profit_Lift],\n    evaluation_metrics[Model] = Champion\n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Donut_Chart_Lift_Values",
+      "description": "Routes each profit-lift driver (Conversion, Churn, AOV) to its value for the donut chart, based on the currently selected driver",
+      "dax": "\nSWITCH(\n    SELECTEDVALUE(Donut_Dimensions[Driver Name]),\n    \"Conversion Profit Lift\", CALCULATE([Conversion_Profit_Lift], REMOVEFILTERS(Donut_Dimensions)),\n    \"Churn Profit Lift\", CALCULATE([Churn_Profit_Lift], REMOVEFILTERS(Donut_Dimensions)),\n    \"AOV Profit Lift\", CALCULATE([AOV_Profit_Lift], REMOVEFILTERS(Donut_Dimensions)),\n    BLANK()\n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Heuristic Profit Lift",
+      "description": "Total profit lift for the heuristic baseline row",
+      "dax": "\nCALCULATE(\n     [Annual_Profit_Lift],\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Pct_Diff_Profit_Lift",
+      "description": "Percentage improvement in total profit lift of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion Profit Lift] - [Heuristic Profit Lift], [Heuristic Profit Lift], 0)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Heuristic AOV Profit Lift",
+      "description": "AOV-driven profit lift for the heuristic baseline row",
+      "dax": "\nCALCULATE(\n     [AOV_Profit_Lift],\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Heuristic Churn Profit Lift",
+      "description": "Churn-driven profit lift for the heuristic baseline row",
+      "dax": "\nCALCULATE(\n     [Churn_Profit_Lift],\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Heuristic Conversion Profit Lift",
+      "description": "Conversion-driven profit lift for the heuristic baseline row",
+      "dax": "\nCALCULATE(\n     [Conversion_Profit_Lift],\n    -- Filters the table to pull ONLY the heuristic row\n    'evaluation_metrics'[Type] = \"Heuristic Baseline\" \n)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Pct_Diff_AOV_Profit_Lift",
+      "description": "Percentage improvement in AOV-driven profit lift of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion AOV Profit Lift] - [Heuristic AOV Profit Lift], [Heuristic AOV Profit Lift], 0)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Pct_Diff_Churn_Profit_Lift",
+      "description": "Percentage improvement in churn-driven profit lift of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion Churn Profit Lift] - [Heuristic Churn Profit Lift], [Heuristic Churn Profit Lift], 0)"
+    },
+    {
+      "table": "_Financial_Impact_Measures",
+      "name": "Pct_Diff_Conversion_Profit_Lift",
+      "description": "Percentage improvement in conversion-driven profit lift of the champion model over the heuristic baseline",
+      "dax": "DIVIDE([Champion Conversion Profit Lift] - [Heuristic Conversion Profit Lift], [Heuristic Conversion Profit Lift], 0)"
+    },
+    {
+      "table": "_Waterfall_Measures",
+      "name": "Conversion_Stage1_Baseline_Orders",
+      "description": "Waterfall stage value: baseline annual order count before any model impact",
+      "dax": "[SEC_2025_Annual_Orders]"
+    },
+    {
+      "table": "_Waterfall_Measures",
+      "name": "Conversion_Stage2_Extra_Orders",
+      "description": "Waterfall stage value: additional orders driven by the model's Recall via the conversion-lift assumption",
+      "dax": "\nVAR Annual_Orders = [SEC_2025_Annual_Orders]\nVAR Recall = IF(SELECTEDVALUE(evaluation_metrics[Model]) = \"No Widget\", 0, [Recall])\nVAR RecallUnits = Recall / 0.10\nVAR Extra_Orders = Annual_Orders * (RecallUnits * [Conversion Lift per 10% Recall Value])\n\nRETURN\nExtra_Orders"
+    },
+    {
+      "table": "_Waterfall_Measures",
+      "name": "Conversion_Stage3_Profit_Lift",
+      "description": "Waterfall stage value: profit lift from additional orders",
+      "dax": "[Conversion_Profit_Lift]"
+    },
+    {
+      "table": "_Waterfall_Measures",
+      "name": "Master_Waterfall_Values",
+      "description": "Routes each waterfall stage (Baseline Profit, Conversion/Churn/AOV Profit Lift) to its value, based on the currently selected stage",
+      "dax": "\nSWITCH(\n    SELECTEDVALUE(Waterfall_Dimensions[Stage Name]),\n    \"Baseline Profit\", CALCULATE([Baseline_Profit], REMOVEFILTERS(Waterfall_Dimensions)),\n    \"Conversion Profit Lift\", CALCULATE([Conversion_Profit_Lift], REMOVEFILTERS(Waterfall_Dimensions)),\n    \"Churn Profit Lift\", CALCULATE([Churn_Profit_Lift], REMOVEFILTERS(Waterfall_Dimensions)),\n    \"AOV Profit Lift\", CALCULATE([AOV_Profit_Lift], REMOVEFILTERS(Waterfall_Dimensions)),\n    BLANK()\n)"
+    },
+    {
+      "table": "_Waterfall_Measures",
+      "name": "Conversion_Dyanmic_Tool_Tip",
+      "description": "Tooltip text summarizing the baseline conversion rate, the model's lift, and the resulting new conversion rate",
+      "dax": "\nVAR Recall = IF(SELECTEDVALUE(evaluation_metrics[Model]) = \"No Widget\", 0, [Recall])\nVAR RecallUnits = Recall / 0.10\nVAR Lift_Amount = RecallUnits * [Conversion Lift per 10% Recall Value]\nVAR New_Conv = [Conversion Rate Value] + Lift_Amount\n\nRETURN\n\"Baseline Conversion Rate: \" & FORMAT([Conversion Rate Value], \"0.00%\") & \n\" | Model Lift: +\" & FORMAT(Lift_Amount, \"0.00%\") & \n\" | New Conversion Rate: \" & FORMAT(New_Conv, \"0.00%\")"
+    },
+    {
+      "table": "_Waterfall_Measures",
+      "name": "Yaxis_min",
+      "description": "Lower bound for the waterfall chart's Y-axis, set just below baseline profit",
+      "dax": "[Baseline_Profit] - 100000000"
+    },
+    {
+      "table": "_Waterfall_Measures",
+      "name": "Yaxis_max",
+      "description": "Upper bound for the waterfall chart's Y-axis, set just above total annual profit",
+      "dax": "[Annual_Profit] *1.017"
+    }
+  ],
+  "relationships": [
+    {
+      "from_table": "beeswarm_plot_data",
+      "from_column": "model_type",
+      "to_table": "model_types_dimension",
+      "to_column": "model_type",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    },
+    {
+      "from_table": "beeswarm_plot_data",
+      "from_column": "split",
+      "to_table": "dataset_split_dimension",
+      "to_column": "dataset_split",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    },
+    {
+      "from_table": "beeswarm_plot_data",
+      "from_column": "model_name",
+      "to_table": "base_models_dimension",
+      "to_column": "model_name",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    },
+    {
+      "from_table": "evaluation_metrics",
+      "from_column": "Model",
+      "to_table": "models_dimension",
+      "to_column": "Model",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    },
+    {
+      "from_table": "evaluation_metrics",
+      "from_column": "split",
+      "to_table": "dataset_split_dimension",
+      "to_column": "dataset_split",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    },
+    {
+      "from_table": "power_bi_shap_barplots",
+      "from_column": "model_type",
+      "to_table": "model_types_dimension",
+      "to_column": "model_type",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    },
+    {
+      "from_table": "power_bi_shap_barplots",
+      "from_column": "split",
+      "to_table": "dataset_split_dimension",
+      "to_column": "dataset_split",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    },
+    {
+      "from_table": "power_bi_shap_barplots",
+      "from_column": "model_name",
+      "to_table": "base_models_dimension",
+      "to_column": "model_name",
+      "from_cardinality": "Many",
+      "to_cardinality": "One",
+      "cross_filtering_behavior": "OneDirection",
+      "is_active": true
+    }
+  ],
+  "parameters": [
+    {
+      "type": "numeric",
+      "filter_column": "Conversion Rate[Conversion Rate]",
+      "value_measure": "Conversion Rate Value",
+      "default": 0.06,
+      "range": {
+        "min": 0.0,
+        "max": 0.1,
+        "step": 0.005
+      }
+    },
+    {
+      "type": "numeric",
+      "filter_column": "Churn Rate[Churn Rate]",
+      "value_measure": "Churn Rate Value",
+      "default": 0.39,
+      "range": {
+        "min": 0.0,
+        "max": 0.6,
+        "step": 0.01
+      }
+    },
+    {
+      "type": "numeric",
+      "filter_column": "Conversion Lift per 10% Recall[Conversion Lift per 10% Recall]",
+      "value_measure": "Conversion Lift per 10% Recall Value",
+      "default": 0.002,
+      "range": {
+        "min": 0.0,
+        "max": 0.01,
+        "step": 0.001
+      }
+    },
+    {
+      "type": "numeric",
+      "filter_column": "AOV Lift per 10% Recall[AOV Lift per 10% Recall]",
+      "value_measure": "AOV Lift per 10% Recall Value",
+      "default": 0.05,
+      "range": {
+        "min": 0.0,
+        "max": 0.26,
+        "step": 0.01
+      }
+    },
+    {
+      "type": "numeric",
+      "filter_column": "Churn Reduction per 10% Recall[Churn Reduction per 10% Recall]",
+      "value_measure": "Churn Reduction per 10% Recall Value",
+      "default": 0.005,
+      "range": {
+        "min": 0.0,
+        "max": 0.02,
+        "step": 0.001
+      }
+    },
+    {
+      "type": "field",
+      "filter_column": "Evaluation Metric Parameter[Evaluation Metric Parameter]",
+      "options": [
+        {
+          "label": "Recall@5",
+          "field": "_Model_Evaluation_Measures[Recall]"
+        },
+        {
+          "label": "NDCG@5",
+          "field": "_Model_Evaluation_Measures[NDCG]"
+        },
+        {
+          "label": "Precision@5",
+          "field": "_Model_Evaluation_Measures[Precision]"
+        },
+        {
+          "label": "F1@5",
+          "field": "_Model_Evaluation_Measures[F1]"
+        }
+      ]
+    },
+    {
+      "type": "field",
+      "filter_column": "Ensemble Weight Parameter[Ensemble Weight Parameter]",
+      "options": [
+        {
+          "label": "XGB Ranker + XGB Classifer",
+          "field": "_Model_Evaluation_Measures[ensemble_weights_xgb_rank_xgb_class]"
+        },
+        {
+          "label": "XGB Ranker + LGBM Classifer",
+          "field": "_Model_Evaluation_Measures[ensemble_weights_xgb_rank_lgbm_class]"
+        },
+        {
+          "label": "LGBM Ranker + XGB Classifer",
+          "field": "_Model_Evaluation_Measures[ensemble_weights_lgbm_rank_xgb_class]"
+        },
+        {
+          "label": "LGBM Ranker + LGBM Classifer",
+          "field": "_Model_Evaluation_Measures[ensemble_weights_lgbm_rank_lgbm_class]"
+        },
+        {
+          "label": "All Base Models",
+          "field": "_Model_Evaluation_Measures[ensemble_weights_all_base_models]"
+        }
+      ]
+    }
+  ]
+}

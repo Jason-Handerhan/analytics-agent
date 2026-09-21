@@ -2,7 +2,7 @@
 
 ## Current status — update this as we go
 
-**Phase: 2 complete — Phase 3 in progress (item 1, data prep)**
+**Phase: 3 in progress — items 1-3 (data prep, dashboard state capture, static context bundle) complete, item 4 (graph skeleton) next**
 
 _Last updated: 2026-09-18._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
@@ -127,8 +127,8 @@ that — fixed to `SELECT n`, and the same fix applied to `docs/
 data-pipeline.md`'s vector_db assertion template, which had the identical
 bug). **Compiled, executed, and all assertions passing in BigQuery Studio.**
 `docs/data-pipeline.md`'s Part 1 example updated to match all of this.
-**`vector_db.chunks_docs_embedded` — in progress, real deviations from the
-original design.** Real README source is `context/docs/index.html` (one
+**`vector_db.chunks_docs_embedded` — done and verified live, real deviations
+from the original design.** Real README source is `context/docs/index.html` (one
 file, not several) with `context/orientation/*.txt` holding the
 already-manually-extracted Executive Summary/Project Navigator/System
 Architecture pieces — `chunk_docs()` excludes that same block from
@@ -154,10 +154,127 @@ deliberately, not defaulted to the doc's original placeholder), needing
 with `rowConditions` assertions, matching `agent_safe`'s proven pattern
 rather than the doc's original unverified `nonNull`/`uniqueKey`. No vector
 index — confirmed unnecessary (BigQuery's IVF minimum is 5,000 rows; the
-real build has 66), not deferred. **Not yet confirmed compiled/executed in
-BigQuery Studio** — in progress as of this writing.
-`context/schema/model_schema.json` — the third data source item 1 needs —
-not started.
+real build has 66), not deferred. **Compiled, executed, real `VECTOR_SEARCH`
+queries and a t-SNE/Plotly embedding-space plot both verified against real
+data** (`notebooks/phase3_vector_search_test.ipynb`).
+
+**`context/schema/model_schema.json` — done and verified live.**
+`scripts/build_model_context.py` built from `notebooks/
+dax_schema_exploration.ipynb`'s proven logic: `executeQueries`
+(`INFO.VIEW.*`) for tables/columns/relationships, Scanner API for measure
+`Expression` text. Auto-date tables excluded by name (`LocalDateTable_*`/
+`DateTableTemplate_*`), same as `agent_safe`'s reasoning — not `IsHidden`,
+since parameter tables are legitimately hidden too. Same logic caught a
+second universal artifact: every table carries an identical
+`RowNumber-<GUID>` index column (confirmed hidden, 25/25 tables), excluded
+by exact name. HTML-display measures excluded via a manual list plus a
+build-time regex backstop that hard-fails on an unlisted match — this
+caught 3 real ones (`HTML_Model_Evaluation_Info`, `HTML_Icon_Author_Credit`,
+`HTML_Financial_Impact_Info`) beyond the doc's original single example.
+`parameters[]` covers two real kinds, not one: the 5 numeric what-ifs
+(`range` read from each parameter table's actual values, not the
+unavailable `GENERATESERIES(...)` formula) plus 2 field parameters
+(`Evaluation Metric Parameter`, `Ensemble Weight Parameter` — an
+`options: [{label, field}]` list, not a numeric range) found via a manual
+list, the same pattern as the HTML measures — a full-model structural scan
+was tried first and discarded as needless complexity for something this
+small and rarely-changing. Final real counts: 23 tables, 65 measures, 8
+relationships, 7 parameters.
+
+**Phase 3, item 1 (data prep) is now fully complete — all three data
+sources built and verified live.**
+
+**Phase 3, item 2 (dashboard state capture) — complete, with a full
+architecture deviation from the original design.** The originally documented
+mechanism (Power BI JS SDK `getFilters()`/`getSlicers()`/`getActivePage()`,
+called from a report embedded inside Power Apps via a `Power BI tile`
+control) never got built — confirmed the tile control has no JS SDK access,
+one-way `TileUrl` filter push only, and Microsoft's own docs plus community
+reports confirm URL filters don't reach field parameters. Decided
+2026-09-19/20 to flip the embedding direction instead: the Power Apps chat
+app is embedded **as a Power Apps visual inside the Power BI report**,
+gaining `PowerBIIntegration.Data` — a live, read-only Power Fx table
+reflecting whatever fields/measures are dragged into the visual's Data well,
+configured independently per report page.
+
+Real deviations, all confirmed live:
+- `PowerBIIntegration.Data` only populates for a visual instance created via
+  **Create new** from inside the report, not an existing app selected in —
+  though every documented existing-app workaround (re-editing via the
+  visual's own "..." menu, a Gallery bound to `PowerBIIntegration.Data`)
+  failed identically on both an existing app and a freshly-recreated one
+  before turning out to be a publish-propagation delay, not a hard block: a
+  second hard refresh of the **published** (not edit-mode) report resolved
+  it both times.
+- Field parameters (`Evaluation Metric Parameter`, `Ensemble Weight
+  Parameter`) are excluded from capture — any `SELECTEDVALUE()` measure
+  referencing a field-parameter table throws "This might be caused by a
+  capacity or license issue" when dragged into the visual's Data well,
+  confirmed isolated to field-parameter tables specifically (not a
+  total-field-count cap, and not reproducible on any other table type). The
+  5 numeric what-ifs and 3 dimensional slicers all work fine as ordinary
+  `SELECTEDVALUE()` measures in the same well.
+- `filter_context` entries are `{filter_column, value}` pairs, reusing
+  `model_schema.json`'s `filter_column` naming — but the connector's
+  hand-written Swagger 2.0 spec (Phase 1's OpenAPI-3.1 workaround) exposes
+  `filter_context: list[dict]` as an array of schemaless objects, so Power
+  Apps requires each row wrapped as `{Value: ParseJSON(JSON({filter_column:
+  ..., value: ...}))}` — a `Dynamic`-typed column, not the record shape
+  directly. `value` is `Text(...)`-coerced on the numeric entries too, since
+  a `Table()` literal mixing numeric and text values in one column errors
+  ("cannot be converted to a number") rather than widening silently.
+- DAX/the semantic model has no concept of report pages, so `active_page`
+  can't be captured as a measure like everything else. Captured instead via
+  one hardcoded constant measure per page (`Active_Page_ModelEval`,
+  `Active_Page_FinancialImpact`), each dragged into only its own page's Data
+  well; read with `ParseJSON(JSON(First(PowerBIIntegration.Data)))` for
+  duck-typed field access (each page's real `PowerBIIntegration.Data` schema
+  differs) and `Coalesce()` to pick whichever one is actually present.
+- `varFilterContext`/`varActivePage` are computed fresh in `btnSend.OnSelect`,
+  not `App.OnStart` — `OnStart` runs once at launch and would otherwise
+  freeze a stale snapshot for the rest of the session.
+
+Real values verified end to end in both the Power Apps editor and the live
+Power BI service report. `docs/frontend.md`'s embedding and "Visual
+grounding" sections are rewritten to match this real design.
+
+**Phase 3, item 3 (static context bundle) — complete, with two real
+deviations from the documented seven-component list.** Proven first in
+`notebooks/phase3_static_context.ipynb`, then moved to
+`app/gateway/model_schema.py` (`TABLE_REGISTRY`, `MEASURE_REGISTRY`,
+`RELATIONSHIPS`, `PARAMETERS`, `MEASURE_DAX`, `MEASURE_NAMES` — all parsed
+once from the committed `model_schema.json`) and `app/gateway/context.py`
+(orientation bundle, `BIGQUERY_SCHEMA`, `SYSTEM_INSTRUCTIONS`, both few-shot
+sets, and the final assembly).
+
+- **Component order revised**: `SYSTEM_INSTRUCTIONS` moved first (role and
+  behavioral rules established before the model sees any reference
+  material — no caching cost either way, since the whole block is one
+  static, byte-identical prefix regardless of internal order), and the
+  few-shot examples split in two and interleaved with the schema they
+  demonstrate — DAX examples right after `PARAMETERS`, BigQuery examples
+  right after `BIGQUERY_SCHEMA` — rather than one trailing block.
+- **`get_bigquery_schema()`/`get_static_context()` are lazy, `@lru_cache`-decorated
+  functions, not the bare module-level constants the doc originally showed.**
+  `BIGQUERY_SCHEMA` needs a live `bigquery.Client()` call; eager construction
+  at import would make importing `app/gateway/context.py` require live
+  credentials, breaking Layer 1 tests — the same reasoning already applied
+  to Firestore elsewhere in the gateway. `@lru_cache` still guarantees the
+  "computed once, not per turn" byte-identical-prefix requirement; it just
+  moves *when* "once" happens from import time to first real use.
+- Real deviations found writing the few-shot examples, verified live against
+  the real dataset/model before being written down: `evaluation_metrics` has
+  one row per model *per split* — a DAX measure summed with no split filter
+  silently doubles (roughly) the real value; a measure can't be a filter's
+  comparison value directly inside `CALCULATETABLE` (assign it to a `VAR`
+  first); `TOPN(..., DESC)` selects the correct rows but `executeQueries`
+  does not guarantee they arrive sorted; `power_bi_shap_barplots` only
+  covers the four individual base models, never an ensemble. `MEASURE_REGISTRY`
+  also excludes the 5 numeric what-ifs' value measures now — `PARAMETERS`
+  already covers them fully (name, default, range), so listing them again
+  under their own single-measure table header was pure duplication;
+  `scripts/build_model_context.py` derives the exclusion set automatically
+  from the parameters it just built, no manual list needed.
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,
@@ -314,9 +431,11 @@ layer failed.
      detection — decided 2026-09-17, replacing an earlier `.pbip`/TMDL-parsing
      design, `docs/data-pipeline.md`) and read into static context at
      startup. This is what makes the semantic model deterministic to query
-     rather than retrieved. **Two open gaps, not yet resolved:** a table-count
-     mismatch between the two APIs, and no confirmed source for a what-if
-     parameter's `range` (`docs/data-pipeline.md`).
+     rather than retrieved. The table-count mismatch between the two APIs is
+     resolved (Power BI's auto-generated date tables — excluded by name), and
+     so is the what-if parameter `range` gap (read directly from each
+     parameter table's real values via `executeQueries`, not the calculated
+     table's formula) (`docs/data-pipeline.md`).
 
    **This has to precede the static context bundle**, not just the tools:
    four of its seven components (`TABLE_REGISTRY`, `MEASURE_REGISTRY`,

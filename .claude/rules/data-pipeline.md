@@ -91,16 +91,16 @@ measures reading a plain data column, unrelated to any parameter.
 **Auto date tables (`LocalDateTable_*`/`DateTableTemplate_*`) still need
 filtering** from both tables and relationships — a model-level artifact, not
 a parsing quirk, so it shows up in `INFO.VIEW.*` results the same as it did
-in TMDL.
+in TMDL. Same reason `INFO.VIEW.TABLES()` returns more tables than the
+Scanner API for the same dataset — the Scanner API excludes them on its own.
 
 **HTML-display measures are still excluded** the same way — manual list as
 the mechanism of record, a `<[a-z]` check on the `Expression` text as backstop.
 
-**Two open gaps, not yet resolved (`docs/data-pipeline.md`):** a table-count
-mismatch between the two APIs, and no confirmed source for a what-if
-parameter's `range` — the Scanner API shows zero calculated tables for this
-dataset, so the old TMDL parser's `GENERATESERIES(...)` capture has no
-equivalent yet.
+**One open gap, not yet resolved (`docs/data-pipeline.md`):** no confirmed
+source for a what-if parameter's `range` — the Scanner API shows zero
+calculated tables for this dataset, so the old TMDL parser's
+`GENERATESERIES(...)` capture has no equivalent yet.
 
 **Committed, so a schema change is a reviewable diff — and needs a redeploy**,
 since it's read once at import.

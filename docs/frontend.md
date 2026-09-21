@@ -42,36 +42,42 @@ building anything.
 **App type:** Canvas app — needed for layout control alongside an embedded
 report.
 
-- **Power BI report embedding — via the `Power BI tile` control's `TileUrl`
-  property override, not the standard Workspace/Dashboard/Tile dropdowns and
-  not an `HTML text` control.** Confirmed empirically (2026-09-13):
-  - **The Workspace/Dashboard/Tile dropdown path only works for actual
-    Dashboard objects** (Power BI's pinned-tile-board artifact type) — it
-    can't target a Report (the interactive, multi-page artifact people
-    usually mean by "dashboard"). If the dropdown's Dashboard list is empty,
-    that's why — check the content's actual type in Power BI first.
-  - **An `HTML text` control with a raw `<iframe>` does not work** — tested
-    directly (a plain `<iframe src="https://example.com">` also rendered
-    blank), confirming the control doesn't render iframes at all, not a
-    Power-BI-specific auth failure. Don't reach for this approach again.
-  - **The fix: drop a `Power BI tile` control, but don't touch its
-    Workspace/Dashboard/Tile properties.** In the formula bar's property
-    dropdown (top-left, not the right-hand pane), select **`TileUrl`** and
-    set it directly to the report's secure embed link — from the report in
-    Power BI Service: **File → Embed report → Website or portal**, copy
-    the plain link (**not** the `<iframe>` HTML, and never "Publish to
-    web," which is unauthenticated and would make the data public). This
-    renders the full interactive report through a native control, still
-    respecting RLS and view permissions, with no PCF custom component
-    needed.
+- **Embedding direction: the chat app is embedded as a Power Apps visual
+  inside the Power BI report — not a Power BI report embedded inside Power
+  Apps.** The reverse direction doesn't work for this dashboard: a
+  `Power BI tile` control only pushes filters one-way through a `TileUrl`
+  OData query string, which doesn't reach field parameters (Microsoft's own
+  docs and multiple independent reports confirm this), and an `HTML text`
+  control with a raw `<iframe>` doesn't render at all — tested directly, even
+  with a plain non-Power-BI URL.
+  - In the report, add the **Power Apps visual** and click **Create new** —
+    not an existing app selected in. Selecting an existing app leaves
+    `PowerBIIntegration.Data` (below) permanently empty; only an app created
+    this way gets a working data connection. An existing app's screen can
+    still be ported in afterward by copying its controls between two Studio
+    tabs open side by side — formulas, including custom connector calls,
+    carry over cleanly since the connector is an environment-level resource.
+  - **`PowerBIIntegration.Data`** is a live, read-only table reflecting
+    whatever fields/measures are dragged into the visual's **Data** well —
+    configured independently per report page, and used for all dashboard-state
+    capture (filters, parameters, slicers, active page — see "Visual
+    grounding" below).
+  - **Browser support:** Edge and Chrome only. Safari is view-only with a
+    privacy caveat; Firefox and other browsers are unsupported.
+  - **Screen size must be set manually to match the visual's placed size —
+    it doesn't auto-scale.** Check the visual's pixel width/height in the
+    report's Format pane, and set the Screen's `Width`/`Height` properties to
+    match exactly. A mismatch shows as a hard crop (part of the layout
+    visible, the rest cut off), not a proportional shrink.
 - **`TextInput` + send `Button` + `Gallery`**, the Gallery bound to a
   `colChat` collection.
 - **Custom connector call on send — positional arguments, not a record:**
-  `AnalyticsAgent.PostAsk(question, conversation_id)` — confirmed empirically
-  (2026-09-18): a flat request-body schema like `AskRequest`'s gets flattened
-  into separate positional parameters by Power Apps' connector generation,
-  not exposed as one inline record. Optional fields (`image_base64`,
-  `filter_context`, `active_page`) can be omitted entirely.
+  `AnalyticsAgent.PostAsk(question, conversation_id)` — a flat request-body
+  schema like `AskRequest`'s gets flattened into separate positional
+  parameters by Power Apps' connector generation, not exposed as one inline
+  record. Optional named parameters follow as a trailing options record:
+  `{filter_context: ..., active_page: ...}` — see "Visual grounding" below for
+  how those two are built. `image_base64` is omitted entirely until Phase 4.
 
 **Both roles render through an HTML text control — not the Label-for-user
 split originally planned here.** A plain Label can't support the
@@ -192,49 +198,88 @@ Resolution: a standard `Add picture`/`Attachment` control — simpler to build
 than the original plan, not harder.
 
 **What's sent each turn:** the question (text) · an *optional* uploaded
-screenshot (base64) · current filter/slicer context (structured JSON, read
-directly from Power Apps controls — entirely unaffected by the screenshot
-question) · user identity.
+screenshot (base64) · current filter/parameter/slicer context, read from
+`PowerBIIntegration.Data` · the active report page · user identity.
 
-**Field-parameter / what-if slider values are part of that same filter
-context — not a separate capture path.** The financial-impact page uses
-sensitivity sliders to adjust modeling assumptions. Underneath, *both*
-Power BI mechanisms that produce them are filters on a synthetic table:
-older **what-if parameters** are a disconnected table read via
-`SELECTEDVALUE()`, and newer **field parameters** are a calculated table
-tagged as a parameter table, where the slicer places a filter on it and
-Power BI detects the selection.
+**Capture is entirely manual, field by field — nothing is automatic.**
+`PowerBIIntegration.Data` only ever reflects whatever DAX measures are
+dragged into the Power Apps visual's Data well on the current report page;
+there's no equivalent of a "give me every active filter" call. Two kinds are
+captured, matching `model_schema.json`'s `parameters[]`:
+- **Numeric what-ifs** — the model already exposes a `SELECTEDVALUE(...)`
+  value measure for each one (`.claude/rules/data-pipeline.md`); drag those
+  in directly.
+- **Dimensional slicers** — a raw column can't be dragged in safely (it fans
+  the well's single-row table out to one row per selected value); instead,
+  add one small `SELECTEDVALUE(column)` measure per slicer and drag that in.
+  Blank on multi-select is a real "no single value" signal, not a bug.
 
-**Slicer state needs its own capture call — `getFilters()` does not return
-it.** This is the thing most likely to be got wrong, because the half that's
-true is convincing: slicer selections *are* expressed as ordinary filter
-objects (`IBasicFilter` and friends), so the payload shape stays uniform. But
-they're reached through a different method. A capture built only on
-`getFilters()` returns **nothing** for the sensitivity sliders — not a wrong
-value, an absent one.
+**Field parameters are excluded, permanently — not a gap to revisit.** Any
+`SELECTEDVALUE(...)` measure referencing a field-parameter table (e.g.
+`Evaluation Metric Parameter`) throws "This might be caused by a capacity or
+license issue" when added to the visual's Data well — isolated specifically
+to field-parameter tables, not a total-field-count limit; everything else in
+the well is unaffected. No `Selected_*` measures for these exist in the
+model. **Querying the measure directly via `run_dax_query` isn't a
+workaround either:** that call runs under the service principal through a
+stateless `executeQueries` request, with no attachment to any specific
+user's live report session. `SELECTEDVALUE()` reflects the filter context of
+*that query*, never what a separate, already-open report tab currently has
+selected — there's no shared "current user selection" state living in the
+semantic model at all. Which evaluation metric or ensemble combination is
+currently displayed is simply unrecoverable with this architecture.
 
-Four calls against the embedded report, packed into the request body:
+**`filter_context` is a list of `{filter_column, value}` pairs**, reusing
+`model_schema.json`'s `filter_column` naming so the agent can match a
+captured value straight to its parameter:
+```json
+[
+  {"filter_column": "Conversion Rate[Conversion Rate]", "value": "0.06"},
+  {"filter_column": "dataset_split_dimension[dataset_split]", "value": "Test"}
+]
+```
+Every value is sent as text, numeric ones included — a Power Fx `Table()`
+literal mixing numeric and text values in one column errors rather than
+widening silently, so each is `Text(...)`-coerced first. The agent composes
+DAX from these regardless of JSON type.
 
-```js
-const activePage    = await report.getActivePage();      // -> active_page
-const reportFilters = await report.getFilters();         // report-level
-const pageFilters   = await activePage.getFilters();     // page-level
-const slicers       = await activePage.getSlicers();     // slicer visuals
-const slicerStates  = await Promise.all(
-  slicers.map(s => s.getSlicerState().catch(() => null))
+**Built as `{Value: ParseJSON(JSON({filter_column: ..., value: ...}))}` per
+row, not the record directly.** `filter_context` is `list[dict]` in
+`AskRequest` — a schemaless array — and Power Apps' connector import
+surfaces that as one `Value` column typed `Dynamic`. Power Fx has no literal
+syntax for `Dynamic`, so each row's real filter object is round-tripped
+through `ParseJSON(JSON(...))` to produce one.
+
+**`active_page` can't be a measure — DAX has no concept of report pages.**
+Captured instead via one hardcoded constant measure per page (e.g.
+`Active_Page_ModelEval = "Model_Evaluation"`), each dragged into only that
+page's own Data well. Read with duck-typed field access, since each page's
+real `PowerBIIntegration.Data` schema differs:
+```
+Set(
+    varActivePage,
+    With(
+        {raw: ParseJSON(JSON(First(PowerBIIntegration.Data)))},
+        Coalesce(Text(raw.Active_Page_ModelEval), Text(raw.Active_Page_FinancialImpact))
+    )
 );
 ```
+`Coalesce()` treats blank and empty string alike, so whichever page's measure
+is actually present wins. `active_page` is its own request field, not part of
+`filter_context` — a page name isn't filterable; filters describe the *data*,
+the active page describes what the user is *looking at*.
 
-- **`getSlicers()` is page-scoped** — slicers on pages the user isn't viewing
-  aren't captured. Correct for an agent answering about the current view, but
-  a deliberate scope choice, not an oversight.
-- **`getSlicerState()` throws `visualConfigIsNotInitialized`** on a visual
-  that hasn't rendered yet. The `.catch()` is required, not defensive.
-- **`getActivePage()` returns `displayName`** — that's what matches
-  `get_page_info`'s page names, not the internal `name`.
-- **`active_page` is its own request field, not part of `filter_context`.** A
-  page name isn't filterable; filters describe the *data*, the active page
-  describes what the user is *looking at*. They feed different tools.
+**Computed in `btnSend.OnSelect`, not `App.OnStart`.** `OnStart` runs once at
+launch; capturing there would freeze a stale snapshot for the rest of the
+session. Both variables are rebuilt fresh on every send, then passed as named
+connector parameters:
+```
+Set(varAnswer, IfError(
+    AnalyticsAgent.PostAsk(localQuestion, varConversationId,
+        {filter_context: varFilterContext, active_page: varActivePage}),
+    Blank()
+));
+```
 
 **A missing parameter filter is worse than a missing dimensional one.** A
 missing dimensional filter gives the right number for the wrong slice; a
@@ -249,11 +294,6 @@ exists because a forecast means the *agent* generating a number with no
 live tool call to cite. This is the opposite: a real, pre-built DAX
 measure computed by Power BI's engine from a parameter someone already
 modeled — as governed and citable as any other `run_dax_query` result.
-
-**Resolved, was an open item:** the concern was that a scope mismatch would
-silently drop the sensitivity slider. It's worse than scope — slicer state
-isn't in `getFilters()` at all. Now handled by an explicit
-`getSlicers()`/`getSlicerState()` pass (`.claude/rules/gateway.md`).
 
 ## Response formatting
 

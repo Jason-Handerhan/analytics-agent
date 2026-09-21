@@ -403,9 +403,18 @@ neighbour.
 
 ## `bigquery_schema` (resource, not a tool)
 
-Reads `INFORMATION_SCHEMA` + native column descriptions — **once at process
-start, into a module-level constant**, then concatenated into the cached
-static block (`.claude/rules/gateway.md`).
+**Not `INFORMATION_SCHEMA` — confirmed, not assumed.** `INFORMATION_SCHEMA.COLUMNS`
+has no description field at all (checked directly against the real dataset).
+Column *and* table descriptions only exist via the table metadata API —
+`client.list_tables(dataset)` + `client.get_table(ref)`, which returns both
+structure and native descriptions in one call. `INFORMATION_SCHEMA` plays no
+role here.
+
+**Read on first real use, cached for the life of the process, not a bare
+module-level constant** — a real `bigquery.Client()` call executed eagerly
+at import would make importing the module require live credentials,
+breaking Layer 1 tests. An `@lru_cache`-decorated getter gets the same
+"once per process" guarantee lazily instead (`.claude/rules/gateway.md`).
 
 **No per-request read and no TTL.** Not for cost: any re-read risks the text
 differing by a byte — a reordered column, a changed description — and a cache

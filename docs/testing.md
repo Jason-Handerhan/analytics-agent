@@ -137,10 +137,8 @@ two open gaps are resolved, a parameter missing `range` should assert `null`
 there rather than silently passing with an absent key.
 
 **Layer 2, run manually, not fixture-covered:** the actual `executeQueries`
-and Scanner API calls succeeding against the real dataset, and the two open
-gaps (table-count mismatch between the two APIs; no confirmed source for a
-what-if parameter's range) — those need the real dashboard to investigate,
-not something a fixture can stand in for.
+and Scanner API calls succeeding against the real dataset — that needs the
+real dashboard to investigate, not something a fixture can stand in for.
 
 ## 4. Chat history reaches the prompt via Firestore
 

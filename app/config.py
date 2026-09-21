@@ -1,8 +1,16 @@
+import pathlib
+
 from google.cloud import secretmanager
 
 # GCP Project Configuration
 GCP_PROJECT_ID = "instacart-ml-model"
 GCS_CHART_BUCKET = "instacart-ml-model-charts"
+
+# Repo-relative paths
+CONTEXT_DIR = pathlib.Path(__file__).resolve().parent.parent / "context"
+
+# LLM
+MODEL = "claude-sonnet-5"
 
 # Microsoft Entra ID Configuration
 TENANT_ID = "7e6d319c-ffb2-4bbf-8865-d2e7580a8998"
@@ -11,6 +19,9 @@ EXPECTED_AUDIENCE = "api://4b86032f-4507-4239-bf90-a9b1c33c571c"
 # Power BI Dataset ID
 POWER_BI_DATASET_ID = "03fe95af-12af-4e00-bbd6-241e942f76bc"
 POWER_BI_WORKSPACE_ID = "8e20abd3-703e-46b8-9832-950249767864"
+
+# agent_safe (.claude/rules/mcp-tools.md) — the only dataset agent-sa can read
+AGENT_SAFE_DATASET = "agent_safe"
 
 # agent_telemetry (.claude/rules/telemetry.md) — location: US
 TELEMETRY_DATASET = "telemetry"
