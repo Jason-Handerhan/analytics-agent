@@ -70,7 +70,7 @@ isn't missed when this phase starts.
 to real files: `app/mcp_server/server.py` (the `FastMCP` instance + `ping`,
 placeholder until Phase 3 registers real tools) and `app/main.py`.
 
-One real deviation from `.claude/rules/mcp-tools.md`: the MCP server runs as
+One real deviation from `.claude/rules/tools.md`: the MCP server runs as
 its **own `uvicorn.Server`** alongside the gateway's, both launched via
 `asyncio.gather()` in `app/main.py` — not mounted into the gateway's FastAPI
 app. Decided to keep the MCP server genuinely separable (closer to a
@@ -90,7 +90,7 @@ reliable; only the propagation code this project actually wrote.
 That same verification pass caught a second bug before anything depended on
 it: `app/main.py` called `mcp.http_app(path="/")`, which mounts the MCP
 protocol endpoint at `/` instead of FastMCP's default `/mcp` — silently
-breaking the client URL documented in `mcp-tools.md`
+breaking the client URL documented in `tools.md`
 (`http://localhost:PORT/mcp`). Fixed by dropping the explicit `path`
 argument; confirmed via `docker exec` that `/mcp` now returns the expected
 `406` (endpoint alive, rejecting the plain GET only for missing MCP `Accept`
@@ -252,11 +252,11 @@ sets, and the final assembly).
   (not yet built), so it moved to `app/orchestrator/context.py`.
   `model_schema.py` has two consumers headed to two different future
   services — the `agent` node and the `get_measure_dax` tool
-  (`app/mcp_server/`, `.claude/rules/mcp-tools.md`) — so it stays a
+  (`app/mcp_server/`, `.claude/rules/tools.md`) — so it stays a
   top-level, genuinely shared module (`app/model_schema.py`, a sibling to
   `app/config.py`) rather than nested under either. Decided this way
   specifically so a future gateway/orchestrator/MCP-server container split
-  (already the documented target shape, `.claude/rules/mcp-tools.md`) is a
+  (already the documented target shape, `.claude/rules/tools.md`) is a
   lift-and-shift — each service's Dockerfile copies in whatever shared
   top-level modules it needs — rather than a real refactor. The detailed
   "Assembling the prompt"/"Model schema"/"Caching dispatch" content moved
@@ -403,7 +403,7 @@ twice under two different names.
 ## Phase 2 — The MCP server
 
 1. **Stand up the real FastMCP server** — `streamable_http` transport,
-   localhost co-located (`.claude/rules/mcp-tools.md`). **Confirm the exact
+   localhost co-located (`.claude/rules/tools.md`). **Confirm the exact
    `MultiServerMCPClient`/FastMCP parameter names here** — this is the first
    real dependency on them, so don't assume from memory or docs.
 2. **Prove it end-to-end with a trivial tool** — something that returns a
@@ -503,7 +503,7 @@ layer failed.
       parameters, from the same artifact. Structural facts needed on nearly
       every DAX composition; never retrieved.
    5. **`bigquery_schema`** — read once at startup into a module constant,
-      not per-request (`.claude/rules/mcp-tools.md`).
+      not per-request (`.claude/rules/tools.md`).
    6. **System instructions.**
    7. **The few-shot examples** (`.claude/rules/gateway.md`).
 
@@ -516,8 +516,10 @@ layer failed.
    model swap stays a one-line config change.
 4. **The graph skeleton, before any tool exists.** Five nodes — `agent`,
    `call_tool`, `check_length`, `verify`, `finalize` — wired with an empty
-   tool list (`.claude/rules/orchestrator.md`). `route_entry` and
-   `execute_approved` are approval-specific and land with #11.
+   tool list (`.claude/rules/orchestrator.md`). `agent` writes
+   `answer_markdown` itself whenever it has no tool calls; no separate
+   structured-output call. `route_entry` and `execute_approved` are
+   approval-specific and land with #11.
    **Consume with `astream`, not `ainvoke`, from the start** — status
    updates depend on it, and switching invocation style later means touching
    every call site (`.claude/rules/gateway.md`). Status *strings* land in
@@ -541,13 +543,12 @@ layer failed.
      none benefits from waiting.
 
    The schema resource comes first because it's what grounds the SQL.
-6. **Verification** (`.claude/rules/orchestrator.md`) —
-   `citation_check`, `coverage_check`, `verify_claim_value`, and the
-   honest-decline path. Global rather than tool-scoped, but it exists
-   *because* of numeric claims, so it lands as soon as the first tool that
-   produces them does.
+6. **Verification** (`.claude/rules/orchestrator.md`) — `verify_response`'s
+   pooled numeric matching, and the honest-decline path. Global rather than
+   tool-scoped, but it exists *because* of numeric answers, so it lands as
+   soon as the first tool that produces them does.
 7. **`run_dax_query` with its guardrails**, plus `get_measure_dax`
-   (`.claude/rules/mcp-tools.md`). Grounding is already structural — the
+   (`.claude/rules/tools.md`). Grounding is already structural — the
    registries landed in step 3 — so there's no search-before-query pairing
    to build. DAX's own guardrails land here: `TOPN` steering plus the
    deterministic post-fetch row check, and best-effort cancellation.
@@ -644,6 +645,13 @@ XMLA is a documented backup only. REST is the plan.
 - `run_projection` — a plain deterministic tool (no LLM or sandbox inside),
   `is_projection` response field, distinct "unverified" card. Default stays
   "decline forecasts outright."
+- **A compute tool for genuinely cross-domain derivations** — a difference,
+  ratio, or rank comparison between a BigQuery value and a DAX value, which
+  no single query can produce since they're separate engines. Deferred: the
+  domain split (`.claude/rules/tools.md`) already keeps this rare, and
+  same-domain derivations are handled by pushing the computation into the
+  query itself (`.claude/rules/orchestrator.md`). Revisit if testing shows
+  a bigger need than expected. Full design: `docs/cross-domain-compute.md`.
 - **Narrate the sensitivity assumption** — have the answer state the
   field-parameter value it used (*"$5M at a 10% adoption assumption"*)
   rather than applying it silently. A bare number reads as more certain

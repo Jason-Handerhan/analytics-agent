@@ -37,7 +37,10 @@ DPI        = 150             # crisp on high-DPI displays, still a small PNG
 GRID_ALPHA = 0.3             # visible but recessive behind the data
 
 class ChartSpecBase(BaseModel, ABC):
-    source_tool_call_id: str
+    # source_tool_call_id is NOT here. It's on the model-facing schema only
+    # (below, in GenerateChartToolCallArgs) — this base is shared by the
+    # REAL MCP tool's schema too, which takes resolved `data` instead and
+    # must never see a tool_call_id at all (.claude/rules/tools.md).
     title: str | None = None
     # Axis labels ARE exposed — substantive, not cosmetic. Raw column names
     # are often unreadable (DAX returns `Products[department]`), and only the
@@ -519,31 +522,37 @@ structural guarantee.
 **The fix — wrap it, so schema generation goes through Pydantic's own
 well-tested path:**
 
+**Two wrapper models, not one — same substitution pattern as
+`run_bigquery_sql`'s `conversation_id`, just inverted (`.claude/rules/tools.md`).**
+`generate_chart` is MCP-hosted with a fully generic, shareable contract: it
+takes `data` directly, and has no idea a "tool call" or a conversation even
+exists. The model never sees `data` — it sees `source_tool_call_id` instead,
+so it never re-transcribes rows through the context window (token cost, and
+a paraphrased number would break the verification contract). `dispatch_tool`
+is the only thing that ever sees both shapes, and it's what translates one
+into the other.
+
 ```python
+# The REAL MCP tool's args — never a tool_call_id, never conversation state.
+# Usable by any caller with its own data, this project's orchestrator included.
 class GenerateChartArgs(BaseModel):
+    data: list[dict]
     spec: ChartSpec        # the Annotated discriminated union, as a FIELD
 
-def get_tool_call_result(tool_call_id: str,
-                        tool_calls: list[ToolCallRecord]) -> list[dict] | None:
-    """Rows from a tool call THIS turn. Scoped deliberately — charting a
-    previous turn's result would render stale numbers under a fresh
-    question."""
-    rec = next((tc for tc in tool_calls if tc["id"] == tool_call_id), None)
-    return None if rec is None or not rec["success"] else rec["result"]
+# The MODEL-FACING schema — bound via bind_tools(), never sent to the MCP
+# server as-is. Same spec fields (chart_type, x_label, ...); data replaced by
+# a reference the model can actually supply without hallucinating numbers.
+class GenerateChartToolCallArgs(BaseModel):
+    source_tool_call_id: str
+    spec: ChartSpec
 
-# tool_calls is INJECTED by dispatch_tool from state — same pattern as
-# conversation_id and bytes_consumed. Never in the args model: the model
-# supplies only source_tool_call_id (.claude/rules/mcp-tools.md).
-def generate_chart(args: GenerateChartArgs,
-                   tool_calls: list[ToolCallRecord]) -> ChartResult:
-    spec = args.spec
-    raw_rows = get_tool_call_result(spec.source_tool_call_id, tool_calls)
-    if raw_rows is None:
-        raise ToolError(f"No tool call '{spec.source_tool_call_id}' found this turn.")
+def generate_chart(args: GenerateChartArgs) -> ChartResult:
+    """The real MCP tool. No injected state — data has already been
+    resolved by dispatch_tool before this is ever called."""
     # Rows are already list[dict] with coerced types — the query tools
     # normalize at the source, so this is a plain construction.
-    df = pd.DataFrame(raw_rows)
-    missing = [f for f in spec.required_fields() if f not in df.columns]
+    df = pd.DataFrame(args.data)
+    missing = [f for f in args.spec.required_fields() if f not in df.columns]
     if missing:
         # Carry the REMEDY, not just the diagnosis. This error fires exactly
         # when the model is re-planning, which is better timing than any
@@ -552,8 +561,29 @@ def generate_chart(args: GenerateChartArgs,
         # the model's context for the whole turn, so naming the gap is enough.
         raise ToolError(
             f"Field(s) {missing} not in source data. Available: {list(df.columns)}")
-    fig = spec.render(df)
+    fig = args.spec.render(df)
     return ChartResult(chart_url=render_and_upload(fig))
+```
+
+**Resolution — `source_tool_call_id → data` — happens in `dispatch_tool`, not
+in the tool.** No separate cache needed: `state["tool_calls"]` already holds
+every call's native-Python `result` this turn
+(`.claude/rules/orchestrator.md`).
+
+```python
+def resolve_chart_data(tool_call: dict, tool_calls: list[ToolCallRecord]) -> dict:
+    """Rewrite a model-facing chart call into the real MCP tool's args.
+
+    Scoped to THIS turn's tool_calls deliberately — charting a previous
+    turn's result would render stale numbers under a fresh question.
+    """
+    call_args = GenerateChartToolCallArgs.model_validate(tool_call["args"])
+    rec = next((tc for tc in tool_calls if tc["id"] == call_args.source_tool_call_id),
+               None)
+    if rec is None or not rec["success"]:
+        raise ToolError(
+            f"No tool call '{call_args.source_tool_call_id}' found this turn.")
+    return {"data": rec["result"], "spec": call_args.spec.model_dump()}
 ```
 
 ## Delivery — a URL, never image bytes

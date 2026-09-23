@@ -91,7 +91,7 @@ State each as "in production I'd do X; for this build I did Y because Z."
 | Power Apps licensing | Org-wide Premium seats | Free Developer Plan for solo build/test |
 | Power BI licensing | Fabric/Premium capacity | PPU, one seat, only if XMLA is ever pulled off the shelf as a backup (not planned — see §8) |
 | Per-user data access | Per-user RLS/authorization | Single shared service account; access gated at the dashboard level (`.claude/rules/gateway.md`) |
-| Chart image delivery | Private bucket + signed URLs with expiry | **Public bucket**, unguessable `uuid4()` filenames — anyone with the URL can view it permanently. Fine for public Kaggle data; not for real operational data (`.claude/rules/mcp-tools.md`) |
+| Chart image delivery | Private bucket + signed URLs with expiry | **Same as enterprise, not by choice** — a public bucket was the original plan, but this project's GCP account enforces uniform bucket-level access with no Organization/Folder resource to override it (personal, org-less account), so per-object public ACLs were never available at all. Signed URLs were the only path forward (`docs/chart-tool.md`) |
 | Frontend platform | React (or equivalent SPA) + `powerbi-client-react`, calling this same gateway unchanged | **Power Apps** — deliberate despite a real scaling ceiling: custom connectors are always premium, no exception (~$20/user/month; the cheaper per-app tier ended Jan 2026). Accepted because it's fully built and the primary target roles evaluate this surface directly. React was seriously evaluated — interactivity, filter capture, and auth all verified workable — and is planned as **Phase 2** of this project (§6) — a future rebuild, not an open gap |
 | Uploaded-image content | DLP pre-check: OCR for PII, redact flagged regions before the LLM sees the image | **No scanning.** Internal users attaching dashboard screenshots; the provider's own baseline safety classification is the only filter. Real gap in a production/public deployment — designed and deferred to Phase 7 (§6) |
 | Uploaded image retention | **Whether to retain at all, and for how long, is a governance/audit policy decision, not an engineering one** — implementation follows from that: redacted image (never the raw original), private signed-URL bucket, tiered Standard→Archive, correlated via a new `uploaded_image_uri` telemetry field | **Not built** — out of scope for a portfolio project |
@@ -253,7 +253,7 @@ Cloud SQL affordable, and removes the reason polling exists — so SSE and
 ## 8. Backend services — platform choices and the XMLA backup
 
 Build spec is in the rules: `.claude/rules/gateway.md` (endpoints, auth,
-timeout, Markdown→HTML) and `.claude/rules/mcp-tools.md` (`executeQueries`,
+timeout, Markdown→HTML) and `.claude/rules/tools.md` (`executeQueries`,
 response shape, quota, the DAX-vs-BigQuery split). What stays here is why the
 platform and layering are what they are, and the fallback that was designed
 but not built.
@@ -315,7 +315,7 @@ MCP layer.
 ## 9. Orchestrator — what was evaluated and deferred
 
 Build spec lives in the rules: `.claude/rules/orchestrator.md` (the loop,
-verification, guardrails), `.claude/rules/mcp-tools.md` (the eight tools),
+verification, guardrails), `.claude/rules/tools.md` (the eight tools),
 and `docs/chart-tool.md` (chart specs). What stays here is what was
 considered and not built.
 
@@ -327,7 +327,7 @@ checkpointer. This is the **specified upgrade path**, not a vague deferral —
 enough diligence was done that adopting it later is a scoped change rather
 than a redesign.
 
-**What it would retire:** `PendingApproval`'s twelve fields; the carry-vs-reset
+**What it would retire:** `PendingApproval`'s eleven fields; the carry-vs-reset
 rules for `iteration_count`/`bytes_consumed`; the `execute_approved` and
 `route_entry` nodes; and the "resume is a fresh graph run" reasoning.
 `interrupt()` resumes *in place* — nothing to re-seed, no loop to re-enter.
@@ -526,7 +526,7 @@ Workload Identity Federation to remove the long-lived credential."*
   agent-written code fences**, since they share the same renderer override;
   verifying one effectively verifies the other.
 - Whether the installed FastMCP version preserves `Field(discriminator=...)`
-  when a discriminated union is a field on a wrapping model (`.claude/rules/mcp-tools.md`'s
+  when a discriminated union is a field on a wrapping model (`.claude/rules/tools.md`'s
   `GenerateChartArgs`). The wrapping fix is the correct pattern
   regardless; this confirms it's sufficient.
 - **Strict-mode / constrained-decoding parameter surface per provider.**

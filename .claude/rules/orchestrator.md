@@ -17,6 +17,11 @@ paths:
 
 ## The verification contract — implement exactly
 
+**`Claim` is a wire-contract placeholder, not something any node produces.**
+Kept only because `AgentResponse` still types against it — always `[]`. Real
+faithfulness scoring works directly off stored `answer_markdown`/`tool_calls`
+(`docs/llm-judge.md`), not a structured claims list.
+
 ```python
 class Claim(BaseModel):
     text: str
@@ -50,10 +55,11 @@ superset carried *through* the graph — scratchpad included.
 from typing import Annotated, TypedDict
 from datetime import datetime
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 class ToolCallRecord(TypedDict):
-    id: str              # what Claim.source_tool_call_id points at — without
-                         # this, verify_claim_value has nothing to resolve
+    id: str              # matches the AIMessage.tool_calls id — what
+                         # generate_chart's source_tool_call_id resolves
     name: str
     args: dict            # the query lives HERE — {"query": "SELECT ..."} or
                           # {"dax": "EVALUATE ..."}. No separate queries list:
@@ -69,10 +75,6 @@ class ToolCallRecord(TypedDict):
     started_at: datetime
     completed_at: datetime
 
-class TimestampedMessage(TypedDict):
-    message: BaseMessage      # the LangChain object, unmodified
-    timestamp: datetime
-
 class TurnError(TypedDict):
     stage: str                # a node name: "execute_approved" | "agent" |
                               # "call_tool" | "check_length" | "verify"
@@ -81,31 +83,41 @@ class TurnError(TypedDict):
     occurred_at: datetime
 
 def append_list(existing: list, new: list) -> list:
-    """Accumulate across supersteps instead of last-write-wins.
-
-    Required on every field a node appends to across MULTIPLE loop iterations.
-    Without it, batch 2's `call_tool_node` return REPLACES batch 1's records:
-    a claim citing an earlier call fails verification, `generate_chart` can't
-    resolve an earlier `source_tool_call_id`, and telemetry loses all but the
-    final batch. Also replaces LangGraph's `add_messages`, whose dedup-by-id
-    and update-in-place behavior is for chat UIs that edit messages — this
-    graph only appends forward.
-    """
+    """Accumulates a list across graph supersteps."""
     return existing + new
 
 class AgentState(TypedDict):
     # Set once, at invocation
     question: str
     conversation_id: str
+    user_id: str                 # claims["oid"] — same source as sessions'
+                                 # own user_id (`.claude/rules/gateway.md`).
+                                 # finalize needs it directly to call
+                                 # write_telemetry_row itself
+    turn_started_at: datetime    # set at the top of the gateway's
+                                 # run_agent_turn, before graph.astream(...)
+                                 # — finalize's other write_telemetry_row arg
     filter_context: list[dict]
     active_page: str | None      # from report.getActivePage().displayName;
-                                 # NOT a filter — feeds get_page_info only
+                                 # NOT a filter — folded into the HumanMessage
+                                 # each turn (general grounding) AND injected
+                                 # into get_page_info directly (`.claude/rules/tools.md`)
     image_base64: str | None
-    conversation_history: list[dict]   # prior turns, read from Firestore before
-                                       # the graph starts. NOT `messages` below.
 
-    # Accumulated during the loop
-    messages: Annotated[list[TimestampedMessage], append_list]
+    # Seeded at invocation with reconstructed history plus the question
+    # (`.claude/rules/gateway.md`), then accumulated during the loop. Plain
+    # BaseMessage, not a wrapper — passes straight to
+    # model.ainvoke()/bind_tools() calls with no unwrap step.
+    # LangGraph's own add_messages, not append_list: nothing here ever
+    # re-emits a message sharing an id with an earlier one, so its
+    # dedup-by-id/update-in-place behavior never triggers — it just appends,
+    # same as append_list would, without a hand-rolled reducer to maintain.
+    # A per-message timestamp was tried and dropped — never read anywhere,
+    # and it forced an unwrap at every single site touching this field
+    # (which is also what made add_messages unusable in the first place).
+    # Per-tool-call timing already exists on ToolCallRecord; per-LLM-call
+    # timing is already in LangSmith.
+    messages: Annotated[list[BaseMessage], add_messages]
     tool_calls: Annotated[list[ToolCallRecord], append_list]
     iteration_count: int
 
@@ -114,7 +126,6 @@ class AgentState(TypedDict):
     verification_retry_count: int
     length_retry_count: int
 
-    claims: Annotated[list[Claim], append_list]
     verified: bool               # set by verify_node; the routing condition
                                  # out of it. Not on AgentResponse — callers
                                  # get a verified answer or an honest decline,
@@ -142,11 +153,11 @@ class AgentState(TypedDict):
 
     # Guardrail outcomes
     needs_approval: bool
-    pending_queries: list[str]     # plural — every BigQuery query to run on
-                                   # approve. Also the route_entry branch:
+    pending_queries: list[dict]    # {id, query} — every BigQuery call to run
+                                   # on approve. Also the route_entry branch:
                                    # non-empty means this is a resumed turn.
-    deferred_dax: list[str]        # DAX deferred at the pause (its results
-                                   # would otherwise sit in Firestore).
+    deferred_dax: list[dict]       # {id, dax} — deferred at the pause (its
+                                   # results would otherwise sit in Firestore).
                                    # Seeded from PendingApproval on resume.
     estimated_cost: str | None
     cost_cap_exceeded: bool
@@ -165,10 +176,6 @@ update, which is what gives the telemetry writer a source for the `cancelled`
 field. `conversation_id` in state is all a node or tool needs for
 that lookup. See "Cancellation" below.
 
-**`conversation_history` vs `messages`** — cross-turn history read from
-Firestore, versus this turn's own tool-calling scratchpad. Different
-lifetimes, different consumers.
-
 **Two `AgentResponse` fields have no state counterpart — produce them when
 building the response:**
 - **`pending_query`** — state holds `pending_queries` (plural, all of them).
@@ -177,63 +184,62 @@ building the response:**
 - **`suggested_follow_ups`** — generated fresh when the answer is written,
   not accumulated during the loop. Nothing carries it in state.
 
-**Three deterministic checks — plain Python, never another LLM call.**
+**One deterministic check — plain Python, never another LLM call.**
+
+**Not per-claim citation — pooled matching.** Every number in
+`answer_markdown` (prose or a markdown table) must match *some* value from
+this turn's non-`search_docs` tool results — not a value from one specific
+cited call. `Claim.source_tool_call_id` isn't checked against anything;
+`Claim` is a wire-contract placeholder, not part of this (below). Dropped
+per-claim citation deliberately: the citation is exactly as model-produced
+and unverified as the number itself, so it adds a false-negative failure
+mode (a real number rejected over a mismatched call id) without closing a
+real gap — pooled matching alone is both simpler and no less rigorous.
 
 ```python
-def citation_check(claim: Claim, tool_names: dict[str, str]) -> bool:
-    """A numeric claim must cite a tool call from THIS turn that isn't
-    search_docs. tool_names maps this turn's tool_call ids -> tool name."""
-    if claim.numeric_value is None:
-        return True                       # non-numeric claims pass vacuously
-    tool = tool_names.get(claim.source_tool_call_id)
-    return tool is not None and tool != "search_docs"
+def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
+    """Every numeric leaf across this turn's non-search_docs tool results."""
+    pool: set[float] = set()
+    for tc in tool_calls:
+        if tc["success"] and tc["name"] != "search_docs":
+            pool.update(extract_numeric_leaves(tc["result"]))
+    return pool
 
-def coverage_check(answer_markdown: str, claims: list[Claim]) -> bool:
-    """Every number in the prose must be backed by some claim. Catches a
-    number stated with no claim object at all."""
-    claimed = {c.numeric_value for c in claims if c.numeric_value is not None}
+def verify_response(answer_markdown: str, tool_calls: list[ToolCallRecord]) -> tuple[bool, str | None]:
+    pool = build_numeric_pool(tool_calls)
     for token in extract_numeric_tokens(answer_markdown):
-        if not any(abs(token - v) < 0.01 for v in claimed):
-            return False
-    return True
-
-def verify_claim_value(claim: Claim, tool_call_results: dict[str, Any]) -> bool:
-    """The cited value must actually appear in that tool call's raw result."""
-    if claim.numeric_value is None:
-        return True
-    raw = tool_call_results.get(claim.source_tool_call_id)
-    return raw is not None and value_appears_in_result(
-        claim.numeric_value, raw, tolerance=0.01)
-```
-
-**Composition is load-bearing — none is sufficient alone:**
-
-```python
-def verify_response(response, tool_names, tool_call_results) -> tuple[bool, str | None]:
-    for claim in response.claims:                     # EVERY claim, not just some
-        if not citation_check(claim, tool_names):
-            return False, f"Claim {claim.text!r} has no valid non-docs citation."
-        if not verify_claim_value(claim, tool_call_results):
-            return False, f"Value {claim.numeric_value} not in its cited result."
-    if not coverage_check(response.answer_markdown, response.claims):
-        return False, "A number in the answer has no backing claim."
+        if not any(abs(token - v) < 0.01 for v in pool):
+            return False, f"{token} does not match any tool result this turn."
     return True, None
 ```
-
-`coverage_check` alone passes a claim with `source_tool_call_id=None` — the
-number *is* in a claim. Only the per-claim `citation_check` loop closes that.
-Skip the loop and uncited numbers pass silently.
 
 On failure: retry with a corrective message, **max 1–2**, then return an honest
 "no verified figure for that." Never emit the number.
 
-**Known limitation, don't solve now:** multi-row results mean value matching
-confirms the number appears *somewhere*, not that it's from the right row.
+**Known limitation, don't solve now:** matching confirms a number appears
+*somewhere* in this turn's real data, not that it's semantically the right
+value for what the prose claims about it — true of citation-based matching
+too, since the citation itself was never independently verified either. Not
+solvable by tightening this check; `docs/llm-judge.md`'s faithfulness
+scoring is the layer for that residual risk.
+
+**Derived numbers (a percentage change, a difference, an average) must come
+from the query, not the model's own arithmetic — steered by system
+instructions, enforced by this same check regardless of compliance.** If the
+model computes something in prose instead of the query, that value won't
+exist in any tool result, `verify_response` won't find it, and the turn
+retries — the prompt only affects how often it succeeds on the first try,
+never the safety guarantee. System instructions (`app/orchestrator/context.py`):
+*"When your answer needs a computed value — a percentage change, a
+difference, a ratio, an average — add it to the query itself (a calculated
+DAX measure, a SQL expression) rather than computing it in your response.
+Only compare BigQuery and DAX results directly when no query can produce
+the computed value already — Phase 7 (`docs/cross-domain-compute.md`)."*
 
 **No `is_projection` field — deliberately not carried.** The Phase 7
 `run_projection` tool (§11) would need one, because a
-projected number has no live tool result to cite and would have to be
-*exempt* from citation/coverage. Add the field **with** that feature, not
+projected number has no live tool result to match and would have to be
+*exempt* from this check. Add the field **with** that feature, not
 before: a field nothing sets and nothing reads is one more thing to keep in
 sync across `AgentResponse`, `AgentState`, and telemetry for no current
 benefit.
@@ -245,18 +251,18 @@ It does not generate forecasts or projections."*
 **Two helpers you'll need to write** (both pure functions, both worth their own
 Layer-1 tests — see `docs/testing.md`):
 - `extract_numeric_tokens(text) -> list[float]` — **called by
-  `coverage_check`.** Normalizes commas, `%`, currency out of prose numbers.
-  **The year/version/index rule is undecided** — scanning prose for numbers
+  `verify_response`.** Normalizes commas, `%`, currency out of prose numbers,
+  table-aware (numbers inside markdown table cells, not just running prose).
+  **The year/version/index rule is undecided** — scanning text for numbers
   false-positives on things that aren't data: *"the Q3 2024 model"* yields
-  `2024`, *"version 2.1"* yields `2.1`, and neither is a claim needing a
-  citation. Propose a rule with accept/reject examples and confirm it before
+  `2024`, *"version 2.1"* yields `2.1`, and neither is a value needing a
+  match. Propose a rule with accept/reject examples and confirm it before
   locking a test around it.
-- `value_appears_in_result(value, raw_result, tolerance) -> bool` — **called by
-  `verify_claim_value`.** Walks nested dicts/lists; True if any numeric leaf
-  is within tolerance. Handles both BigQuery row dicts and
-  `executeQueries`' `results[0].tables[0].rows` shape, where keys are fully
-  qualified (`Table[Column]`) — it matches on values, not keys, so the
-  qualified naming doesn't matter.
+- `extract_numeric_leaves(raw_result) -> list[float]` — **called by
+  `build_numeric_pool`.** Walks nested dicts/lists, returning every numeric
+  leaf. Handles both BigQuery row dicts and `executeQueries`'
+  `results[0].tables[0].rows` shape, where keys are fully qualified
+  (`Table[Column]`) — irrelevant here since this returns values, not keys.
 
 ## Assembling the prompt
 
@@ -283,7 +289,7 @@ item 3).
   4. **`MEASURE_REGISTRY`** — every measure's name and description.
      **Names and descriptions only — never the DAX bodies**, which are
      fetched per-measure by `get_measure_dax`
-     (`.claude/rules/mcp-tools.md`). Also excludes the numeric what-ifs'
+     (`.claude/rules/tools.md`). Also excludes the numeric what-ifs'
      value measures — `PARAMETERS` already covers them fully.
   5. **`RELATIONSHIPS`** — join paths, parsed from the same artifact. Needed
      on nearly every composition, so present rather than retrieved.
@@ -329,6 +335,23 @@ item 3).
   on the last tool definition for exactly this reason, though it's doing so
   for the general case where a system prompt may be absent or dynamic.)
 
+**`filter_context` and `active_page` fold into the turn's `HumanMessage`,
+not the static block** — they vary per turn, so they belong after the
+`cache_control` marker alongside `question`, per the ordering rule above.
+General grounding for the model's prose, separate from `get_page_info`'s own
+`active_page` parameter (`.claude/rules/tools.md` explains why both exist).
+
+```python
+def build_human_message(question: str, filter_context: list[dict],
+                        active_page: str | None) -> HumanMessage:
+    content = question
+    if active_page:
+        content += f"\n\nCurrently viewing: {active_page}"
+    if filter_context:
+        content += f"\n\nFilters active: {filter_context}"
+    return HumanMessage(content=content)
+```
+
 ## Model schema — one parse, six artifacts
 
 `context/schema/model_schema.json` is built locally by
@@ -359,11 +382,11 @@ the registry advertising a measure `get_measure_dax` then fails on. From one
 object that's structurally impossible. This is also why the module lives at
 the top of `app/`, a sibling to `app/config.py`, rather than under
 `app/orchestrator/` or `app/mcp_server/`: both the `agent` node here and the
-`get_measure_dax` tool (`.claude/rules/mcp-tools.md`) need it, and a single
+`get_measure_dax` tool (`.claude/rules/tools.md`) need it, and a single
 shared parse is what keeps them from disagreeing structurally.
 
 **`_render_measures` must not emit the `dax` field.** It's the one part that
-never enters static context (`.claude/rules/mcp-tools.md`).
+never enters static context (`.claude/rules/tools.md`).
 
 **Schema changes need a redeploy**, since this is read at import. Same
 tradeoff as `BIGQUERY_SCHEMA`, now covering the semantic model too.
@@ -484,8 +507,9 @@ whether its *content* is acceptable. Constrained decoding stops the sampler
 from emitting a shape that doesn't match the schema at all — a different
 failure class, currently unguarded.
 
-Apply it in both places: **tool-call argument schemas** and the final
-**`AgentResponse`** structured-output call.
+Apply it on **tool-call argument schemas** — the only structured-output
+surface now that `agent`'s final answer is plain text, not a separate
+structured call (below).
 
 **It eliminates a failure class rather than speeding up recovery from one.**
 If an invalid structure can't be sampled, "malformed output" stops being an
@@ -576,7 +600,7 @@ Each is detailed below.
 `LIMIT` does **not** reduce BigQuery bytes scanned (engine scans full columns
 first), so a cheap query can still return tens of thousands of rows with
 nothing in the cost gate to catch it. Two tools, two mechanisms —
-implementation in `.claude/rules/mcp-tools.md`:
+implementation in `.claude/rules/tools.md`:
 
 - **BigQuery:** `query_job.result(max_results=1000)` — caps the *fetch*, no
   query-text rewriting.
@@ -603,19 +627,29 @@ MAX_VERIFY_RETRIES = 2
 
 def check_answer_length(answer_markdown: str) -> bool:
     return len(answer_markdown) <= MAX_ANSWER_CHARS
+
+
+async def check_length_node(state: AgentState) -> dict:
+    if check_answer_length(state["answer_markdown"]):
+        return {}
+    return {
+        "length_retry_count": state["length_retry_count"] + 1,
+        "messages": [HumanMessage(content=(
+            "Your answer is too long to display. Summarize the key findings "
+            "concisely, or generate a chart instead of listing rows."))],
+    }
 ```
 
 1. **Steering:** many rows → summarize (top N, key stats) and/or offer a chart
    via `generate_chart`.
 2. **Backstop:** on failure, loop back — **same retry pattern and 1–2 cap as
-   verification** — *"Your answer is too long to display. Summarize the key
-   findings concisely, or generate a chart instead of listing rows."* Never
-   truncate silently; that can cut off a partial-answer caveat mid-sentence.
+   verification.** Never truncate silently; that can cut off a partial-answer
+   caveat mid-sentence.
 3. **Retries exhausted:** a fixed decline, not another attempt at the answer
    — *"I wasn't able to generate a response short enough to display. Try
-   breaking your question into smaller, more specific parts."* No claims, no
-   numbers — `check_length` runs before `verify` (`finalize`'s table, below),
-   so nothing here has been verified yet.
+   breaking your question into smaller, more specific parts."* No numbers —
+   `check_length` runs before `verify` (`finalize`'s table, below), so
+   nothing here has been verified yet.
 
 ### Question-length cap — bounded at the gateway, not here
 
@@ -645,8 +679,8 @@ touching `call_tool_node`'s cost logic.
    concurrent instances (`.claude/rules/gateway.md`). Telemetry is never
    read back for this.
 3. **On approve, don't re-run the agent loop** — execute the cached queries,
-   then one LLM call synthesizes across old + new results. On reject, reuse
-   the `iteration_cap_hit` partial-answer machinery.
+   then one `agent` call writes the final answer across old + new results.
+   On reject, reuse the `iteration_cap_hit` partial-answer machinery.
 
 **12 is a calibration starting point, not a tuned value.** Exhaustion degrades
 to a partial answer (below), so a high cap costs nothing — it just reveals how
@@ -658,18 +692,23 @@ a low cap truncates.
 ### Hitting `max_iterations` — partial answer, not a blanket refusal
 
 Different failure mode from verification exhaustion: the model ran out of
-budget, possibly mid-progress. Already-verified claims stay valid.
+budget, possibly mid-progress.
 
-1. Synthesize `answer_markdown` from whatever `claims` verified — normal
-   `AgentResponse` assembly with partial state, not a refusal path.
+1. **`route_after_call_tool` sends `iteration_cap_hit` back to `agent`, not
+   straight to `finalize`** — `agent` still needs its own turn to actually
+   write `answer_markdown` from whatever it has so far, the same path any
+   normal final answer takes. `iteration_cap_hit` stays `True` regardless of
+   what `agent` does next, so if it tries another tool call instead of
+   wrapping up, `call_tool` routes straight to `finalize` immediately after —
+   at most one extra turn, never a second cap-hit loop.
 2. **The model must state plainly that the answer is partial** and name what
    wasn't reached. System prompt: *"If you're stopped by the iteration limit
    before fully answering, state clearly that this is a partial answer and
    specify what you weren't able to address."*
-3. Set `iteration_cap_hit: True` — lets the UI render it distinctly rather
-   than relying on the prose being read carefully.
-4. **Verification still applies normally** to whatever claims exist — cap
-   exhaustion never bypasses citation/coverage/value checks.
+3. `iteration_cap_hit: True` lets the UI render it distinctly rather than
+   relying on the prose being read carefully.
+4. **Verification still applies normally** to whatever answer results — cap
+   exhaustion never bypasses it.
 
 ### DAX grounding — structural, with no pre-call requirement
 
@@ -744,6 +783,9 @@ kill a live BigQuery job, and the `cancel_job()` machinery already exists for
 timeouts — this widens what triggers it.
 
 ```python
+# A plain LangChain @tool, not MCP-registered (`.claude/rules/tools.md`) —
+# dispatch is in `docs/approval-workflow.md`.
+@tool
 async def run_bigquery_sql(query: str, conversation_id: str):
     # maximum_bytes_billed is the hard fail-safe: BigQuery kills the job
     # server-side if it exceeds this, independent of anything below.
@@ -803,8 +845,47 @@ inter-node checkpoint.
 
 ### The graph — seven nodes
 
+**Named functions, not lambdas, for every conditional edge** — easier to
+read once a routing condition has more than one branch, and traces by name
+rather than `<lambda>` if LangSmith ever surfaces the routing step.
+
+**Always pass `path_map`, confirmed live.** Without it, `add_conditional_edges`
+has no way to know what a routing function might return — it's just a
+Python function LangGraph calls at runtime — so `graph.get_graph()` can't
+draw the real edges either; it fabricates a fallback straight to `END` and
+leaves every other destination disconnected. Routing itself still works
+correctly either way — this is a visualization/introspection gap, not a
+runtime one — but `path_map` closes it and makes each router's real
+destinations explicit in the code, not just inferable from reading its body.
+
 ```python
 from langgraph.graph import StateGraph, START, END
+
+def route_after_route_entry(state: AgentState) -> str:
+    return "execute_approved" if state["pending_queries"] else "agent"
+
+def route_after_agent(state: AgentState) -> str:
+    return "call_tool" if state["messages"][-1].tool_calls else "check_length"
+
+def route_after_call_tool(state: AgentState) -> str:
+    if state["cancelled"] or state["needs_approval"] or state["cost_cap_exceeded"]:
+        return "finalize"
+    return "agent"   # also the iteration_cap_hit path — see "Hitting max_iterations"
+
+def route_after_check_length(state: AgentState) -> str:
+    if check_answer_length(state["answer_markdown"]):
+        return "verify"
+    if state["length_retry_count"] < MAX_LENGTH_RETRIES:
+        return "agent"
+    return "finalize"
+
+def route_after_verify(state: AgentState) -> str:
+    if state["verified"]:
+        return "finalize"
+    if state["verification_retry_count"] < MAX_VERIFY_RETRIES:
+        return "agent"
+    return "finalize"
+
 
 g = StateGraph(AgentState)
 g.add_node("route_entry",      route_entry_node)
@@ -816,65 +897,86 @@ g.add_node("verify",           verify_node)
 g.add_node("finalize",         finalize_node)
 
 g.add_edge(START, "route_entry")
-g.add_conditional_edges("route_entry", lambda s:
-    "execute_approved" if s["pending_queries"] else "agent")
+g.add_conditional_edges("route_entry", route_after_route_entry,
+    {"execute_approved": "execute_approved", "agent": "agent"})
 g.add_edge("execute_approved", "agent")   # even on failure — the agent sees
                                           # the error and can respond to it
 
-g.add_conditional_edges("agent", lambda s:
-    "call_tool" if s["messages"][-1]["message"].tool_calls else "check_length")
-
-g.add_conditional_edges("call_tool", lambda s:
-    "finalize" if (s["cancelled"] or s["needs_approval"]
-                   or s["cost_cap_exceeded"] or s["iteration_cap_hit"])
-    else "agent")
-
-g.add_conditional_edges("check_length", lambda s:
-    "verify"   if check_answer_length(s["answer_markdown"])
-    else "agent" if s["length_retry_count"] < MAX_LENGTH_RETRIES
-    else "finalize")
-
-g.add_conditional_edges("verify", lambda s:
-    "finalize" if s["verified"]
-    else "agent" if s["verification_retry_count"] < MAX_VERIFY_RETRIES
-    else "finalize")
+g.add_conditional_edges("agent", route_after_agent,
+    {"call_tool": "call_tool", "check_length": "check_length"})
+g.add_conditional_edges("call_tool", route_after_call_tool,
+    {"finalize": "finalize", "agent": "agent"})
+g.add_conditional_edges("check_length", route_after_check_length,
+    {"verify": "verify", "agent": "agent", "finalize": "finalize"})
+g.add_conditional_edges("verify", route_after_verify,
+    {"finalize": "finalize", "agent": "agent"})
 
 g.add_edge("finalize", END)
 graph = g.compile()
+```
+
+**`agent` writes `answer_markdown` itself, whenever it has no tool calls —
+no separate call to do it.** Plain text, not structured output, since
+verification no longer needs `Claim` objects to check against (above).
+
+```python
+async def agent_node(state: AgentState) -> dict:
+    model = llm.bind_tools(list(MCP_TOOLS.values()))   # docs/approval-workflow.md
+    response = await model.ainvoke(state["messages"])
+    update = {"messages": [response], "llm_calls": state["llm_calls"] + 1}
+    if not response.tool_calls:
+        update["answer_markdown"] = response.content
+    return update
 ```
 
 | Node | Role |
 |---|---|
 | `route_entry` | Branches on `pending_queries`. Pure routing, no work |
 | `execute_approved` | Runs each `pending_queries` entry directly in Python — no LLM |
-| `agent` | The LLM call. Emits tool calls, or writes the answer |
+| `agent` | The LLM call, tools bound. Emits tool calls, or writes `answer_markdown` |
 | `call_tool` | Dispatches tools, checks cancel, increments `iteration_count` |
 | `check_length` | Owns `length_retry_count` |
 | `verify` | `verify_response()`. Owns `verification_retry_count` |
-| `finalize` | Sets `AgentResponse` fields and writes telemetry — seven routes in, see below |
+| `finalize` | Sets `AgentResponse` fields and writes telemetry — six routes in, see below |
 
 - `route_entry` branches on `pending_queries` — a fresh turn's is empty.
 - **Cost gating is not a node** — it lives inside `run_bigquery_sql`, which
   dry-runs the exact SQL immediately before executing it. `call_tool` routes
   on what the tool reports back.
-- `check_length` before `verify` — cheap check first; no point walking every
-  claim on an answer that can't be displayed regardless.
+- `check_length` before `verify` — cheap check first; no point walking the
+  answer's numbers against tool data if it can't be displayed regardless.
 - `finalize` is the **single exit** — full breakdown below.
 
-### `finalize` — the single exit, seven ways in
+**Any routed-back retry into `agent` needs a fresh message first, confirmed
+live, not assumed.** Claude refuses to generate a new response when the
+conversation already ends in an assistant turn ("This model does not support
+assistant message prefill. The conversation must end with a user message.")
+— exactly what `agent`'s own prior tool-call-free `AIMessage` leaves it as.
+`check_length`'s retry message (above) isn't optional styling — it's what
+keeps that specific path alive at all; the same applies to any future
+`verify` retry message once item 6 builds real verification.
 
-Seven routes, not five — `check_length` and `verify` each collapse two
-different outcomes into one edge. Kept in sync with the actual conditional
-edges above; read those directly if this table and the code ever disagree.
+**A minimal model, not the full `AgentResponse`.** Fields like
+`needs_approval` and `pending_query` are guardrail outcomes `finalize`
+assembles from graph state, not something the LLM should be asked to set —
+constraining the call's output type to exactly what it actually produces is
+what `strict=True` schemas are for (below).
+
+### `finalize` — the single exit, six ways in
+
+`check_length` and `verify` each collapse two different outcomes into one
+edge. `iteration_cap_hit` isn't its own route — it rides along as a flag on
+whichever of these `agent` eventually reaches (above). Kept in sync with the
+actual conditional edges above; read those directly if this table and the
+code ever disagree.
 
 | From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
 |---|---|---|---|---|
-| `call_tool` | `cancelled` | Cancelled | Partial answer from whatever `claims` verified so far | Normal row, `cancelled: True` |
+| `call_tool` | `cancelled` | Cancelled | `answer_markdown` if `agent` had already set one, else a fixed "this turn was cancelled" message | Normal row, `cancelled: True` |
 | `call_tool` | `needs_approval` | Approval pause | `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
 | `call_tool` | `cost_cap_exceeded` | Hard decline | `cost_cap_exceeded: True`, `estimated_cost` set, no approval offered | Normal row |
-| `call_tool` | `iteration_cap_hit` | Partial answer | Synthesize from whatever `claims` verified; `iteration_cap_hit: True`; must state plainly it's partial (see "Hitting `max_iterations`" above) | Normal row, `iteration_cap_hit: True` |
-| `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question. `claims: []` — runs before `verify`, so nothing here is verified yet | Normal row |
-| `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `claims`, `suggested_follow_ups` | Normal row |
+| `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question | Normal row |
+| `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit: True` if that's how this turn got here | Normal row |
 | `verify` | failed, `verification_retry_count` exhausted | Honest decline | "No verified figure for that" — no unverified number emitted | Normal row |
 
 **`finalize` never touches `live_turns` — every write to it lives in the
@@ -889,10 +991,9 @@ def build_pending_approval(state: AgentState) -> PendingApproval:
     """Pure, no I/O — called from the gateway, not from finalize."""
     return PendingApproval(
         conversation_id=state["conversation_id"],
-        question=state["question"],
         filter_context=state["filter_context"],
         active_page=state["active_page"],
-        conversation_history=state["conversation_history"],
+        messages=messages_to_dict(state["messages"]),
         pending_queries=state["pending_queries"],
         deferred_dax=state["deferred_dax"],
         tool_calls=state["tool_calls"],
@@ -932,9 +1033,11 @@ change in the same step.
 - **Cancellation must be explicit** — `asyncio` cancellation alone doesn't
   stop a running BigQuery job. Call `client.cancel_job(job.job_id)` in the
   timeout handler.
-- **Trim tool outputs between turns** — after a turn verifies, keep
-  `answer_markdown` and `claims`; drop raw `ToolMessage` contents. Otherwise
-  each later turn carries a growing pile of past raw results.
+- **`AgentState` doesn't carry raw results across turns** — `messages` and
+  `tool_calls` are seeded fresh at each invocation; nothing accumulates
+  turn over turn in memory. What a later turn sees of an earlier one is only
+  what's reconstructed from Firestore, deliberately bounded
+  (`HISTORY_ROW_CAP`, `HISTORY_TURN_COUNT` — `.claude/rules/gateway.md`).
 - **Confirm parallel dispatch isn't accidentally serialized** — LangGraph runs
   multiple tool calls concurrently by default. A free win, not something to
   build.

@@ -103,7 +103,7 @@ you don't need to open these:
 |---|---|
 | `orchestrator.md` | `app/orchestrator/**`, `app/model_schema.py`, `app/exceptions.py`, verification + guardrail tests |
 | `gateway.md` | `app/gateway/**`, `app/config.py`, gateway tests |
-| `mcp-tools.md` | `app/mcp_server/**`, `app/model_schema.py`, tool + row-cap tests |
+| `tools.md` | `app/mcp_server/**`, `app/orchestrator/bigquery_tool.py`, `app/model_schema.py`, tool + row-cap tests |
 | `telemetry.md` | `app/telemetry/**`, the judge + golden-runner scripts |
 | `data-pipeline.md` | `definitions/**`, `scripts/build_vector_db.py`, `scripts/build_model_context.py` |
 
@@ -152,8 +152,6 @@ than the task needs.
 - Adding a new top-level directory or module.
 - Anything making a number reachable without a live tool call — including
   `run_projection` or `is_projection: true`. The build declines forecasts.
-- Switching chart delivery from the public bucket to signed URLs — that's a
-  documented trade-off, not an oversight.
 
 ## Known-unverified — flag if you depend on these
 
@@ -171,10 +169,12 @@ than the task needs.
 - Prompt-caching minimums are **model-specific and move** — Sonnet is 1,024
   tokens, newer Opus/Haiku 4,096. Re-check on any model change (`.claude/rules/gateway.md`).
 - **LangGraph** — whether breaking out of `astream` propagates cancellation
-  into a running node or only at the next node boundary, and the custom
-  reducer replacing `add_messages` for `TimestampedMessage`. (Confirmed and
-  already applied: `Command`'s shape, and the `astream` `StreamPart` format
-  with `stream_mode="updates", version="v2"`.)
+  into a running node or only at the next node boundary. (Confirmed and
+  already applied: `Command`'s shape, the `astream` `StreamPart` format
+  with `stream_mode="updates", version="v2"`, and `append_list` — the custom
+  reducer replacing `add_messages` — genuinely accumulating across nodes
+  instead of last-write-wins, proven against a real `graph.invoke()` run in
+  `notebooks/phase3_graph.ipynb`.)
 ---
 
 ## Commands

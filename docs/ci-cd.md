@@ -132,7 +132,7 @@ access at all.
 Reusing `agent-sa` for CI would hand the pipeline a credential with live
 access to your data and secrets — permissions it never needs just to redeploy
 a container. Same least-privilege reasoning already applied to `agent_safe`
-(`.claude/rules/mcp-tools.md`), a different identity.
+(`.claude/rules/tools.md`), a different identity.
 
 **The binding people miss:** `iam.serviceAccountUser` on `agent-sa`. Without
 it the deploy fails with a confusing permissions error, because attaching a

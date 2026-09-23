@@ -161,7 +161,7 @@ A phase isn't done because the code runs — it's done when the guarantee holds.
 - [ ] **A filter value containing a quote or apostrophe** (a real category
       name) either answers correctly or fails loudly and retries — never
       silently wrong. The model writes the DAX; the error path is the
-      guardrail (`.claude/rules/mcp-tools.md`).
+      guardrail (`.claude/rules/tools.md`).
 - [ ] **Ask how a measure is calculated** — confirm `get_measure_dax` is
       called and the returned DAX matches what's live in Power BI. Then ask about a
       measure with a near-identical sibling (`Recall at 5` vs `Recall at

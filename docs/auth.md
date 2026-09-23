@@ -7,7 +7,7 @@
 > `local-dev-environment-setup.md`.
 >
 > Operational rules that implement these live in `.claude/rules/gateway.md`
-> (token validation) and `.claude/rules/mcp-tools.md` (the Power BI service
+> (token validation) and `.claude/rules/tools.md` (the Power BI service
 > principal). Setup steps are in `local-dev-environment-setup.md`.
 
 ## The chain
@@ -83,7 +83,7 @@ client = bigquery.Client()  # ADC auto-resolves to agent-sa on Cloud Run
 ```
 `agent-sa` needs `bigquery.jobUser` at project level (to run any query) plus
 `dataViewer` on `agent_safe` only — **not** on `vector_db`, which is the
-dataset boundary (`.claude/rules/mcp-tools.md`). Grant commands:
+dataset boundary (`.claude/rules/tools.md`). Grant commands:
 `local-dev-environment-setup.md` Step 13.
 
 **Hop 4b — `search_docs` → `vector_db`, as a different identity.** `agent-sa`

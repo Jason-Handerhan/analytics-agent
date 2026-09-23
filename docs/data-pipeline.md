@@ -772,7 +772,7 @@ different models live in incompatible spaces; this isn't a style preference,
 it's a hard requirement for `VECTOR_SEARCH` to return anything meaningful.
 
 **`search_docs` is the only vector-search tool.** Schema comes from static
-context and `get_measure_dax` (`.claude/rules/mcp-tools.md`), code search is
+context and `get_measure_dax` (`.claude/rules/tools.md`), code search is
 agentic (`docs/code-search.md`), and `get_page_info` reads files directly.
 
 ### Refreshing the index

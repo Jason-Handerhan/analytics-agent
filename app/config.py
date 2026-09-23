@@ -27,6 +27,10 @@ AGENT_SAFE_DATASET = "agent_safe"
 TELEMETRY_DATASET = "telemetry"
 TELEMETRY_TABLE = "agent_telemetry"
 
+# Conversation history (.claude/rules/gateway.md)
+HISTORY_TURN_COUNT = 5    # sessions.recent_messages FIFO length
+HISTORY_ROW_CAP = 100     # rows kept per stored tool result
+
 # LangSmith tracing — literals, not env vars, since both are identical in
 # every environment (local-dev-environment-setup.md Step 17).
 # LANGSMITH_API_KEY is a secret, fetched via get_secret() once that helper

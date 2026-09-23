@@ -36,8 +36,9 @@ it scales on a completely different axis (log volume, not user traffic) and
 a bug there should never be able to degrade live serving.
 
 **What it scores — LLM-judged (semantic reasoning needed):**
-- **Faithfulness** — claims match cited tool results (the verification checks,
-  `.claude/rules/orchestrator.md`, scored as a metric here, not enforced as a gate).
+- **Faithfulness** — numbers in the answer match real tool results this turn
+  (the verification check, `.claude/rules/orchestrator.md`, scored as a
+  metric here, not enforced as a gate).
   Checks internal consistency only — not whether the query itself was the
   right one; that's `docs/golden-dataset.md`, not this.
 - **Narrative groundedness** — verification only hard-enforces *numeric*

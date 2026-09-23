@@ -21,6 +21,8 @@ def test_static_context_contains_all_seven_components(monkeypatch):
     context.get_static_context.cache_clear()
 
     result = context.get_static_context()
+
+    #If List (Claude) extract text, otherwise (OpenAI, Gemini) use string directly.
     text = result[0]["text"] if isinstance(result, list) else result
 
     markers = [

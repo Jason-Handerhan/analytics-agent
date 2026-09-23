@@ -187,7 +187,7 @@ to the server; it isn't the history, and the server already has its own.
 
 - **Sample questions on open:** hardcoded buttons, `Visible = CountRows(colChat) = 0`. Zero backend cost, meaningfully improves the demo.
 
-- **Agent-suggested follow-up chips:** bound to `suggested_follow_ups` on the response envelope; system prompt asks for 1–3 short suggestions (e.g. "Would you like to see a graph?"). Natural because `generate_chart` (`.claude/rules/mcp-tools.md`) is a real callable tool, not a promise the agent can't keep.
+- **Agent-suggested follow-up chips:** bound to `suggested_follow_ups` on the response envelope; system prompt asks for 1–3 short suggestions (e.g. "Would you like to see a graph?"). Natural because `generate_chart` (`.claude/rules/tools.md`) is a real callable tool, not a promise the agent can't keep.
 
 ## Visual grounding — filter context and the optional screenshot
 

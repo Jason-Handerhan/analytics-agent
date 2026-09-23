@@ -228,7 +228,7 @@ analytics-agent/
 │   └── rules/                    ← save all 5 rule files here
 │       ├── orchestrator.md
 │       ├── gateway.md
-│       ├── mcp-tools.md
+│       ├── tools.md
 │       ├── telemetry.md
 │       └── data-pipeline.md
 │
@@ -288,10 +288,10 @@ What each directory is for, and where its spec lives:
 | `app/exceptions.py` | `ToolError`, `ToolTimeoutError`, `TurnCancelledError` — shared so a tool and the graph raise and catch the same types | `.claude/rules/orchestrator.md` |
 | `app/gateway/` | FastAPI app, `/ask` + status + cancel endpoints, auth validation, Markdown→HTML | `.claude/rules/gateway.md`, `docs/auth.md`, `docs/frontend.md` |
 | `app/orchestrator/` | LangGraph graph, agent node, verification checks, guardrails | `.claude/rules/orchestrator.md` |
-| `app/mcp_server/` | FastMCP server + one module per tool group (tools sharing a client live together) | `.claude/rules/mcp-tools.md` |
+| `app/mcp_server/` | FastMCP server + one module per tool group (tools sharing a client live together) | `.claude/rules/tools.md` |
 | `app/telemetry/` | `agent_telemetry` writer + schema | `docs/build-order.md` Phase 1, `docs/llm-judge.md` |
 | `context/docs/` | Project docs + abbreviated README — methodology corpus, **input to the vector index** | `docs/data-pipeline.md` |
-| `context/page_info/` | Power BI page-info HTML — read **whole** by `get_page_info`; not chunked or embedded | `.claude/rules/mcp-tools.md` |
+| `context/page_info/` | Power BI page-info HTML — read **whole** by `get_page_info`; not chunked or embedded | `.claude/rules/tools.md` |
 | `context/schema/` | `model_schema.json` — **committed, read at startup** into the table + measure registries (`docs/data-pipeline.md`). Also BigQuery schema snapshots, which are a development aid only | `.claude/rules/gateway.md` |
 | `context/orientation/` | Exec summary + navigator + architecture diagram — always-in-context bundle | `.claude/rules/gateway.md` |
 | `scripts/` | One-off/manual jobs: `build_model_context.py` (semantic-model registries), `build_vector_db.py` (docs chunking), schema dumps, judge Cloud Run Job, golden dataset runner | `docs/data-pipeline.md`, `docs/llm-judge.md`, `docs/golden-dataset.md` |

@@ -261,12 +261,9 @@ live_turns/{conversation_id}          # scoped to ONE in-flight turn
 sessions/{conversation_id}            # spans the whole conversation
 {
   "user_id": "...",                        # claims["oid"] — same source as telemetry
-  "recent_messages": [                     # FIFO, last 5
+  "recent_messages": [                     # FIFO, last HISTORY_TURN_COUNT
     {
-      "question": "...",
-      "answer": "...",                     # truncated ~500 chars, sentence boundary
-      "queries": ["EVALUATE ...", "SELECT ..."],
-      "filter_context": [...],
+      "messages": [...],                   # messages_to_dict(state["messages"]), row-capped
       "timestamp": ...
     }
   ],
@@ -276,53 +273,62 @@ sessions/{conversation_id}            # spans the whole conversation
 
 ## Conversation history — `sessions.recent_messages`
 
-**Queries, not results — and no `tool_calls` at all.** A turn entry holds the
-question, a truncated answer, the query text, and `filter_context`. Full
-`tool_calls` with raw results live only in `AgentState` (one turn, in memory)
-and `PendingApproval` (only while paused, cleared at turn end) — never here,
-where entries persist. A stored query never goes stale: the SQL that computed
-last quarter's recall is still correct SQL after a data refresh or a slicer
-change; only its *output* was time-sensitive. So no freshness bound, no
-result-invalidation rule, and no change to the verification contract. Queries
-also help where the agent struggles most: adapting a working DAX query beats
-re-deriving one from schema chunks.
+**Each entry stores the turn's real message sequence, not a paraphrase.**
+`messages_to_dict(state["messages"])` (`langchain_core.messages`) —
+the `HumanMessage`, any `AIMessage(tool_calls=...)`/`ToolMessage` rounds, and
+the final `AIMessage` — serialized as-is; `messages_from_dict` reconstructs it
+at read time. Confirmed live: round-trips a real `tool_calls`-bearing
+`AIMessage` and its `ToolMessage` cleanly. The model then sees genuine
+`tool_use`/`tool_result` structure for prior turns instead of prose
+describing them — nothing to imitate, no query text leaking into a new
+answer's body — and it's still what makes follow-ups work: adapting a
+working DAX/SQL query beats re-deriving one from schema chunks.
 
-**`filter_context` is required alongside them, not optional.** A query
-composed under `Region = West` is silently wrong if adapted blind under
-today's slicers. It also fixes follow-up interpretation — *"what about
-East?"* only parses if the prior turn's filters are visible.
+**Every tool call the turn made is stored — no per-tool exclusion.** Includes
+`generate_chart`: it only ever returns a `chart_url` string, and a stale
+`source_tool_call_id` replayed from history already fails with
+`resolve_chart_data`'s existing `ToolError` (`docs/chart-tool.md`) — an
+ordinary, actionable tool error, not a new hazard.
 
-**Five turns, not ten** — each entry carries more now, and follow-ups rarely
-reach past the last turn or two. A judgment call, tunable once real
-conversations exist.
+**Retry-loop messages (`check_length`, `verify`) are kept too.** No
+correctness risk: `verify_response` checks whatever numbers appear in *this*
+turn's `answer_markdown` against *this* turn's tool pool regardless of what's
+in history, so a resurfaced number from a rejected attempt fails verification
+again on its own. A standard checkpointer would carry these forward anyway,
+and seeing what didn't work last time is plausibly useful, not just inert.
+
+**Tool results are row-capped at `HISTORY_ROW_CAP` (`app/config.py`),
+applied to the native `ToolCallRecord.result` before it's serialized into the
+`ToolMessage`'s content — never by slicing the resulting JSON string**, which
+could produce invalid JSON mid-row. This is shape-based (any row-returning
+result), not a tool-name list, so it covers a future row-returning tool
+automatically. At `HISTORY_ROW_CAP` rows × `HISTORY_TURN_COUNT` turns, this
+stays well under Firestore's 1MB document cap.
+
+**No separate answer truncation.** Row-capped tool results are now the
+dominant size term — a character cap on the final answer's text bought little
+in comparison, so it's left out. Revisit if real turns show otherwise.
+
+**No separate `filter_context` field.** The live `HumanMessage` each turn
+already has the filter-context block folded into its content (see "What
+arrives in a request" above) — `messages_to_dict` captures that verbatim, so
+a parallel copy would just be the same data stored twice.
+
+**`HISTORY_TURN_COUNT` (`app/config.py`, default 5)** governs both the FIFO
+trim on write and how many turns get read back — tunable without a schema
+change.
+
+**No `question`/`answer` fields.** Both are `messages[0].content` /
+`messages[-1].content` if ever needed — `agent_telemetry` already keeps a
+cheap copy of the answer for that purpose (`.claude/rules/telemetry.md`).
 
 **No turn ID.** Nothing looks up a single turn; the list is read whole, in
 order. `timestamp` gives ordering and already serves the TTL logic.
 
-**Truncate the stored answer with `pysbd`, not a character cut or a regex.**
-A hard cut can slice `0.367` into `0.36` — a *wrong* number in history. A
-`[.!?]\s` regex breaks on abbreviations (*"Approx. 0.367"* → *"Approx."*).
-`pysbd` is pure Python, no model download.
-
-```python
-import pysbd
-_seg = pysbd.Segmenter(language="en", clean=False)
-
-def truncate_at_sentence(text: str, limit: int = 500) -> str:
-    if len(text) <= limit:
-        return text
-    out = ""
-    for sentence in _seg.segment(text):
-        if len(out) + len(sentence) > limit:
-            break
-        out += sentence
-    return (out or text[:limit]).rstrip() + " […]"
-```
-
-**Truncate in `finalize`, when writing to Firestore — nowhere upstream.**
-`answer_markdown` stays full in the response and in telemetry; only this copy
-is shortened. The 6,000-char answer-length guardrail is unrelated — that's a
-Power Apps rendering ceiling, not a storage cost.
+**Written by the gateway's `run_agent_turn`, alongside `live_turns` cleanup —
+not by `finalize`.** Matches the existing split: `finalize` only sets
+`AgentState` fields and writes `agent_telemetry`
+(`.claude/rules/orchestrator.md`).
 
 **Reading `recent_messages` back and including it in the prompt.** Storing
 chat history is only half the job — it has to actually reach the model, or
@@ -332,44 +338,20 @@ agent just answers as if every turn were the first. Read from
 `sessions/{conversation_id}` at the start of each turn, before assembling
 the prompt; append the completed turn after.
 
-**`queries` is derived from `tool_calls` at write time, not accumulated
-separately — and not at read time.** The query is already in each record's
-`args`, and `name` distinguishes SQL from DAX, so a parallel list would be a
-second copy that can drift. Deriving at *read* time isn't an option: it would
-mean persisting `tool_calls` — raw results included — in a document that grows
-permanently. Deriving here and discarding the source is what keeps `sessions`
-small:
-
-```python
-queries = [tc["args"].get("query") or tc["args"].get("dax")
-           for tc in state["tool_calls"]
-           if tc["name"] in ("run_bigquery_sql", "run_dax_query")]
-```
-
-**Firestore stores dicts; the model reads messages** — convert at read time:
-
 ```python
 async def build_history_messages(conversation_id: str) -> list[BaseMessage]:
     session = await get_session(conversation_id)
-    messages = []
+    result: list[BaseMessage] = []
     for turn in session.get("recent_messages", []):
-        messages.append(HumanMessage(content=turn["question"]))
-        content = turn["answer"]
-        if turn.get("queries"):
-            content += "\n\nQueries run:\n" + "\n".join(turn["queries"])
-        if turn.get("filter_context"):
-            content += f"\n\nFilters active: {turn['filter_context']}"
-        messages.append(AIMessage(content=content))
-    return messages
+        result.extend(messages_from_dict(turn["messages"]))
+    return result
 ```
 
-**Queries and filters go in the `AIMessage` content, not a separate state
-field.** The model only reads the message list, so a parallel field would
-need this same formatting step anyway — and keeping them in the message
-preserves which query belongs to which answer, with no re-linking by index.
-
-**Tell the model what they're for**, in the system prompt: prior queries are
-patterns to adapt, not results to cite. It still runs whatever it composes.
+**Tell the model what the row cap means**, in the system prompt
+(`app/orchestrator/context.py`): history's tool results are truncated to
+`HISTORY_ROW_CAP` rows, and re-running the same query this turn may
+legitimately return a different count. Nothing left to explain about queries
+as adaptable patterns — real `tool_calls` already carry that structurally.
 
 **The split exists because these two get cleared at opposite times.** All
 three `live_turns` fields die together the moment a turn ends (normally, via
@@ -396,13 +378,17 @@ from typing import TypedDict
 
 class PendingApproval(TypedDict):
     conversation_id: str
-    question: str                            # for the resumed reasoning
-    filter_context: list[dict]               # same
+    filter_context: list[dict]               # frozen copy — see rule below
     active_page: str | None                  # which page the user was on
-    conversation_history: list[dict]         # same
-    pending_queries: list[str]               # BigQuery — priced, awaiting approval
-    deferred_dax: list[str]                  # DAX — deferred so its results
-                                             # never touch Firestore; runs on approve
+    messages: list[dict]                     # messages_to_dict(state["messages"])
+                                             # — this turn so far, dangling
+                                             # AIMessage included; messages_from_dict
+                                             # rebuilds state["messages"] on resume
+    pending_queries: list[dict]              # BigQuery — {id, query}, priced,
+                                             # awaiting approval
+    deferred_dax: list[dict]                 # DAX — {id, dax}, deferred so its
+                                             # results never touch Firestore;
+                                             # runs on approve
     tool_calls: list[ToolCallRecord]         # same name and shape as
                                              # AgentState.tool_calls — seeds it
                                              # directly on resume, no translation
@@ -425,15 +411,16 @@ single attempt; omit anything already recorded elsewhere.
 - `verification_retry_count` and `length_retry_count` **reset** — they're
   scoped to one synthesis attempt, and post-approval synthesis runs against a
   different, larger result set.
-- Token counts and `errors` are **omitted** — the pause row already records
-  them (`.claude/rules/telemetry.md`); carrying them would double-count.
+- Token counts, `errors`, and `question` are **omitted** — the pause row
+  already records them (`.claude/rules/telemetry.md`); carrying them would
+  double-count.
 
-**Anything not in the twelve fields resets by construction.** That's the
+**Anything not in these eleven fields resets by construction.** That's the
 safety property, not an oversight: `needs_approval` carried as `True` would
 re-pause the resumed turn immediately, and outputs like `answer_markdown` or
 `claims` haven't been produced yet at pause time.
 
-**A minimal checkpointer, scoped to the one point that pauses.** Twelve
+**A minimal checkpointer, scoped to the one point that pauses.** Eleven
 fields cover the one case that exists; LangGraph's `interrupt()` needs a
 persistent checkpointer with no free GCP-native option. **No `code_version`
 check on resume** — a pause outliving a deploy runs against whatever code is

@@ -1,18 +1,47 @@
 ---
 paths:
   - 'app/mcp_server/**'
+  - 'app/orchestrator/bigquery_tool.py'
   - 'app/model_schema.py'
   - 'tests/test_tools.py'
   - 'tests/test_chart_tool.py'
   - 'tests/test_guardrails.py'
 ---
 
-# MCP tools: inventory, contracts, data access boundary
+# Tools: inventory, contracts, data access boundary
 
 > **Deep dives:** `docs/chart-tool.md` before touching `chart_tools.py` — it
 > has the full spec hierarchy, all 10 chart types, and the styling contract.
 > `docs/data-pipeline.md` for how `agent_safe` and the vector index are built.
 > `docs/data-pipeline.md` for the access-boundary reasoning.
+
+## Where each tool runs — not all of them are MCP-hosted
+
+| Tool | Hosted on the MCP server? |
+|---|---|
+| `run_dax_query` | Yes |
+| `get_measure_dax` | Yes |
+| `search_docs` | Yes |
+| `get_page_info` | Yes |
+| `list_repo_files`, `read_repo_file` | Yes |
+| `generate_chart` | Yes |
+| `run_bigquery_sql` | **No** — a plain LangChain `@tool` in the orchestrator |
+
+**`run_bigquery_sql` is the one exception, deliberately.** Its safety depends
+on state that spans more than one call — the dry-run threshold applies to a
+whole *batch*, the absolute cap is cumulative across the *entire
+conversation*, and cancellation is wired to the gateway's turn timeout
+(`.claude/rules/orchestrator.md`). None of that is expressible as a
+self-contained MCP tool contract: an external caller would have to
+replicate our exact budget-tracking and cancellation plumbing to use it
+safely at all. Every other tool's guardrails (row caps, schema constraints)
+are enforceable *inside a single call*, with no memory of anything outside
+it — that's what makes them safe to expose over MCP as-is.
+
+`dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
+`.claude/rules/orchestrator.md`) handle both kinds of tool through the same
+invocation shape regardless of where they run — hosting location changes
+nothing about how a tool is called or how its result comes back.
 
 ## Transport: `streamable_http` over localhost — never stdio
 
@@ -70,8 +99,11 @@ mcp = FastMCP("analytics")
 
 # Importing each module runs its @mcp.tool() decorators, which is what
 # registers the tools. Import for side effect only — nothing is called here.
+# run_bigquery_sql is NOT here — it's a plain @tool in the orchestrator, not
+# MCP-registered (see the hosting table above). bigquery_schema still is: a
+# resource has none of the cross-call state that keeps the tool itself out.
 from app.mcp_server import (          # noqa: F401,E402
-    bigquery_tools,                   # run_bigquery_sql + bigquery_schema resource
+    bigquery_schema,                  # resource only
     dax_tools,                        # run_dax_query
     measure_dax,                      # get_measure_dax
     docs_search,                      # search_docs
@@ -85,8 +117,7 @@ if __name__ == "__main__":
 ```
 
 **Group by shared machinery, not one file per tool.** `list_repo_files` and
-`read_repo_file` hit the same GitHub client; `run_bigquery_sql` and the
-`bigquery_schema` resource share a BigQuery client. Splitting those apart
+`read_repo_file` hit the same GitHub client. Splitting those apart
 duplicates setup for no gain.
 
 **FastMCP builds each tool's schema from its type hints and docstring** — the
@@ -160,7 +191,7 @@ so descriptions there would be invisible to `bigquery_schema`.
 
 **Both query tools return `list[dict]` — one dict per row, coerced at the
 source.** Normalizing here means every downstream consumer (the model,
-`verify_claim_value`, `generate_chart`, telemetry) sees one shape regardless
+`verify_response`, `generate_chart`, telemetry) sees one shape regardless
 of which tool produced it. Two coercions are needed, and they differ by
 source:
 
@@ -174,12 +205,19 @@ source:
 
 **Serialization to the model is automatic** — FastMCP JSON-encodes a
 non-string return into a `TextContent` block. Don't hand-format: the model
-reads the same JSON that `verify_claim_value` walks and telemetry stores, and
+reads the same JSON that `verify_response` walks and telemetry stores, and
 any divergence between those is where a verification bug would hide.
 Real results are 5–20 rows typically, so the repeated-keys overhead of JSON
 isn't worth optimizing away.
 
 ## `run_bigquery_sql`
+
+**Not MCP-hosted** (see the hosting table above) — a plain LangChain `@tool`
+defined in the orchestrator. Everything below is still accurate; only *how*
+it's invoked differs from the MCP tools further down this file. Dispatch
+mechanics (the `@tool` definition, `.ainvoke()`, `ToolMessage` construction)
+live in `docs/approval-workflow.md` and `.claude/rules/orchestrator.md` —
+not duplicated here.
 
 - **Dry-run first, then three tiers by BYTES scanned** — not two. Evaluated
   in `call_tool_node` on the **summed batch**, not per call. Under
@@ -237,7 +275,7 @@ rows = response["results"][0]["tables"][0]["rows"]
 ```
 
 **Column keys are fully qualified** — `Table[Column]`, not `Column`. Anything
-parsing these (row caps, `verify_claim_value`) has to expect that form.
+parsing these (row caps) has to expect that form.
 
 **Documented API limits, all relevant here:**
 - **One `EVALUATE` per request.** More than one result table returns limited
@@ -460,6 +498,11 @@ currently-open failure in LangChain (issues #33646, #34246, #34581), and
 `extra: forbid` turns it into an unhandled exception. Injecting at the call
 site avoids the whole class.
 
+**`generate_chart` is a variant of the same rule: substitution instead of
+addition.** The model's bound schema has `source_tool_call_id`; the real MCP
+tool's schema has `data` instead — never both. `dispatch_tool` resolves one
+into the other before invoking. Full reasoning in `docs/chart-tool.md`.
+
 **Discriminated unions must be a field on a wrapping `BaseModel`, never the
 bare parameter type.** `def generate_chart(spec: ChartSpec)` loses the
 discriminator — framework schema-synthesis from a function signature drops
@@ -497,6 +540,12 @@ def get_page_info(
     active_page comes from report.getActivePage().displayName, captured
     client-side and sent as its own request field — NOT from filter_context,
     which carries no page information at all (.claude/rules/gateway.md).
+
+    Also present in the HumanMessage each turn for general grounding
+    (.claude/rules/orchestrator.md) — that's a separate, additional use, not
+    a replacement for injecting it here. The model shouldn't be trusted to
+    correctly relay which page is CURRENT back into a tool argument; this
+    parameter exists so it never has to.
     """
     page_name = page_name or active_page
     if page_name not in PAGES:

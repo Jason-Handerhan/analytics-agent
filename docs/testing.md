@@ -292,7 +292,6 @@ async def test_approve_resumes_and_returns_a_real_answer():
     assert paused.needs_approval
     resumed = await respond_to_approval(CONV, decision="approve")
     assert resumed.answer_markdown
-    assert resumed.claims
 
 async def test_resumed_turn_can_still_call_tools():
     """The approved query isn't necessarily the last thing needed. A resumed
@@ -316,14 +315,13 @@ def test_pause_and_response_rows_do_not_double_count():
 
 ```python
 # tests/test_e2e.py
-async def test_a_real_question_produces_a_valid_cited_answer():
+async def test_a_real_question_produces_a_valid_verified_answer():
     """The one test that catches broken wiring even when every individual
     piece tests fine in isolation. Real astream path, not a shortcut."""
     response = await run_agent_turn(
         "What's the test-set recall?", conversation_id="smoke-test")
     assert isinstance(response, AgentResponse)
     assert response.answer_markdown
-    assert response.claims
 ```
 
 ## 11. End-to-end: LLM-as-judge
@@ -332,11 +330,13 @@ async def test_a_real_question_produces_a_valid_cited_answer():
 # tests/test_judge_e2e.py
 async def test_judge_distinguishes_faithful_from_fabricated():
     """Not just 'does the judge run' — does it actually do its job. One row
-    where a claim genuinely matches its cited result, one where it's
-    fabricated. Scores must diverge in the right direction — never assert
-    exact values, that's testing the LLM's opinion, not the pipeline."""
-    faithful_row = build_telemetry_row(claims=[MATCHING_CLAIM])
-    broken_row = build_telemetry_row(claims=[FABRICATED_CLAIM])
+    where the stated number genuinely matches its tool result, one where
+    it's fabricated. Scores must diverge in the right direction — never
+    assert exact values, that's testing the LLM's opinion, not the pipeline."""
+    faithful_row = build_telemetry_row(
+        answer_markdown=FAITHFUL_ANSWER, tool_calls=REAL_TOOL_CALLS)
+    broken_row = build_telemetry_row(
+        answer_markdown=FABRICATED_ANSWER, tool_calls=REAL_TOOL_CALLS)
     await seed_telemetry_rows([faithful_row, broken_row])
     scores = await run_judge()
     assert scores[faithful_row["conversation_id"]] > scores[broken_row["conversation_id"]]
