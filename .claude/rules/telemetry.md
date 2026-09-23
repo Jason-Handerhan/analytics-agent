@@ -92,11 +92,10 @@ Only the writer code grows as tools get built.
 | `tool_calls` (nested record: `ToolCallRecord` fields + derived `query_text`) | No — empty | Phase 3, one tool at a time as each lands |
 | `answer_markdown` | Yes — the canned echo answer | Phase 1 |
 | `turn_started_at`, `turn_completed_at` | Yes | Phase 1 |
-| `claims` | No — null | Phase 3 (verification schema) |
 | `verified` | No — `False` | Phase 3 — **not** on `AgentResponse` by design, but logged here: it's the only way to confirm in production that every non-declined answer actually passed verification |
 | `verification_retry_count`, `length_retry_count` | No — 0 | Phase 3 — **two separate columns, same names as `AgentState`.** A single summed `retry_count` would hide which guardrail fired, which is the whole reason to log them |
 | `needs_approval` | No — `False` | Phase 3 (approval routing, not the dry-run/cap that ships with the tool) |
-| `pending_query`, `estimated_cost` | No — null | Phase 3 — **top-level, not nested in `tool_calls`**: a rejected query never executes, so it has no `started_at`/`result` to live alongside |
+| `pending_query`, `pending_queries`, `deferred_dax`, `estimated_cost` | No — null | Phase 3 — **top-level, not nested in `tool_calls`**: a query that hasn't run yet has no `started_at`/`result` to live alongside. `pending_query` (singular) is the largest pending query, same value as `AgentResponse.pending_query`, kept for cheap querying; `pending_queries`/`deferred_dax` (both plural) are the full lists, BigQuery and DAX respectively. `estimated_cost` scopes to *this batch only* — combine with `bytes_consumed` for the turn's running total at the moment of pause |
 | `approval_decision` | No — null | Phase 3 — `"approved"`/`"rejected"` on the response row; null on the pause row |
 | `cost_cap_exceeded` | No — `False` | Phase 3 — hard decline, logged synchronously like any normal turn |
 | `chart_url` | No — null | Phase 3 (`generate_chart`) |
@@ -106,6 +105,7 @@ Only the writer code grows as tools get built.
 | `bytes_consumed` | No — 0 | Phase 3 — the turn's BigQuery total, same counter the cost guardrail reads. The pause/response split means **summing both rows** gives the turn's real spend |
 | `iteration_count` | No — 0 | Phase 3 — **the count, not just `iteration_cap_hit`.** The cap is a calibration starting point (`.claude/rules/orchestrator.md`); a boolean only says how often 12 was hit, never what the 95th percentile actually needs |
 | `errors` | No — `[]` | Turn-level failures (stage, type, message, timestamp) — **not** the same as a failed `tool_calls` entry. Covers LLM call failures, verification exhaustion, chart failures. Carried in `AgentState.errors`; write it or the diagnosis is lost |
+| `claims` | **Not a field** — dropped | Superseded by pooled numeric matching (`.claude/rules/orchestrator.md`); nothing produces a `Claim` list anymore. `AgentResponse.claims` stays only as an always-`[]` wire-contract placeholder and isn't mirrored here |
 | `cancelled` | No — `False` | Phase 3 — set when `POST /ask/cancel` fires. **Different from abandoned approvals**, which are deliberately unlogged: a cancel is a real synchronous event with a clean trigger, not silence over time |
 | `iteration_cap_hit` | No — `False` | Phase 3 — same name and value as the `AgentResponse` field; one boolean, logged once |
 
@@ -137,8 +137,8 @@ everywhere else. So:
 1. **Pause row** — written when `/ask` returns `needs_approval: True`. A
    **complete record of everything up to the pause**: `tool_calls`,
    `prompt_tokens`, `completion_tokens`, `llm_calls`, `bytes_consumed`,
-   `errors`, timing, plus `pending_query` and `estimated_cost`.
-   `approval_decision` is null.
+   `errors`, timing, plus `pending_query`, `pending_queries`,
+   `deferred_dax`, and `estimated_cost`. `approval_decision` is null.
 2. **Response row** — written when `/ask/respond` fires. Same
    `conversation_id`, `approval_decision` set, covering **post-approval work
    only**.

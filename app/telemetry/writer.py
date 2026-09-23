@@ -33,6 +33,8 @@ def build_telemetry_row(
         "filter_context": None,
         "active_page": None,
         "pending_query": None,
+        "pending_queries": [],
+        "deferred_dax": [],
         "estimated_cost": None,
         "approval_decision": None,
         "chart_url": None,
@@ -49,7 +51,6 @@ def build_telemetry_row(
         "cancelled": False,
         "iteration_cap_hit": False,
         "tool_calls": [],
-        "claims": [],
         "errors": [],
         "suggested_follow_ups": [],
     }
