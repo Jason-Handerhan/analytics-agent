@@ -1,7 +1,7 @@
 ---
 paths:
   - 'app/mcp_server/**'
-  - 'app/orchestrator/bigquery_tool.py'
+  - 'app/orchestrator/tools.py'
   - 'app/model_schema.py'
   - 'tests/test_tools.py'
   - 'tests/test_chart_tool.py'
@@ -70,9 +70,11 @@ without paying for the container split yet.
 
 ```python
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from app.config import MCP_SERVER_HEADERS, MCP_SERVER_NAME, MCP_SERVER_URL
 
 client = MultiServerMCPClient({
-    "analytics": {"transport": "http", "url": "http://localhost:PORT/mcp"},
+    MCP_SERVER_NAME: {"transport": "streamable_http", "url": MCP_SERVER_URL,
+                       "headers": MCP_SERVER_HEADERS},
 })
 tools = await client.get_tools()
 ```
@@ -95,15 +97,16 @@ client config expects.
 # app/mcp_server/server.py
 from fastmcp import FastMCP
 
-mcp = FastMCP("analytics")
+from app.config import MCP_SERVER_NAME
+
+mcp = FastMCP(MCP_SERVER_NAME)
 
 # Importing each module runs its @mcp.tool() decorators, which is what
 # registers the tools. Import for side effect only — nothing is called here.
 # run_bigquery_sql is NOT here — it's a plain @tool in the orchestrator, not
-# MCP-registered (see the hosting table above). bigquery_schema still is: a
-# resource has none of the cross-call state that keeps the tool itself out.
+# MCP-registered (see the hosting table above). bigquery_schema isn't here
+# either — it's not exposed via MCP at all, see the section below.
 from app.mcp_server import (          # noqa: F401,E402
-    bigquery_schema,                  # resource only
     dax_tools,                        # run_dax_query
     measure_dax,                      # get_measure_dax
     docs_search,                      # search_docs
@@ -140,7 +143,9 @@ later changes the URL and adds auth headers — not this file.
 | `list_repo_files` | Paths + descriptions for the ML repo (Trees API, one call) | Entry point for any code question |
 | `read_repo_file` | One file's contents from the ML repo (Contents API) | Authoritative for implementation detail |
 | `generate_chart` | Visualization | Renders already-fetched data; **never** a number source |
-| `bigquery_schema` | *Resource*, not a tool | Live schema for `run_bigquery_sql` grounding |
+
+`bigquery_schema` isn't in this table — it's not an MCP tool or resource at
+all, see below.
 
 **Eight tools, one vector store** — deliberately not 1:1:
 
@@ -168,9 +173,10 @@ a convention. Three layers, each a different job:
    `run_bigquery_sql` runs as `agent-sa`, scoped to `agent_safe`;
    `search_docs` impersonates `vector-search-sa`, scoped to `vector_db`.
    Neither can reach the other's dataset (`docs/data-pipeline.md`).
-2. **`bigquery_schema` exposing `agent_safe` only** — the agent shouldn't be
-   composing queries against tables it can't see, so IAM is a backstop rather
-   than the thing shaping behaviour.
+2. **`get_bigquery_schema()` (`.claude/rules/orchestrator.md`) only ever reads
+   `agent_safe`** — the agent shouldn't be composing queries against tables
+   it can't see, so IAM is a backstop rather than the thing shaping
+   behaviour.
 3. **Prompt guidance** — steering only, never enforcement.
 
 **Domain split — BigQuery and DAX must not overlap:**
@@ -440,7 +446,16 @@ context.
 where a model blends the wrong one. Fetching in isolation removes the
 neighbour.
 
-## `bigquery_schema` (resource, not a tool)
+## `get_bigquery_schema()` — inside the static context bundle, not an MCP resource
+
+**Not exposed via MCP at all — a plain function in
+`app/orchestrator/context.py`** (`.claude/rules/orchestrator.md`), called
+directly when assembling the static context bundle. Originally designed as
+an MCP resource; that would have meant a *separate* fetch outside the cached
+system-prompt block, so it would never get Anthropic's prompt-cache discount
+the rest of the static bundle already gets — worse on the exact axis this
+bundle exists to optimize, for no compensating benefit. Baking it into
+`context.py` directly means it rides the same cached prefix for free.
 
 **Not `INFORMATION_SCHEMA` — confirmed, not assumed.** `INFORMATION_SCHEMA.COLUMNS`
 has no description field at all (checked directly against the real dataset).

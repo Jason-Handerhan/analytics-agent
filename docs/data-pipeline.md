@@ -198,9 +198,12 @@ reorder label), so collapsing it to `product_order_analysis`'s grain would
 destroy the history that question needs.
 
 **Those `columns:` descriptions are the agent's schema grounding, not
-documentation.** The `bigquery_schema` MCP resource reads them live from
-`INFORMATION_SCHEMA` — that's how `run_bigquery_sql` knows what columns mean.
-Write them as if explaining to a new analyst; don't restate the column name.
+documentation.** `get_bigquery_schema()` (`.claude/rules/orchestrator.md`,
+part of the static context bundle, not an MCP resource) reads them live via
+`client.list_tables`/`client.get_table` — **not `INFORMATION_SCHEMA`, which
+has no description field at all** (`.claude/rules/tools.md`) — that's how
+`run_bigquery_sql` knows what columns mean. Write them as if explaining to a
+new analyst; don't restate the column name.
 
 ```bash
 # 3. IAM — project-level jobUser + dataViewer scoped to agent_safe only
@@ -424,8 +427,8 @@ nested joins — and a parsing bug is a boundary you *believe* is enforced but
 isn't. BigQuery enforcing IAM has no such failure mode.
 
 **The tradeoff:** IAM's error is `Access Denied`, less actionable for a retry
-than *"use `agent_safe.X` instead"*. Mitigated by `bigquery_schema` only
-exposing `agent_safe` schemas — the agent shouldn't be composing queries
+than *"use `agent_safe.X` instead"*. Mitigated by `get_bigquery_schema()`
+only ever reading `agent_safe` — the agent shouldn't be composing queries
 against tables it can't see. IAM is the backstop, not the guide.
 
 ### Chunk schema

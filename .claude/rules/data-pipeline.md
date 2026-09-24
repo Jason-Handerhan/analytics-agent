@@ -57,9 +57,12 @@ Authorization is just `dataViewer` on `agent_safe`. Tables need a refresh
 trigger: execute the `agent_safe` tag when source data changes.
 
 **`columns:` descriptions are not documentation.** They're the agent's schema
-grounding — `bigquery_schema` reads them live from `INFORMATION_SCHEMA`, and
-that's how `run_bigquery_sql` knows what a column means. Write them as if
-explaining to a new analyst; never restate the column name. **A table without
+grounding — `get_bigquery_schema()` (part of the static context bundle, not
+an MCP resource, `.claude/rules/tools.md`) reads them live via
+`client.list_tables`/`client.get_table`, **not `INFORMATION_SCHEMA`, which
+has no description field**. That's how `run_bigquery_sql` knows what a
+column means. Write them as if explaining to a new analyst; never restate
+the column name. **A table without
 descriptions is one the agent will query badly.**
 
 ## Pipeline 2 — model schema, queried live not parsed

@@ -48,18 +48,20 @@ FastAPI gateway · Cloud Run
         ▼
 LangGraph orchestrator (StateGraph, typed state)
  [agent node: sees all tools, calls what it needs, loops until done]
- [verify: citation check + coverage check]
+ [verify: every number in answer_markdown matches this turn's tool results]
  [assemble AgentResponse]
+ run_bigquery_sql — plain @tool, not MCP-hosted; get_bigquery_schema() reads
+   agent_safe directly into the static context bundle, not an MCP resource
         │  MCP (MultiServerMCPClient, streamable_http → localhost)
         ▼
 MCP tool server · FastMCP
- run_dax_query · get_measure_dax · run_bigquery_sql · list_repo_files ·
- read_repo_file · search_docs · get_page_info · generate_chart ·
- bigquery_schema (resource)
+ run_dax_query · get_measure_dax · list_repo_files ·
+ read_repo_file · search_docs · get_page_info · generate_chart
         ▼
 Data + governance layer
  BigQuery (gold tables + 6 vector tables) · Power BI semantic model ·
- GCS (charts) · async telemetry → BigQuery + LLM-judge eval
+ GCS (charts) · telemetry (awaited insert, never backgrounded) → BigQuery +
+ LLM-judge eval
 ```
 
 **Why not native Power BI Copilot:** not approved for use at FedEx — the real,
@@ -96,7 +98,7 @@ State each as "in production I'd do X; for this build I did Y because Z."
 | Uploaded-image content | DLP pre-check: OCR for PII, redact flagged regions before the LLM sees the image | **No scanning.** Internal users attaching dashboard screenshots; the provider's own baseline safety classification is the only filter. Real gap in a production/public deployment — designed and deferred to Phase 7 (§6) |
 | Uploaded image retention | **Whether to retain at all, and for how long, is a governance/audit policy decision, not an engineering one** — implementation follows from that: redacted image (never the raw original), private signed-URL bucket, tiered Standard→Archive, correlated via a new `uploaded_image_uri` telemetry field | **Not built** — out of scope for a portfolio project |
 | Resume-across-deploy correctness | `code_version` on `PendingApproval` — detect a mismatch and decline the resume with a clear message, rather than run it against possibly-incompatible logic | **No check at all.** A pause sits open for minutes, not days; deploys are solo and infrequent, not a multi-team system where someone else might ship mid-approval unannounced. **Detection isn't correction anyway** — comparing version strings only tells you a mismatch happened, it doesn't reconcile changed field semantics. Actually fixing it means routing the resume to the *old* container image (the git-SHA-tagged image from CI, `docs/ci-cd.md`, is what makes that image addressable at all) — real versioned-routing infrastructure, the same category of complexity already declined for the checkpointer itself (§9.2a). Given the narrow exposure window, accepted as-is rather than built around |
-| Approval pause/resume | LangGraph `interrupt()` + `Command(resume=...)` with a persistent checkpointer — the canonical human-in-the-loop pattern | **`PendingApproval` in Firestore** — a minimal checkpointer scoped to the one point that pauses. Resume-from-anywhere matters for long-running agents where losing position is expensive; a turn here is seconds long, pauses in exactly one place, and — like most chat products — nothing is expected to survive leaving the app. Twelve known fields resume the one case that exists (`.claude/rules/orchestrator.md`). **The canonical path was evaluated in depth and is a real upgrade, not a rejected idea** — see §9.2a for the specific package, why vendor it, and what it would retire |
+| Approval pause/resume | LangGraph `interrupt()` + `Command(resume=...)` with a persistent checkpointer — the canonical human-in-the-loop pattern | **`PendingApproval` in Firestore** — a minimal checkpointer scoped to the one point that pauses. Resume-from-anywhere matters for long-running agents where losing position is expensive; a turn here is seconds long, pauses in exactly one place, and — like most chat products — nothing is expected to survive leaving the app. Eleven known fields resume the one case that exists (`.claude/rules/orchestrator.md`). **The canonical path was evaluated in depth and is a real upgrade, not a rejected idea** — see §9.2a for the specific package, why vendor it, and what it would retire |
 
 | Power BI query quota | **On-behalf-of token exchange** — swap the user's Entra token for a per-user Power BI token, so each user gets their own quota | **One shared service principal.** `executeQueries` allows 120 requests/minute *per user*, and every query here runs as the same SP — so all users share one bucket. OBO would mean per-user consent, per-user token caching, and a Power BI license for every user: real work for a ceiling this project won't approach. Revisit only under genuine concurrent load |
 | Abandoned approvals | Scheduled sweep logging an `incomplete` outcome | **Findable without a sweep** — a pause row with no matching response row *is* the record (`.claude/rules/telemetry.md`). Only the timing of abandonment is unrecorded, bounded by the pause timestamp and the conversation TTL |
@@ -412,9 +414,9 @@ ones:
 
 - **`is_projection: bool` — added to `AgentResponse` *with this feature*, not
   carried in the schema before it exists** —
-  explicitly exempt from the citation/coverage checks, not because it slipped
-  past them, but because it was never meant to go through them. Everything
-  else keeps its "fully verified" guarantee intact.
+  explicitly exempt from `verify_response`'s pooled numeric matching, not
+  because it slipped past it, but because it was never meant to go through
+  it. Everything else keeps its "fully verified" guarantee intact.
 - **A visually distinct card, reusing the `needs_approval` pattern** — a
   "Projection — AI-generated, unverified" card, structurally different from
   the normal source-badge UI, not a caveat a fast-moving user can skim past.

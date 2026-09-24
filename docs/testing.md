@@ -230,8 +230,9 @@ def test_every_turn_logs_a_row_with_every_required_field():
 
 ```python
 # tests/test_guardrails.py
-def test_verification_rejects_an_uncited_claim():
-    """Composition: citation + coverage + value must ALL hold."""
+def test_verification_rejects_an_unfounded_number():
+    """A number in answer_markdown with no match in this turn's tool_calls
+    pool fails verify_response, regardless of how plausible it looks."""
 
 def test_cost_threshold_triggers_approval():
 

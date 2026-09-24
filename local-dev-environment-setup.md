@@ -273,8 +273,8 @@ analytics-agent/
     └── fixtures/                  ← model-schema API-response samples + expected artifact
 ```
 
-**Twenty documents to copy in: the three `.md` files at the root, the five in
-`.claude/rules/`, and the twelve in `docs/`.** Copy each into the exact path
+**Twenty-two documents to copy in: the three `.md` files at the root, the
+five in `.claude/rules/`, and the fourteen in `docs/`.** Copy each into the exact path
 shown before running anything else — `pyproject.toml`, `uv.lock`, `Dockerfile`,
 and `.gitignore` are *generated* later, not copied. Everything under `app/`, `context/`, `definitions/`, `scripts/`,
 and `tests/` gets built out over the course of the project; the folders exist

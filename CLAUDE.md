@@ -103,7 +103,7 @@ you don't need to open these:
 |---|---|
 | `orchestrator.md` | `app/orchestrator/**`, `app/model_schema.py`, `app/exceptions.py`, verification + guardrail tests |
 | `gateway.md` | `app/gateway/**`, `app/config.py`, gateway tests |
-| `tools.md` | `app/mcp_server/**`, `app/orchestrator/bigquery_tool.py`, `app/model_schema.py`, tool + row-cap tests |
+| `tools.md` | `app/mcp_server/**`, `app/orchestrator/tools.py`, `app/model_schema.py`, tool + row-cap tests |
 | `telemetry.md` | `app/telemetry/**`, the judge + golden-runner scripts |
 | `data-pipeline.md` | `definitions/**`, `scripts/build_vector_db.py`, `scripts/build_model_context.py` |
 

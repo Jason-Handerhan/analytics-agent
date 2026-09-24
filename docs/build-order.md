@@ -2,9 +2,15 @@
 
 ## Current status — update this as we go
 
-**Phase: 3 in progress — items 1-3 (data prep, dashboard state capture, static context bundle) complete, item 4 (graph skeleton) partially started next**
+**Phase: 3 in progress — items 1-5 complete.** All of it promoted out of
+the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
+nodes, routing, graph) and the new `app/orchestrator/tools.py`
+(`run_bigquery_sql`, `dry_run`) — verified live end to end against a real
+MCP server, real Claude calls, and a real telemetry write.
 
-_Last updated: 2026-09-18._ **Phase 0 (2026-09-13): all nine items verified
+Item 6 (verification) next — `verify_node` is still a placeholder.
+
+_Last updated: 2026-09-24._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
 verification detail if ever needed; kept brief here since it's done, not
 current.
@@ -291,11 +297,53 @@ sets, and the final assembly).
   `scripts/build_model_context.py` derives the exclusion set automatically
   from the parameters it just built, no manual list needed.
 
-**Phase 3, item 4 (graph skeleton) — partially started already, during
-Phase 1.** `app/orchestrator/models.py` implements `Claim`/`AgentResponse`
-exactly as specified in `.claude/rules/orchestrator.md`'s verification
-contract. The five nodes, graph wiring, and everything else in item 4 are
-still ahead.
+**Phase 3, item 4 (graph skeleton) — complete.** `app/orchestrator/models.py`
+implements `Claim`/`AgentResponse` exactly as specified in
+`.claude/rules/orchestrator.md`'s verification contract (from Phase 1).
+`app/orchestrator/orchestrator.py` has the five nodes, routing functions,
+list-form `path_map` graph wiring, and `finalize`'s real
+`write_telemetry_row` call — `MCP_TOOLS`/`SYSTEM_MESSAGE` populated lazily by
+`init_orchestrator()`, not at import, so the module stays importable with no
+live MCP server or BigQuery call (same reasoning as `context.py`'s lazy
+`BIGQUERY_SCHEMA`). Verified end to end in
+`notebooks/phase3_orchestrator_e2e.ipynb` — real Claude calls, a real local
+MCP server, a real telemetry write. `notebooks/phase3_graph.ipynb` stays as
+the original prototyping notebook, unchanged.
+
+**No pytest for the graph/nodes themselves — still deliberate, not a gap.**
+The only meaningful check is live, against a real MCP server and real Claude
+calls (Layer 2). `app/telemetry/writer.py` now has real Layer 1 coverage
+(`tests/test_telemetry.py`) since its logic is pure serialization, no live
+call needed.
+
+**Phase 3, item 5 (`run_bigquery_sql` + guardrails) — complete.**
+`app/orchestrator/tools.py` has the tool, `dry_run`, and a lazily-
+constructed `bq_client` (same `@lru_cache` pattern as
+`app/telemetry/writer.py`'s `get_bq_client()`, so importing the module needs
+no live credentials). Built and verified live: `maximum_bytes_billed` (the
+engine-level fail-safe), the 40s timeout with explicit `cancel_job()`, the
+dry-run-based `ABSOLUTE_CAP` tier in `call_tool_node` (turn-cumulative, not
+per-query), `max_iterations` with partial-answer handling, and the
+answer-length check. `call_tool_node` also now builds a `ToolCallRecord`
+(with `query_text`, extracted from `args["query"]`/`args["dax"]`) and a
+`TurnError` (joined via `tool_call_id`, not index-matching) for every call.
+`finalize_node` computes `sources` and `prompt_tokens`/`completion_tokens`
+and passes everything real to `build_telemetry_row()`. `agent_telemetry`'s
+schema gained `tool_calls.id` and converted `pending_queries`/`deferred_dax`
+to `REPEATED RECORD` to match `AgentState`'s `{id, query}`/`{id, dax}` shape
+— table dropped and recreated, verified live with a full round-trip insert.
+The 1,000-row cap is also built: one `job.result(timeout=..., max_results=
+BIGQUERY_ROW_CAP)` call, with `rows.total_rows` (unaffected by `max_results`)
+checked against the cap to fail loudly with an actionable `ToolError` rather
+than silently handing back a partial result. Verified live for both the
+under-cap and over-cap cases, both in the notebook and against the promoted
+`app/orchestrator/tools.py`.
+
+**`AgentState` gained `history_messages`** — a stub for conversation
+history, kept deliberately separate from `messages` (writing history into
+`messages` would make each turn's Firestore entry recursively include every
+prior one). `agent_node` already prepends it to the LLM call. Not populated
+yet — needs item 10's `build_history_messages()`.
 
 **Keep this block current.** It's the only place that records where we
 actually are — everything below is the static plan. When a phase completes,
@@ -435,7 +483,9 @@ layer failed.
    wasted effort (`docs/data-pipeline.md`):
    - **`agent_safe` enrichment tables** — dimension joins, `type: "table"`,
      with `columns:` descriptions written properly. Those descriptions *are*
-     the agent's schema grounding, read live from `INFORMATION_SCHEMA`.
+     the agent's schema grounding, read live via `get_bigquery_schema()`
+     (`client.list_tables`/`client.get_table`, not `INFORMATION_SCHEMA` —
+     `.claude/rules/tools.md`).
    - **`vector_db.chunks_docs`** — run `scripts/build_vector_db.py` locally
      first to populate `staging.doc_chunks`, then execute the `vector_db`
      tag. **Always that order:** the model reads a staging table the script
@@ -502,8 +552,9 @@ layer failed.
    4. **`RELATIONSHIPS` + `PARAMETERS`** — join paths and what-if/field
       parameters, from the same artifact. Structural facts needed on nearly
       every DAX composition; never retrieved.
-   5. **`bigquery_schema`** — read once at startup into a module constant,
-      not per-request (`.claude/rules/tools.md`).
+   5. **`get_bigquery_schema()`** — lazy, `@lru_cache`d on first real use, not
+      a bare module constant and not per-request either
+      (`.claude/rules/tools.md`).
    6. **System instructions.**
    7. **The few-shot examples** (`.claude/rules/gateway.md`).
 
@@ -528,21 +579,20 @@ layer failed.
    **`finalize` must call `app/telemetry/writer.py`'s `write_telemetry_row`**
    (built and tested in Phase 1, deliberately left unwired until this node
    exists) — not a new write path, just the first real caller.
-5. **`bigquery_schema` MCP resource + TTL cache**, then **`run_bigquery_sql`
-   with every guardrail — tool-scoped *and* global — in the same step.**
-   Debugging a tool-calling loop against ungated BigQuery is how you generate
-   an expensive surprise, and the loop-level caps protect every test run from
+5. **`run_bigquery_sql` with every guardrail — tool-scoped *and* global — in
+   the same step.** Schema grounding is already in place (`get_bigquery_schema()`,
+   part of item 3's static context bundle — not a separate MCP resource,
+   `.claude/rules/tools.md`), so this item is just the tool itself. Debugging
+   a tool-calling loop against ungated BigQuery is how you generate an
+   expensive surprise, and the loop-level caps protect every test run from
    here on, not just this tool:
    - **Tool-scoped:** the dry-run cost gate and three tiers,
      `maximum_bytes_billed`, the 1,000-row cap, the 40s timeout with explicit
      `client.cancel_job()`.
    - **Global, and cheap to build now** (`.claude/rules/orchestrator.md`):
      `max_iterations` with partial-answer handling — the one that stops a
-     runaway loop burning tokens — plus the ~90s gateway timeout, the
-     answer-length check, and tool-output trimming between turns. All simple;
-     none benefits from waiting.
-
-   The schema resource comes first because it's what grounds the SQL.
+     runaway loop burning tokens — plus the ~90s gateway timeout and the
+     answer-length check. All simple; none benefits from waiting.
 6. **Verification** (`.claude/rules/orchestrator.md`) — `verify_response`'s
    pooled numeric matching, and the honest-decline path. Global rather than
    tool-scoped, but it exists *because* of numeric answers, so it lands as

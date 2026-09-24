@@ -62,9 +62,14 @@ class ToolCallRecord(TypedDict):
                          # generate_chart's source_tool_call_id resolves
     name: str
     args: dict            # the query lives HERE — {"query": "SELECT ..."} or
-                          # {"dax": "EVALUATE ..."}. No separate queries list:
-                          # `name` distinguishes SQL from DAX, and a second
-                          # copy could drift from this one.
+                          # {"dax": "EVALUATE ..."}.
+    query_text: str | None  # args["query"] or args["dax"], SQL/DAX only, else
+                            # None. Derived once at construction, not a second
+                            # independently-set field, so it can't drift from
+                            # args the way a hand-maintained copy could — it
+                            # exists so agent_telemetry's tool_calls RECORD can
+                            # be queried directly (`WHERE name = 'run_bigquery_sql'`)
+                            # without parsing JSON out of args.
     result: list[dict] | str   # query tools: one dict per ROW, native Python
                                # types (no serialization in state). Other tools
                                # return their own shape. FastMCP JSON-encodes
@@ -81,6 +86,10 @@ class TurnError(TypedDict):
     error_type: str
     message: str
     occurred_at: datetime
+    tool_call_id: str | None  # matches ToolCallRecord.id -- direct join, no
+                              # index-based matching. None reserved for a
+                              # failure with no single originating call (an
+                              # LLM call failure in `agent`, not built yet)
 
 def append_list(existing: list, new: list) -> list:
     """Accumulates a list across graph supersteps."""
@@ -104,9 +113,18 @@ class AgentState(TypedDict):
                                  # into get_page_info directly (`.claude/rules/tools.md`)
     image_base64: str | None
 
-    # Seeded at invocation with reconstructed history plus the question
-    # (`.claude/rules/gateway.md`), then accumulated during the loop. Plain
-    # BaseMessage, not a wrapper — passes straight to
+    # Reconstructed history (`build_history_messages()`, `.claude/rules/gateway.md`),
+    # set once at invocation. Kept OUT of `messages` deliberately: `messages`
+    # gets written back to Firestore each turn as messages_to_dict(state["messages"])
+    # (one new sessions.recent_messages entry per turn) — if history were seeded
+    # into `messages` too, every stored turn would recursively contain every
+    # prior one, growing unbounded instead of staying FIFO-trimmed. Prepended
+    # at LLM-call time only, same as the static system prompt:
+    # model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]]).
+    history_messages: list[BaseMessage]
+
+    # Seeded at invocation with just the question, then accumulated during
+    # the loop. Plain BaseMessage, not a wrapper — passes straight to
     # model.ainvoke()/bind_tools() calls with no unwrap step.
     # LangGraph's own add_messages, not append_list: nothing here ever
     # re-emits a message sharing an id with an earlier one, so its
@@ -131,20 +149,29 @@ class AgentState(TypedDict):
                                  # get a verified answer or an honest decline,
                                  # never a flag to interpret.
 
-    # Resource accumulators — must be summed live; per-call figures are gone
-    # by the time telemetry writes
+    # Resource accumulators
     bytes_consumed: int          # Cumulative across EVERY tool loop this turn,
                                  # and carried through an approval pause. The
                                  # absolute cap compares against this; the
-                                 # per-batch BIG_QUERY_THRESHOLD does not.
-    prompt_tokens: int
-    completion_tokens: int
+                                 # per-batch BIG_QUERY_THRESHOLD does not. Must
+                                 # be summed live -- per-call figures are gone
+                                 # by the time telemetry writes.
+    prompt_tokens: int           # Set once, in finalize -- sum_token_usage()
+    completion_tokens: int       # walks state["messages"] for every AIMessage's
+                                 # usage_metadata and totals input/output tokens.
+                                 # Deliberately NOT accumulated incrementally
+                                 # per LLM call: summing at the end is
+                                 # agent-count-agnostic, so a future
+                                 # LLM-calling node besides `agent` is picked
+                                 # up with no extra code to remember.
     llm_calls: int
 
-    # Turn-level failures — distinct from ToolCallRecord.error, which is scoped
-    # to a single tool call. Covers LLM call failures, verification exhaustion,
-    # chart failures, and anything unexpected in a node. A LIST: a turn can
-    # survive one failure and hit another; the first is often more diagnostic.
+    # Turn-level failures. A tool-call-scoped failure carries the matching
+    # tool_call_id (direct join to ToolCallRecord.id, one entry per failed
+    # call -- not deduped per batch); a future failure with no single
+    # originating call (LLM call failures, verification exhaustion, chart
+    # failures) would carry tool_call_id=None. A LIST: a turn can survive
+    # one failure and hit another; the first is often more diagnostic.
     errors: Annotated[list[TurnError], append_list]
 
     # Written mid-run by a node that finds the Firestore cancel flag set —
@@ -567,9 +594,19 @@ def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
     Consecutive, not global: schema → query → schema → query stays four
     entries in order, rather than collapsing to two and losing the sequence.
     groupby() groups adjacent equal items, which is exactly that.
+
+    tool_calls isn't already in chronological order as built: call_tool_node
+    dispatches run_bigquery_sql calls and other tool calls as two separate
+    batches (needed for the cost-cap dry-run gate), so a batch mixing both
+    returns bq calls before other calls regardless of the model's actual
+    request order. Sort by (started_at, name) first — every call dispatched
+    in the same batch shares one timestamp (one asyncio.gather()), so same-batch
+    calls land adjacent regardless of that grouping, while different batches
+    (different timestamps) stay separated even for the same tool name.
     """
+    ordered = sorted(tool_calls, key=lambda tc: (tc["started_at"], tc["name"]))
     names = [SOURCE_LABELS.get(tc["name"], tc["name"])
-             for tc in tool_calls if tc["success"]]
+             for tc in ordered if tc["success"]]
     return [f"{name} ({n})" if (n := len(list(grp))) > 1 else name
             for name, grp in groupby(names)]
 ```
@@ -589,7 +626,7 @@ source the answer rests on. Every attempt is still in `agent_telemetry`.
 | DAX row cap (`TOPN` + count check) | Rows returned | Different mechanism than BigQuery |
 | Answer-length check | Chars in `answer_markdown` | Separate from verification |
 | Question-length cap | Chars in the incoming `question` | Gateway request validation, not a turn guard |
-| `max_iterations` (12 tool calls) | Loop count | Conditional edge |
+| `max_iterations` (10 tool calls) | Loop count | Conditional edge |
 | Per-tool timeout (40s) | One slow call | Recoverable — agent retries narrower. Sized to leave room under the ~90s gateway budget for retries + synthesis; a long query isn't inherently a wrong one |
 | Gateway timeout (~90s) | Whole turn | Enforced in `app/gateway/` |
 
@@ -682,7 +719,7 @@ touching `call_tool_node`'s cost logic.
    then one `agent` call writes the final answer across old + new results.
    On reject, reuse the `iteration_cap_hit` partial-answer machinery.
 
-**12 is a calibration starting point, not a tuned value.** Exhaustion degrades
+**10 is a calibration starting point, not a tuned value.** Exhaustion degrades
 to a partial answer (below), so a high cap costs nothing — it just reveals how
 many iterations real questions need. `iteration_count` is logged per turn for
 exactly this (`.claude/rules/telemetry.md`): set the real cap above the 95th
@@ -697,10 +734,12 @@ budget, possibly mid-progress.
 1. **`route_after_call_tool` sends `iteration_cap_hit` back to `agent`, not
    straight to `finalize`** — `agent` still needs its own turn to actually
    write `answer_markdown` from whatever it has so far, the same path any
-   normal final answer takes. `iteration_cap_hit` stays `True` regardless of
-   what `agent` does next, so if it tries another tool call instead of
-   wrapping up, `call_tool` routes straight to `finalize` immediately after —
-   at most one extra turn, never a second cap-hit loop.
+   normal final answer takes. No special-casing a repeat attempt: if `agent`
+   tries another tool call anyway, `call_tool` checks the cap again like any
+   other turn and produces the same actionable "answer now" message — same
+   symmetric handling as `cost_cap_exceeded`, not a one-time allowance. Cheap
+   even if it recurs (the check short-circuits before any real tool runs),
+   and bounded regardless by the gateway's own turn timeout.
 2. **The model must state plainly that the answer is partial** and name what
    wasn't reached. System prompt: *"If you're stopped by the iteration limit
    before fully answering, state clearly that this is a partial answer and
@@ -920,9 +959,16 @@ no separate call to do it.** Plain text, not structured output, since
 verification no longer needs `Claim` objects to check against (above).
 
 ```python
+ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql}  # run_bigquery_sql
+                                                                  # isn't MCP-based
+                                                                  # (`.claude/rules/tools.md`)
+                                                                  # -- MCP_TOOLS alone
+                                                                  # would leave it uncallable
+
 async def agent_node(state: AgentState) -> dict:
-    model = llm.bind_tools(list(MCP_TOOLS.values()))   # docs/approval-workflow.md
-    response = await model.ainvoke(state["messages"])
+    model = llm.bind_tools(list(ALL_TOOLS.values()), strict=True)   # constrained
+                                                                     # decoding, above
+    response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
     update = {"messages": [response], "llm_calls": state["llm_calls"] + 1}
     if not response.tool_calls:
         update["answer_markdown"] = response.content

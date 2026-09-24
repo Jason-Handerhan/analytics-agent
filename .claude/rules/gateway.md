@@ -227,7 +227,7 @@ normally.
 
 | Collection | Lifetime | Holds | Read by |
 |---|---|---|---|
-| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `cancel_requested` (bool), `pending_approval` (**nested object, 10 fields — schema below**) | `GET /ask/status`, the cancel check, `POST /ask/respond` |
+| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `cancel_requested` (bool), `pending_approval` (**nested object, 11 fields — schema below**) | `GET /ask/status`, the cancel check, `POST /ask/respond` |
 | `sessions/{conversation_id}` | Whole conversation; 30-day TTL | `user_id`, `recent_messages`, `last_activity_at` | Prompt assembly, the ownership check |
 
 **`pending_approval` is a field, not a third collection** — it has its own
@@ -347,6 +347,14 @@ async def build_history_messages(conversation_id: str) -> list[BaseMessage]:
     return result
 ```
 
+**The result seeds `AgentState.history_messages`, a separate field from
+`messages`** — call it once, before `graph.astream(...)`, and pass it in as
+part of the initial state: `{"history_messages": history, "messages": [...]}`.
+Never merge it into `messages` itself (`.claude/rules/orchestrator.md`'s
+`AgentState` — the reason is the write-back above: `messages` becomes one new
+`recent_messages` entry per turn, and a history-seeded `messages` would make
+that entry recursively contain every prior turn too).
+
 **Tell the model what the row cap means**, in the system prompt
 (`app/orchestrator/context.py`): history's tool results are truncated to
 `HISTORY_ROW_CAP` rows, and re-running the same query this turn may
@@ -457,8 +465,9 @@ future "this user's recent conversations" query possible (`where user_id == X`)
 without committing to building it. The document stays keyed by
 `conversation_id`; `user_id` rides along as a field.
 
-**The `bigquery_schema` TTL cache and Entra's cached JWKS keys stay
-per-instance, not in Firestore.** Both are benign despite being
+**`get_bigquery_schema()`'s process-lifetime `@lru_cache` (no TTL —
+`.claude/rules/tools.md`) and Entra's cached JWKS keys stay per-instance, not
+in Firestore.** Both are benign despite being
 per-instance — each instance just fetches its own copy — so moving them
 would trade a harmless redundant fetch for real Firestore traffic with no
 actual benefit.
