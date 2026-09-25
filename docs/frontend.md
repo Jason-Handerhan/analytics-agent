@@ -95,10 +95,22 @@ colChat record:  { role: "user" | "agent",
                    chart_url: <optional, agent only> }
 ```
 
-**Gallery rows are fixed-height (`TemplateSize`), not auto-growing.** Both
-message types wrap their content in a `max-height` + `overflow-y: auto` div
-in the `HtmlText` formula rather than relying on the row itself growing —
-Power Apps galleries don't natively support per-row auto-height.
+**Gallery uses the Flexible height layout, not the standard `TemplateSize`
+gallery.** Confirmed against Microsoft's own docs (2026-09-25) — supersedes
+an earlier, incorrect claim here that Power Apps galleries can't auto-size
+per row; a dedicated Flexible height gallery variant exists for exactly this.
+Each message's row grows to fit its actual content, so the `HtmlText` formula
+no longer needs an internal `max-height` + `overflow-y: auto` scroll div —
+long messages and variable-length status text (below) both render without
+truncation or an inner scrollbar.
+
+**Known caveat, documented by Microsoft — verify in Studio, chosen anyway.**
+Scrolling a Flexible height gallery before all items finish loading can push
+the item currently in view out of frame once loading completes. Real risk
+here specifically: new messages keep appending mid-conversation while a user
+may be scrolled up reading earlier ones. Accepted trade-off — the auto-height
+win is worth it regardless of whether this surfaces in practice — but
+confirm the actual behavior once built rather than assuming either way.
 
 **`TextInput` uses `TextMode.MultiLine` for word-wrap, with typed newlines
 flattened to spaces before use.** Power Apps ties visual wrapping and
@@ -169,6 +181,23 @@ to the server; it isn't the history, and the server already has its own.
 
 - **Progress indication (both tiers, combined not either/or):** an always-visible thinking icon, plus real staged status — the gateway writes a status string to `live_turns/{conversation_id}` in **Firestore**, polled by a `Timer` via `GET /ask/status/{conversation_id}`
   (`.claude/rules/gateway.md`). Icon is the fallback if the status layer has a gap.
+
+  **A third tier, additive to both: the model's own summarized thinking, one
+  gallery row per round.** `GET /ask/status` also returns `thinking_log`
+  (`.claude/rules/gateway.md`) — a growing list of `{seq, text}` entries, one
+  per `agent` round that actually produced thinking (adaptive thinking means
+  not every round does; a round with none just adds nothing). Track a local
+  `varThinkingRowsRendered` counter, reset to `0` per turn; each `Timer` tick,
+  `Collect` one `colChat` row for every entry past that count, then advance
+  it — an unchanged `thinking_log` since the last poll naturally collects
+  zero rows, no special-casing needed. The final answer is unaffected: still
+  its own row, `Collect`ed once when the blocking `PostAsk` call resolves.
+
+  **Style thinking rows distinctly from a real answer** — grey, italic, a
+  serif fallback stack, smaller than body text:
+  `style="color: #6b7280; font-style: italic; font-family: Georgia, 'Times New Roman', serif; font-size: 0.9em;"`.
+  Same "verify visually once built" caveat as every other styling choice for
+  this control (`pending_query`, below).
 
   **Why polling rather than streaming.** Power Apps has no websocket or SSE
   support, so a `Timer` hitting a plain endpoint is the mechanism available —

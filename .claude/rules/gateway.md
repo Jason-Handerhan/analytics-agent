@@ -134,7 +134,7 @@ owner before any turn runs.
 |---|---|---|
 | `POST /conversation` | Mint a `conversation_id`, create its `sessions` doc | No — milliseconds |
 | `POST /ask` | Run one turn end to end; returns `AgentResponse` | **Yes** — the long one |
-| `GET /ask/status/{conversation_id}` | Read the current status string | No — polled every 1–2s |
+| `GET /ask/status/{conversation_id}` | Read the current status string and accumulated `thinking_log` | No — polled every 1–2s |
 | `POST /ask/respond/{conversation_id}` | Approve or reject a paused query | Yes — resumes the turn |
 | `POST /ask/cancel/{conversation_id}` | Set the cancel flag (Phase 3) | No — returns immediately |
 
@@ -163,8 +163,8 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
   of field names to keep in sync; that drift already bit once, when a field
   was removed from the model but left in the conversion. One model, one
   shape, all the way to the screen.
-- `GET /ask/status/{conversation_id}` — `{status: string}`, backs progress
-  indication. Reads `live_turns/{conversation_id}` in Firestore (see below).
+- `GET /ask/status/{conversation_id}` — `{status: string, thinking_log: list[dict]}`,
+  backs progress indication. Reads `live_turns/{conversation_id}` in Firestore (see below).
 - `POST /ask/respond/{conversation_id}` — body `{decision: "approve" | "reject"}`.
   The return path for the approval card. **A new request, not a resumed one**
   — the original `/ask` already returned. Reads the cached `pending_approval`
@@ -227,7 +227,7 @@ normally.
 
 | Collection | Lifetime | Holds | Read by |
 |---|---|---|---|
-| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `cancel_requested` (bool), `pending_approval` (**nested object, 11 fields — schema below**) | `GET /ask/status`, the cancel check, `POST /ask/respond` |
+| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 11 fields — schema below**) | `GET /ask/status`, the cancel check, `POST /ask/respond` |
 | `sessions/{conversation_id}` | Whole conversation; 30-day TTL | `user_id`, `recent_messages`, `last_activity_at` | Prompt assembly, the ownership check |
 
 **`pending_approval` is a field, not a third collection** — it has its own
@@ -253,6 +253,8 @@ each turn, which it's already doing in the same write that trims the array.
 live_turns/{conversation_id}          # scoped to ONE in-flight turn
 {
   "status": "Querying the database...",   # written per node by the astream loop
+  "thinking_log": [{"seq": 0, "text": "..."}],  # appended per agent-node round
+                                                # that produces summarized thinking
   "cancel_requested": false,               # written by POST /ask/cancel
   "pending_approval": {...} | null         # PendingApproval, schema below;
                                            # written on hitting the cost threshold
@@ -531,6 +533,7 @@ async def run_agent_turn(question: str, conversation_id: str) -> AgentResponse:
             set_status(conversation_id, "Running the approved query...")
         elif node == "agent":
             set_status(conversation_id, "Thinking...")
+            append_thinking(conversation_id, chunk["data"][node]["messages"][0])
         elif node == "verify":
             set_status(conversation_id, "Verifying results...")
         elif node == "finalize":
@@ -540,6 +543,17 @@ async def run_agent_turn(question: str, conversation_id: str) -> AgentResponse:
         # stale-but-accurate rather than blank.
     return build_agent_response(final_state)
 ```
+
+**`append_thinking(conversation_id, response)`** — reads `response.content` (the
+just-emitted `AIMessage`) for a `thinking` block with non-empty text
+(`agent_node`'s `thinking={"type": "adaptive", "display": "summarized"}`,
+`.claude/rules/orchestrator.md`), and if one exists, appends `{seq, text}` to
+`thinking_log` via `ArrayUnion` — `seq` a local counter in `run_agent_turn`,
+not read back from Firestore. **Adaptive thinking means not every round
+produces one** — a round with no `thinking` block appends nothing, no
+special-casing needed; `GET /ask/status` returns whatever `thinking_log` has
+accumulated so far, and a client polling faster than new entries arrive just
+sees the same list until the next one lands.
 
 **Enforce the ~90s timeout by wrapping this whole loop in `asyncio.wait_for(...)`**,
 not `ainvoke` — the `astream` consumption above already has to exist for

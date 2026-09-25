@@ -4,6 +4,16 @@ config {
   name: "product_order_analysis",
   tags: ["agent_safe"],
   description: "Order-line grain (one row per order x product), enriched with precomputed user, user-product, user-aisle, and user-department cumulative behavioral metrics -- reorder ratios, purchase concentrations, day-of-week/time-of-day affinities -- so most product and order questions don't require recomputing them from raw history.",
+  bigquery: {
+    // product_id leads -- product-level drill-down ("why does product X
+    // underperform") is the more likely single-column filter for a
+    // reorder-model dashboard than an arbitrary user lookup. user_id second:
+    // the pervasive user_product_* columns mean a compound (product, user)
+    // filter is a real, recurring shape, not hypothetical. Doesn't help an
+    // unfiltered full-population aggregate (e.g. correlation across every
+    // row) -- that's bound by TABLESAMPLE regardless of clustering.
+    clusterBy: ["product_id", "user_id"]
+  },
   // Same assertions shape as candidate_reorder_features -- rowConditions,
   // proven against the real ML repo's final_ml_features_table.sqlx.
   assertions: {

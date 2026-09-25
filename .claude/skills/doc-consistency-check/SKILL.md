@@ -33,6 +33,10 @@ files = [p for p in ['CLAUDE.md', 'conversational-analytics-platform-COMPONENT-R
                       'local-dev-environment-setup.md']
           + sorted(glob.glob('docs/*.md')) + sorted(glob.glob('.claude/rules/*.md'))
           if os.path.exists(p)]
+files = [p.replace(os.sep, '/') for p in files]  # glob() returns native separators on
+                                                   # Windows (backslash); every corpus.get()
+                                                   # lookup below uses a forward-slash literal,
+                                                   # so an unnormalized key silently misses
 corpus = {p: open(p, encoding='utf-8').read() for p in files}
 allok = True
 

@@ -61,8 +61,8 @@ a bug there should never be able to degrade live serving.
 - **Iteration distribution, and exhaustion rate by tool** — `iteration_count`
   gives the percentile spread that sets the real `max_iterations`
   (`.claude/rules/orchestrator.md`); `iteration_cap_hit` gives the exhaustion
-  rate, which answers the open item (§11) on whether DAX disproportionately
-  burns the budget. Counts, not judgments, and possible as an aggregate across
+  rate, which answers the calibration question in `.claude/rules/orchestrator.md`
+  on whether DAX disproportionately burns the budget. Counts, not judgments, and possible as an aggregate across
   full history precisely because the job runs as a batch, not per-turn.
 - **Latency and cost per turn** — flags inefficiency independent of
   correctness.

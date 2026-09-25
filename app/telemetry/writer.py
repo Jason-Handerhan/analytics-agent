@@ -6,6 +6,7 @@ from functools import lru_cache
 from google.cloud import bigquery
 
 from app.config import GCP_PROJECT_ID, TELEMETRY_DATASET, TELEMETRY_TABLE
+from app.telemetry.schema import SCHEMA
 
 
 @lru_cache
@@ -18,8 +19,8 @@ def _serialize_tool_call(tc: dict) -> dict:
     return {
         "id": tc["id"],
         "name": tc["name"],
-        "started_at": tc["started_at"].isoformat(),
-        "completed_at": tc["completed_at"].isoformat(),
+        "started_at": tc["started_at"],
+        "completed_at": tc["completed_at"],
         "args": json.dumps(tc["args"]),
         "query_text": tc["query_text"],
         "result": json.dumps(tc["result"]),
@@ -34,7 +35,7 @@ def _serialize_error(e: dict) -> dict:
         "stage": e["stage"],
         "error_type": e["error_type"],
         "message": e["message"],
-        "occurred_at": e["occurred_at"].isoformat(),
+        "occurred_at": e["occurred_at"],
         "tool_call_id": e["tool_call_id"],
     }
 
@@ -77,8 +78,8 @@ def build_telemetry_row(
         "user_id": user_id,
         "question": question,
         "answer_markdown": answer_markdown,
-        "turn_started_at": turn_started_at.isoformat(),
-        "turn_completed_at": turn_completed_at.isoformat(),
+        "turn_started_at": turn_started_at,
+        "turn_completed_at": turn_completed_at,
         "filter_context": json.dumps(filter_context),
         "active_page": active_page,
         "pending_query": pending_query,
@@ -106,11 +107,6 @@ def build_telemetry_row(
 
 
 async def write_telemetry_row(row: dict) -> list:
-    """Awaited, never backgrounded (.claude/rules/telemetry.md) — asyncio.to_thread
-    hands the blocking BigQuery call to a worker thread, but the caller still
-    waits for it, so the response can't be sent until this returns.
-
-    No home yet — called from post_ask in Phase 1; moves to the orchestrator's
-    finalize node once the graph exists in Phase 3."""
+    """Writes a telemetry row to BigQuery."""
     table_ref = f"{GCP_PROJECT_ID}.{TELEMETRY_DATASET}.{TELEMETRY_TABLE}"
-    return await asyncio.to_thread(get_bq_client().insert_rows_json, table_ref, [row])
+    return await asyncio.to_thread(get_bq_client().insert_rows, table_ref, [row], selected_fields=SCHEMA)

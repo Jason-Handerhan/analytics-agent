@@ -4,6 +4,14 @@ config {
   name: "candidate_reorder_features",
   tags: ["agent_safe"],
   description: "One row per (user, candidate product, anchor order) -- every product a user has ever ordered, evaluated as a reorder candidate for the order immediately following the anchor, with the reorder outcome label and the engineered features used to predict it. Use for questions correlating features against reorder likelihood; product_order_analysis is the right table for general order/product questions.",
+  bigquery: {
+    // Same ordering rationale as product_order_analysis: candidate_product_id
+    // leads (product-level drill-down is the likelier single-column filter),
+    // user_id second for the compound (product, user) shape the user_product_*
+    // columns already imply. No help for an unfiltered full-population
+    // aggregate -- TABLESAMPLE is still the lever for that.
+    clusterBy: ["candidate_product_id", "user_id"]
+  },
   columns: {
     user_id: "Unique identifier for the customer this training example belongs to.",
     anchor_order_id: "Order used as the reference point for this row's cumulative features — the order immediately before the label order.",

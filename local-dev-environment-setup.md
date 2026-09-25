@@ -201,8 +201,7 @@ every subsequent "add the X tool" conversation has an unambiguous home.
 mkdir -p app/gateway app/orchestrator app/mcp_server app/telemetry \
          context/docs context/page_info context/schema \
          context/orientation \
-         definitions/sources definitions/agent_safe \
-         definitions/vector_db \
+         definitions/agent_safe definitions/vector_db \
          .claude/rules docs \
          scripts notebooks tests/fixtures
 touch app/__init__.py app/config.py \
@@ -232,13 +231,15 @@ analytics-agent/
 │       ├── telemetry.md
 │       └── data-pipeline.md
 │
-├── docs/                         ← save all 12 doc files here
+├── docs/                         ← save all 14 doc files here
 │   ├── approval-workflow.md
 │   ├── auth.md
 │   ├── build-order.md
 │   ├── chart-tool.md
 │   ├── ci-cd.md
+│   ├── cloud-trace-migration.md
 │   ├── code-search.md
+│   ├── cross-domain-compute.md
 │   ├── data-pipeline.md
 │   ├── frontend.md
 │   ├── golden-dataset.md
@@ -247,7 +248,7 @@ analytics-agent/
 │   └── testing.md
 │
 ├── app/
-│   ├── config.py               # non-secret settings, read from env
+│   ├── config.py               # non-secret settings, hardcoded literals
 │   ├── exceptions.py           # ToolError, ToolTimeoutError, TurnCancelledError
 │   │                           # — shared, so a tool and the graph raise the same types
 │   ├── gateway/
@@ -263,7 +264,7 @@ analytics-agent/
 │
 ├── workflow_settings.yaml      # Dataform — must be at repo root
 ├── definitions/                # Dataform — must be at repo root
-│   ├── sources/
+│   ├── sources_*.sqlx          # flat files, no subfolder
 │   ├── agent_safe/
 │   └── vector_db/
 │
@@ -284,7 +285,7 @@ What each directory is for, and where its spec lives:
 
 | Path | Holds | Spec |
 |---|---|---|
-| `app/config.py` | Non-secret config constants (project ID, dataset names, timeouts) read from env vars, including `MODEL` — **same name as the deploy env var**, so a model swap is one value in one place | `.claude/rules/gateway.md` |
+| `app/config.py` | Non-secret config constants (project ID, dataset names, timeouts, `MODEL`) — **hardcoded literals, not env vars**, identical in every environment; a model swap is one value in one place | `.claude/rules/gateway.md` |
 | `app/exceptions.py` | `ToolError`, `ToolTimeoutError`, `TurnCancelledError` — shared so a tool and the graph raise and catch the same types | `.claude/rules/orchestrator.md` |
 | `app/gateway/` | FastAPI app, `/ask` + status + cancel endpoints, auth validation, Markdown→HTML | `.claude/rules/gateway.md`, `docs/auth.md`, `docs/frontend.md` |
 | `app/orchestrator/` | LangGraph graph, agent node, verification checks, guardrails | `.claude/rules/orchestrator.md` |
@@ -295,7 +296,7 @@ What each directory is for, and where its spec lives:
 | `context/schema/` | `model_schema.json` — **committed, read at startup** into the table + measure registries (`docs/data-pipeline.md`). Also BigQuery schema snapshots, which are a development aid only | `.claude/rules/gateway.md` |
 | `context/orientation/` | Exec summary + navigator + architecture diagram — always-in-context bundle | `.claude/rules/gateway.md` |
 | `scripts/` | One-off/manual jobs: `build_model_context.py` (semantic-model registries), `build_vector_db.py` (docs chunking), schema dumps, judge Cloud Run Job, golden dataset runner | `docs/data-pipeline.md`, `docs/llm-judge.md`, `docs/golden-dataset.md` |
-| `definitions/` | `sources/` declarations, `agent_safe/` tables (**tables only, never views**), `vector_db/` embedding models — **written and pushed here like any other code; deployed via a GitHub-linked Dataform repository, not by this repo directly** (`docs/data-pipeline.md`) | `docs/data-pipeline.md` |
+| `definitions/` | Flat `sources_*.sqlx` declarations, `agent_safe/` tables (**tables only, never views**), `vector_db/` embedding models — **written and pushed here like any other code; deployed via a GitHub-linked Dataform repository, not by this repo directly** (`docs/data-pipeline.md`) | `docs/data-pipeline.md` |
 | `notebooks/` | Throwaway validation of isolated logic against real data | — |
 | `tests/` | pytest suite (+ `conftest.py` fixtures) | `docs/testing.md` |
 
@@ -311,9 +312,10 @@ structure is settled before anyone has to guess at it.
 **A note on `config.py` vs. Secret Manager:** anything secret goes in Secret
 Manager (Step 15). `config.py` is for the non-secret values that would
 otherwise get hardcoded in five places — project ID, dataset names, the
-`vector-search-sa` principal, timeout values, the active model provider. Read
-environment variables there where it makes sense (`os.environ.get(...)`), so
-the same code works locally and on Cloud Run without edits.
+`vector-search-sa` principal, timeout values, the active model provider.
+These are hardcoded literals in `config.py` itself, not env vars — identical
+in every environment, so the same code works locally and on Cloud Run
+without edits (`CLAUDE.md`).
 
 ## Step 7 — `.gitignore` (do this before your first commit)
 
@@ -638,7 +640,7 @@ instead of failing on a missing API you then have to go enable and re-run.
    `agent-sa` and physically cannot read `vector_db`.
    ```bash
    bq mk --dataset YOUR_PROJECT:agent_safe   # enriched tables the agent queries
-   bq mk --dataset YOUR_PROJECT:vector_db    # embedded chunks search_docs reads read
+   bq mk --dataset YOUR_PROJECT:vector_db    # embedded chunks search_docs reads
    bq mk --dataset YOUR_PROJECT:staging      # doc_chunks + the embedding model
 
    # Both need jobUser to run any query at all — that's project-level.

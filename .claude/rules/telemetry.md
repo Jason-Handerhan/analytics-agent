@@ -85,6 +85,14 @@ turns; awaiting it is a rounding error.
 Create the table with every field up front rather than migrating piecemeal.
 Only the writer code grows as tools get built.
 
+**One definition, two consumers.** `app/telemetry/schema.py` holds the
+`SchemaField` list; `app/telemetry/create_table.py` imports it to create/
+recreate the table, and `writer.py` imports the same list as `insert_rows`'s
+`selected_fields` — so the table's real shape and what the writer sends can't
+drift apart. Re-run `create_table.py` after any schema change (BigQuery can't
+`ALTER` a column's mode or rename it, so a real change means drop + recreate
+— `notebooks/delete_agent_telemetry_table.ipynb` is the companion for that).
+
 | Field | Real when the table is first built (Phase 1)? | Populated from |
 |---|---|---|
 | `conversation_id`, `user_id`, `question` | Yes | Phase 1 |

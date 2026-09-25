@@ -264,7 +264,7 @@ Only compare BigQuery and DAX results directly when no query can produce
 the computed value already — Phase 7 (`docs/cross-domain-compute.md`)."*
 
 **No `is_projection` field — deliberately not carried.** The Phase 7
-`run_projection` tool (§11) would need one, because a
+`run_projection` tool (§9) would need one, because a
 projected number has no live tool result to match and would have to be
 *exempt* from this check. Add the field **with** that feature, not
 before: a field nothing sets and nothing reads is one more thing to keep in
@@ -493,7 +493,7 @@ already.
 unchanged:
 
 ```python
-llm = init_chat_model(MODEL)          # app/config.py, from the MODEL env var
+llm = init_chat_model(MODEL)          # MODEL is a hardcoded literal in app/config.py
 response = await llm.ainvoke([SystemMessage(content=get_static_context()), *messages])
 ```
 
@@ -907,9 +907,10 @@ def route_after_agent(state: AgentState) -> str:
     return "call_tool" if state["messages"][-1].tool_calls else "check_length"
 
 def route_after_call_tool(state: AgentState) -> str:
-    if state["cancelled"] or state["needs_approval"] or state["cost_cap_exceeded"]:
+    if state["cancelled"] or state["needs_approval"]:
         return "finalize"
-    return "agent"   # also the iteration_cap_hit path — see "Hitting max_iterations"
+    return "agent"   # also cost_cap_exceeded and iteration_cap_hit — see
+                     # "Hitting max_iterations"; symmetric, no special routing
 
 def route_after_check_length(state: AgentState) -> str:
     if check_answer_length(state["answer_markdown"]):
@@ -966,6 +967,9 @@ ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql}  # run_bigquery_
                                                                   # would leave it uncallable
 
 async def agent_node(state: AgentState) -> dict:
+    # llm is constructed with thinking={"type": "adaptive", "display": "summarized"}
+    # -- readable thinking text for append_thinking() (.claude/rules/gateway.md).
+    # No cost difference: thinking tokens bill the same regardless of display.
     model = llm.bind_tools(list(ALL_TOOLS.values()), strict=True)   # constrained
                                                                      # decoding, above
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
@@ -1008,21 +1012,21 @@ assembles from graph state, not something the LLM should be asked to set —
 constraining the call's output type to exactly what it actually produces is
 what `strict=True` schemas are for (below).
 
-### `finalize` — the single exit, six ways in
+### `finalize` — the single exit, five ways in
 
 `check_length` and `verify` each collapse two different outcomes into one
-edge. `iteration_cap_hit` isn't its own route — it rides along as a flag on
-whichever of these `agent` eventually reaches (above). Kept in sync with the
-actual conditional edges above; read those directly if this table and the
-code ever disagree.
+edge. `iteration_cap_hit` and `cost_cap_exceeded` aren't their own routes —
+`route_after_call_tool` sends both straight back to `agent`, and each rides
+along as a flag on whichever row below `agent` eventually reaches (above).
+Kept in sync with the actual conditional edges above; read those directly if
+this table and the code ever disagree.
 
 | From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
 |---|---|---|---|---|
 | `call_tool` | `cancelled` | Cancelled | `answer_markdown` if `agent` had already set one, else a fixed "this turn was cancelled" message | Normal row, `cancelled: True` |
 | `call_tool` | `needs_approval` | Approval pause | `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
-| `call_tool` | `cost_cap_exceeded` | Hard decline | `cost_cap_exceeded: True`, `estimated_cost` set, no approval offered | Normal row |
 | `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question | Normal row |
-| `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit: True` if that's how this turn got here | Normal row |
+| `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit`/`cost_cap_exceeded` set `True` if either is how this turn got here | Normal row |
 | `verify` | failed, `verification_retry_count` exhausted | Honest decline | "No verified figure for that" — no unverified number emitted | Normal row |
 
 **`finalize` never touches `live_turns` — every write to it lives in the

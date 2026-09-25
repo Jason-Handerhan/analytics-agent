@@ -45,21 +45,28 @@ through an HTML text control, not just the agent's — a plain Label couldn't
 support the scrollable-long-message fix below, and user questions turned out
 not to be reliably short. User text is manually HTML-escaped
 (`&`→`&amp;` before `<`/`>`, order matters) before rendering, closing the
-markup-injection gap a Label would otherwise have sidestepped. Also: gallery
-rows are fixed-height (`TemplateSize`), so both message types wrap long
-content in a `max-height` + `overflow-y: auto` div rather than growing the
-row — and `TextInput1` uses `TextMode.MultiLine` for wrapping, with typed
-newlines flattened to spaces before use (Power Apps ties wrapping and
-Enter-inserts-newline together; this decouples them).
+markup-injection gap a Label would otherwise have sidestepped. `TextInput1`
+uses `TextMode.MultiLine` for wrapping, with typed newlines flattened to
+spaces before use (Power Apps ties wrapping and Enter-inserts-newline
+together; this decouples them).
+
+**Gallery layout decision changed since this was built (2026-09-25):** the
+app above still uses the original fixed-height (`TemplateSize`) gallery with
+an internal `max-height` + `overflow-y: auto` scroll div. `docs/frontend.md`
+now specifies the Flexible height gallery layout instead — rebuilding the
+gallery to match is a real follow-up task, not done yet.
 
 **Item 7 done.** `telemetry.agent_telemetry` created (location `US`, matching
 the other three datasets — confirmed via `bq show`, not assumed) with the
 full schema from `.claude/rules/telemetry.md`, including the three nested
-`RECORD` fields. `app/telemetry/writer.py` builds a row and writes it via an
-awaited `asyncio.to_thread(insert_rows_json, ...)` call — confirmed this is
-genuinely not backgrounded (Cloud Run sees the request as in-flight for the
-whole duration, same as any other awaited I/O). One Layer 1 test
-(`tests/test_telemetry.py`), 10 passing overall.
+`RECORD` fields — defined once in `app/telemetry/schema.py`, imported by both
+`app/telemetry/create_table.py` (table creation) and `writer.py` (so
+`insert_rows`'s type conversion and the table's real shape can't drift
+apart). `app/telemetry/writer.py` builds a row and writes it via an
+awaited `asyncio.to_thread(insert_rows, ..., selected_fields=SCHEMA)` call —
+confirmed this is genuinely not backgrounded (Cloud Run sees the request as
+in-flight for the whole duration, same as any other awaited I/O). One Layer 1
+test (`tests/test_telemetry.py`), 10 passing overall.
 
 **Deliberately not wired anywhere yet.** `orchestrator.md` already specifies
 `finalize` as the real caller, but `finalize` doesn't exist until Phase 3
@@ -647,7 +654,10 @@ layer failed.
    `POST /ask/cancel/{conversation_id}` (`docs/frontend.md`). The endpoint and
    cancellation path shipped in Phase 3; this is the UI half, alongside the
    approve/reject buttons above.
-4. Progress indication, sample questions, follow-up chips.
+4. Progress indication, sample questions, follow-up chips — including the
+   `thinking_log`/`append_thinking` design (`.claude/rules/gateway.md`,
+   `docs/frontend.md`): a new `live_turns` field plus a gallery row per
+   summarized-thinking round, styled distinctly from a real answer.
 5. The remaining `generate_chart` spec types beyond Phase 3's three
    (`docs/chart-tool.md`) — add as real questions call for them.
 

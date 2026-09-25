@@ -255,6 +255,7 @@ async def call_tool_node(state: AgentState) -> dict:
     other_calls = [tc for tc in tool_calls if tc["name"] != "run_bigquery_sql"]
 
     batch_bytes = 0
+    estimates: list[int] = []
     cost_cap_exceeded = False
     if bq_calls:
         estimates = await asyncio.gather(*[dry_run(tc["args"]["query"]) for tc in bq_calls])
@@ -300,7 +301,13 @@ async def call_tool_node(state: AgentState) -> dict:
         for r in other_records if not r["success"]
     ]
 
-    billed_bytes = 0 if cost_cap_exceeded else batch_bytes
+    # Only bill bytes for calls that actually ran to completion -- a query
+    # that fails (MAX_BYTES_BILLED, timeout, bad SQL) was never billed by
+    # BigQuery, so charging its dry-run estimate against bytes_consumed would
+    # deplete the turn's budget for work that cost nothing.
+    billed_bytes = 0 if cost_cap_exceeded else sum(
+        est for est, r in zip(estimates, bq_records) if r["success"]
+    )
     return {
         "messages": bq_messages + other_messages,
         "iteration_count": state["iteration_count"] + 1,
