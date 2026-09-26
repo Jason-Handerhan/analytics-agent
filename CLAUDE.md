@@ -91,6 +91,9 @@ Much of it was written against docs rather than a running environment.
   apply to the guardrails this project deliberately specifies (row caps,
   cost tiers, actionable tool errors, verification) — those are required,
   not defensive bloat. If unsure which side something's on, ask.
+- **No pass-through helpers.** A small function whose only job is calling
+  another small function belongs inlined at the call site instead — that
+  extra layer of indirection isn't worth a name of its own.
 
 ---
 
@@ -139,8 +142,6 @@ than the task needs.
 - Real measure/table names from the live semantic model — documented DAX
   examples use placeholders.
 - Anything that changes the verification contract.
-- **The `extract_numeric_tokens` rule** — year/version/index vs. real value.
-  Propose a rule with accept/reject examples; confirm before locking a test.
 - Whether Instacart bronze already has `products`/`aisles`/`departments` with
   id→name mappings — check before assuming new ingestion is needed.
 - **The three cost thresholds**: `BIG_QUERY_THRESHOLD` (per *batch*, not per

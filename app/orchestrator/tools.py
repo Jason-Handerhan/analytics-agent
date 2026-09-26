@@ -1,4 +1,4 @@
-"""Non-MCP tools. Currently just run_bigquery_sql (.claude/rules/tools.md)."""
+"""Non-MCP tools: run_bigquery_sql and submit_answer (.claude/rules/tools.md)."""
 import asyncio
 import concurrent.futures
 from datetime import date, time
@@ -8,9 +8,15 @@ from functools import lru_cache
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 from langchain_core.tools import tool, ToolException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.config import BIGQUERY_ROW_CAP, BIGQUERY_TIMEOUT_SECONDS, GCP_PROJECT_ID, MAX_BYTES_BILLED
+from app.config import (
+    BIGQUERY_ROW_CAP,
+    BIGQUERY_TIMEOUT_SECONDS,
+    GCP_PROJECT_ID,
+    MAX_ANSWER_TABLE_ROWS,
+    MAX_BYTES_BILLED,
+)
 
 
 @lru_cache
@@ -88,6 +94,28 @@ async def run_bigquery_sql(query: str) -> list[dict]:
 #Ensures that ToolError exceptions raised in run_bigquery_sql() are converted to ToolMessage and handled by
 # the agent instead of crashing the agent.
 run_bigquery_sql.handle_tool_error = True
+
+
+class SubmitAnswerArgs(BaseModel):
+    answer_markdown: str = Field(
+        min_length=1,
+        description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- summarize the rest or use generate_chart instead.")
+    all_prose_numeric_claims: list[float] = Field(
+        description="Every number stated in prose as fact. Never include a number that already appears in a markdown table.")
+    suggested_follow_ups: list[str] = Field(
+        default=[],
+        description="1-3 short, natural follow-up questions, only when one would genuinely help. Leave empty otherwise.")
+
+
+@tool(args_schema=SubmitAnswerArgs)
+async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
+                         suggested_follow_ups: list[str]) -> str:
+    """Call this with your final answer once you have everything you need.
+    This is how you respond to the user -- do not write your answer as
+    plain text. Do not batch this with other tool calls -- if you do,
+    the submission is ignored and the loop continues.
+    """
+    return "Answer recorded."
 
 
 async def dry_run(query: str) -> int:

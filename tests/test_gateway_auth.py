@@ -1,18 +1,8 @@
 """Layer 1 tests for app/gateway/gateway.py auth — no real credentials needed.
 
-Lean by design: scoped to auth-bypass prevention specifically, not every
-failure mode that exists. Protocol/format checks (missing "Bearer " prefix,
-a structurally malformed token) are deliberately not tested here — removing
-either doesn't let anything bypass auth, it just changes which line of code
-produces the same 401. Everything below does prevent a real bypass if
-removed: a stolen/old token, a token for a different app or tenant, a
-forged signature, an edited payload, or a missing shared secret.
-
-Auth failure modes are tested once, directly against the shared
-validate_entra_token/validate_api_key functions — both endpoints call the
-same code, so there's no value in repeating each failure mode per endpoint.
-Endpoint tests cover only the one thing direct calls can't: the full
-request/response shape with valid credentials.
+Covers auth-bypass prevention (expired, wrong-audience, wrong-issuer, forged,
+and tampered tokens; wrong API key; conversation ownership) plus one
+valid-credentials request/response test per endpoint.
 """
 import base64
 import json
@@ -29,9 +19,8 @@ client = TestClient(app)
 
 
 def _tamper(token: str, **overrides) -> str:
-    """Re-encode the payload with different claims but leave the original
-    signature untouched — the signature was computed over the OLD payload,
-    so this is what a tampered-in-transit token looks like."""
+    """Re-encodes the payload with different claims, leaving the original
+    signature untouched."""
     header_b64, payload_b64, sig_b64 = token.split(".")
     padding = "=" * (-len(payload_b64) % 4)
     payload = json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
@@ -65,8 +54,7 @@ def test_wrong_issuer_rejected(make_token, patch_jwks):
 
 
 def test_not_microsoft_signed_rejected(make_token, other_signing_key, patch_jwks):
-    """Signed with a real, well-formed key — just not the one the JWKS
-    endpoint actually serves. This is what a forged token looks like."""
+    """Token signed with a key the JWKS endpoint doesn't serve."""
     forged = make_token(signing_key=other_signing_key)
     with pytest.raises(HTTPException) as exc:
         validate_entra_token(f"Bearer {forged}")
@@ -74,8 +62,7 @@ def test_not_microsoft_signed_rejected(make_token, other_signing_key, patch_jwks
 
 
 def test_tampered_payload_rejected(make_token, patch_jwks):
-    """Valid signature, but for a different payload than the one that
-    arrived — the classic tamper-in-transit case."""
+    """Valid signature, tampered payload."""
     tampered = _tamper(make_token(), oid="attacker-oid")
     with pytest.raises(HTTPException) as exc:
         validate_entra_token(f"Bearer {tampered}")
@@ -91,9 +78,7 @@ def test_wrong_api_key_rejected(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_wrong_owner_rejected(monkeypatch):
-    """A conversation that's real, just not this token's — without this
-    check, any signed-in user could read/act on anyone else's conversation
-    by ID alone."""
+    """Conversation exists but belongs to a different user."""
     snapshot = MagicMock()
     snapshot.exists = True
     snapshot.to_dict.return_value = {"user_id": "someone-elses-oid"}
@@ -113,8 +98,7 @@ def fake_db():
     db = MagicMock()
     doc_ref = db.collection.return_value.document.return_value
     doc_ref.set = AsyncMock(return_value=None)
-    # assert_owns_conversation's .get() — defaults to "exists, owned by the
-    # same oid auth_headers' token carries", so /ask's happy path passes.
+    # Defaults to a conversation owned by auth_headers' token
     snapshot = MagicMock()
     snapshot.exists = True
     snapshot.to_dict.return_value = {"user_id": "11111111-2222-3333-4444-555555555555"}

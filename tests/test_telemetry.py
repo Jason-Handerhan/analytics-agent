@@ -55,6 +55,8 @@ async def test_write_telemetry_row_success(monkeypatch):
         ],
         deferred_dax=[{"id": "c", "dax": 'EVALUATE ROW("x", 1)'}],
         chart_url=None,
+        suggested_follow_ups=["What about last quarter?"],
+        all_prose_numeric_claims=[0.42, 100.0],
     )
 
     errors = await writer.write_telemetry_row(row)
@@ -64,9 +66,7 @@ async def test_write_telemetry_row_success(monkeypatch):
         f"{GCP_PROJECT_ID}.{TELEMETRY_DATASET}.{TELEMETRY_TABLE}", [row], selected_fields=SCHEMA
     )
 
-    # Shape/format checks -- every field a real turn would produce, correctly
-    # typed for BigQuery (STRING columns JSON-dumped, datetimes left as native
-    # objects -- insert_rows converts them using selected_fields), not left null.
+    # Shape/format checks -- STRING columns JSON-dumped, datetimes left native
     assert row["conversation_id"] == "conv-123"
     assert row["turn_started_at"] == STARTED
     assert row["turn_completed_at"] == COMPLETED
@@ -77,8 +77,7 @@ async def test_write_telemetry_row_success(monkeypatch):
     assert row["completion_tokens"] == 45
     assert row["estimated_cost"] == "$0.02"
 
-    # tool_calls: args/result are STRING columns -- JSON-dumped, not raw
-    # Python objects. id/query_text pass straight through.
+    # tool_calls: args/result are JSON-dumped; id/query_text pass through
     assert row["tool_calls"][0]["id"] == "tc1"
     assert row["tool_calls"][0]["args"] == '{"query": "SELECT 1"}'
     assert row["tool_calls"][0]["result"] == '[{"a": 1}]'
@@ -88,8 +87,7 @@ async def test_write_telemetry_row_success(monkeypatch):
     assert row["errors"][0]["tool_call_id"] == "tc1"
     assert row["errors"][0]["occurred_at"] == STARTED
 
-    # pending_query (singular) is derived -- the largest of pending_queries,
-    # by character count (docs/approval-workflow.md)
+    # pending_query (singular) is the largest of pending_queries
     assert row["pending_query"] == "SELECT department, AVG(reordered) FROM orders GROUP BY department"
     assert row["pending_queries"] == [
         {"id": "a", "query": "SELECT 1"},
@@ -97,6 +95,9 @@ async def test_write_telemetry_row_success(monkeypatch):
     ]
     assert row["deferred_dax"] == [{"id": "c", "dax": 'EVALUATE ROW("x", 1)'}]
 
-    # Nothing produces these yet -- stay null/empty regardless of input
+    # Stays null regardless of input
     assert row["approval_decision"] is None
-    assert row["suggested_follow_ups"] == []
+
+    # suggested_follow_ups and all_prose_numeric_claims pass straight through
+    assert row["suggested_follow_ups"] == ["What about last quarter?"]
+    assert row["all_prose_numeric_claims"] == [0.42, 100.0]

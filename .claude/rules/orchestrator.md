@@ -17,23 +17,33 @@ paths:
 
 ## The verification contract — implement exactly
 
-**`Claim` is a wire-contract placeholder, not something any node produces.**
-Kept only because `AgentResponse` still types against it — always `[]`. Real
-faithfulness scoring works directly off stored `answer_markdown`/`tool_calls`
-(`docs/llm-judge.md`), not a structured claims list.
+**The model declares its final answer through a forced-shape tool,
+`submit_answer` (`.claude/rules/tools.md`), not plain text and not a
+`Claim` list.** `agent_node` binds it alongside every real tool; `call_tool_node`
+dispatches it exactly like `run_bigquery_sql` — same `ToolMessage` machinery,
+same telemetry logging via its args. This replaces the earlier citation-based
+`Claim` design entirely: no `Claim` type, no per-claim `source_tool_call_id`.
+Reasoning below, under "Not citation, not regex-scanned prose."
 
 ```python
-class Claim(BaseModel):
-    text: str
-    numeric_value: float | None = None
-    source_tool_call_id: str | None = None
+class SubmitAnswerArgs(BaseModel):
+    answer_markdown: str = Field(min_length=1)  # non-empty is what lets
+                                                 # verify_node's model_validate
+                                                 # tell "never submitted" apart
+                                                 # from a real answer
+    all_prose_numeric_claims: list[float]  # every number stated in PROSE as
+                                            # fact -- table cells are checked
+                                            # separately by extract_table_values,
+                                            # not re-declared here. No min,
+                                            # empty is legitimate for a purely
+                                            # qualitative answer
+    suggested_follow_ups: list[str] = []   # no min, same reasoning
 
 class AgentResponse(BaseModel):
     answer_markdown: str
     sources: list[str]
     needs_approval: bool = False
     chart_url: str | None = None
-    claims: list[Claim] = []
     suggested_follow_ups: list[str] = []
     iteration_cap_hit: bool = False   # see "Hitting max_iterations" below
     pending_query: str | None = None   # set ONLY when needs_approval is True.
@@ -189,9 +199,24 @@ class AgentState(TypedDict):
     estimated_cost: str | None
     cost_cap_exceeded: bool
     iteration_cap_hit: bool
+    answer_submitted: bool         # True exactly when submit_answer was the
+                                   # ONLY tool call_tool_node dispatched this
+                                   # round -- recomputed fresh every call_tool_node
+                                   # invocation, not accumulated, same pattern as
+                                   # cost_cap_exceeded. Batched with a real data
+                                   # tool -> stays False, submission ignored;
+                                   # route_after_call_tool reads this directly.
 
     # Building toward AgentResponse
     answer_markdown: str
+    all_prose_numeric_claims: list[float]  # set by call_tool_node from
+                                            # submit_answer's args when
+                                            # answer_submitted -- verify_node
+                                            # checks these plus
+                                            # extract_table_values(answer_markdown)
+                                            # against build_numeric_pool()
+    suggested_follow_ups: list[str]        # same source; flows straight to
+                                            # AgentResponse, unlike the claims
     chart_url: str | None
     sources: list[str]
 ```
@@ -203,40 +228,83 @@ update, which is what gives the telemetry writer a source for the `cancelled`
 field. `conversation_id` in state is all a node or tool needs for
 that lookup. See "Cancellation" below.
 
-**Two `AgentResponse` fields have no state counterpart — produce them when
+**One `AgentResponse` field has no state counterpart — produce it when
 building the response:**
 - **`pending_query`** — state holds `pending_queries` (plural, all of them).
   Display **the most expensive one**: it's the figure the human is actually
   being asked to approve, and showing a cheaper one understates the decision.
-- **`suggested_follow_ups`** — generated fresh when the answer is written,
-  not accumulated during the loop. Nothing carries it in state.
 
-**One deterministic check — plain Python, never another LLM call.**
+`suggested_follow_ups` used to fall in this category too, before `submit_answer`
+— now it's a real `AgentState` field, set the same round as `answer_markdown`.
 
-**Not per-claim citation — pooled matching.** Every number in
-`answer_markdown` (prose or a markdown table) must match *some* value from
-this turn's non-`search_docs` tool results — not a value from one specific
-cited call. `Claim.source_tool_call_id` isn't checked against anything;
-`Claim` is a wire-contract placeholder, not part of this (below). Dropped
-per-claim citation deliberately: the citation is exactly as model-produced
-and unverified as the number itself, so it adds a false-negative failure
-mode (a real number rejected over a mismatched call id) without closing a
-real gap — pooled matching alone is both simpler and no less rigorous.
+**Two deterministic checks — plain Python, never another LLM call.**
+
+**Not citation, and not full-prose regex-scanning — pooled matching against
+model-declared claims plus automatically-extracted table values.** Two
+designs were tried and dropped before this one:
+- **Per-claim citation** (an earlier `Claim{text, numeric_value,
+  source_tool_call_id}` design): dropped because the citation is exactly as
+  model-produced and unverified as the number itself — a false-negative
+  failure mode (a real number rejected over a mismatched call id) with no
+  real gap closed.
+- **Regex-scanning all of `answer_markdown`, prose included, for every
+  number**: dropped because prose contains meaningful numbers verification
+  was never meant to catch — *"I performed 3 queries"* (process narration)
+  or *"the Q3 2024 model"* (a year, not a value) — and the exclusion-rule
+  list needed to keep discovering and patching these cases has no natural
+  end. Self-reported claims trade some of regex-scanning's completeness (it
+  had no way for the model to omit a number from scrutiny) for eliminating
+  that open-ended false-positive problem; `docs/llm-judge.md`'s faithfulness
+  scoring backstops the residual gap.
+
+**Prose and tables are verified two different ways, deliberately — not one
+uniform mechanism for both.** Making the model re-declare every table cell
+into `all_prose_numeric_claims` was considered and rejected: a 25-row table (the
+existing cap) can mean 50-100+ values, doubling the output-token cost of a
+table-heavy answer, and worse, it invites a new failure mode — the model
+transcribes a table cell correctly, then mistypes the *same* value in the
+claims list, and a genuinely correct table fails verification over a
+copy-paste slip that has nothing to do with the data being real.
+
+So: `all_prose_numeric_claims` covers **prose only** — exactly where the model's
+judgment is needed to separate a real claim from narration, which a table
+cell can never be (a `|` row is data by construction). **Table values are
+extracted automatically**, reusing the same table-detection block-scanning
+`check_table_rows` already uses (above) — no LLM re-declaration, no
+transcription-drift risk, and the model doesn't pay extra tokens re-stating
+a table it already wrote.
 
 ```python
 def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
-    """Every numeric leaf across this turn's non-search_docs tool results."""
+    """Every number across this turn's non-search_docs, non-submit_answer
+    tool results."""
     pool: set[float] = set()
     for tc in tool_calls:
-        if tc["success"] and tc["name"] != "search_docs":
-            pool.update(extract_numeric_leaves(tc["result"]))
+        if tc["success"] and tc["name"] not in ("search_docs", "submit_answer"):
+            pool.update(extract_numeric_values(tc["result"]))
     return pool
 
-def verify_response(answer_markdown: str, tool_calls: list[ToolCallRecord]) -> tuple[bool, str | None]:
-    pool = build_numeric_pool(tool_calls)
-    for token in extract_numeric_tokens(answer_markdown):
-        if not any(abs(token - v) < 0.01 for v in pool):
-            return False, f"{token} does not match any tool result this turn."
+def verify_response(state: AgentState) -> tuple[bool, str | None]:
+    # 1. Shape check first -- catches "never called submit_answer" (answer_markdown
+    # stays "" all turn, since agent_node no longer falls back to response.content)
+    # and any malformed submission, before touching the numbers at all.
+    try:
+        SubmitAnswerArgs.model_validate({
+            "answer_markdown": state["answer_markdown"],
+            "all_prose_numeric_claims": state["all_prose_numeric_claims"],
+            "suggested_follow_ups": state["suggested_follow_ups"],
+        })
+    except ValidationError as e:
+        return False, (f"No valid answer was submitted: {e}. Call submit_answer "
+                       "with your final answer_markdown and any numeric claims it makes.")
+
+    # 2. Pooled matching -- declared prose claims plus automatically-extracted
+    # table values, both checked against the same pool.
+    pool = build_numeric_pool(state["tool_calls"])
+    all_claimed = state["all_prose_numeric_claims"] + extract_table_values(state["answer_markdown"])
+    for claim in all_claimed:
+        if not any(abs(claim - v) < 0.01 for v in pool):
+            return False, f"{claim} does not match any tool result this turn."
     return True, None
 ```
 
@@ -245,18 +313,17 @@ On failure: retry with a corrective message, **max 1–2**, then return an hones
 
 **Known limitation, don't solve now:** matching confirms a number appears
 *somewhere* in this turn's real data, not that it's semantically the right
-value for what the prose claims about it — true of citation-based matching
-too, since the citation itself was never independently verified either. Not
-solvable by tightening this check; `docs/llm-judge.md`'s faithfulness
-scoring is the layer for that residual risk.
+value for what the answer claims about it. Not solvable by tightening this
+check; `docs/llm-judge.md`'s faithfulness scoring is the layer for that
+residual risk.
 
 **Derived numbers (a percentage change, a difference, an average) must come
 from the query, not the model's own arithmetic — steered by system
 instructions, enforced by this same check regardless of compliance.** If the
-model computes something in prose instead of the query, that value won't
-exist in any tool result, `verify_response` won't find it, and the turn
-retries — the prompt only affects how often it succeeds on the first try,
-never the safety guarantee. System instructions (`app/orchestrator/context.py`):
+model computes something itself instead of the query, that value won't exist
+in any tool result, `verify_response` won't find it, and the turn retries —
+the prompt only affects how often it succeeds on the first try, never the
+safety guarantee. System instructions (`app/orchestrator/context.py`):
 *"When your answer needs a computed value — a percentage change, a
 difference, a ratio, an average — add it to the query itself (a calculated
 DAX measure, a SQL expression) rather than computing it in your response.
@@ -275,21 +342,26 @@ benefit.
 *"This system answers from historical/current data and existing model outputs.
 It does not generate forecasts or projections."*
 
-**Two helpers you'll need to write** (both pure functions, both worth their own
-Layer-1 tests — see `docs/testing.md`):
-- `extract_numeric_tokens(text) -> list[float]` — **called by
-  `verify_response`.** Normalizes commas, `%`, currency out of prose numbers,
-  table-aware (numbers inside markdown table cells, not just running prose).
-  **The year/version/index rule is undecided** — scanning text for numbers
-  false-positives on things that aren't data: *"the Q3 2024 model"* yields
-  `2024`, *"version 2.1"* yields `2.1`, and neither is a value needing a
-  match. Propose a rule with accept/reject examples and confirm it before
-  locking a test around it.
-- `extract_numeric_leaves(raw_result) -> list[float]` — **called by
-  `build_numeric_pool`.** Walks nested dicts/lists, returning every numeric
-  leaf. Handles both BigQuery row dicts and `executeQueries`'
+**Two helpers you'll need to write** (both pure functions, both worth their
+own Layer-1 test — see `docs/testing.md`):
+- `extract_numeric_values(raw_result) -> list[float]` — **called by
+  `build_numeric_pool`.** Walks nested dicts/lists, returning every number
+  found. Handles both BigQuery row dicts and `executeQueries`'
   `results[0].tables[0].rows` shape, where keys are fully qualified
   (`Table[Column]`) — irrelevant here since this returns values, not keys.
+- `extract_table_values(answer_markdown) -> list[float]` — **called by
+  `verify_response`.** Same table-block-detection *shape* as `check_table_rows`
+  (a `|---|`-style separator as a block's 2nd line means it's a real table) —
+  its own independent scan, not a shared call, per the no-pass-through-helpers
+  rule (`CLAUDE.md`). For each detected block, float-parses every cell,
+  normalizing commas/`%`/currency, skipping cells that aren't numeric.
+  Deliberately scoped to table cells only — never runs on prose lines, so it
+  can't reproduce the year/version/index false-positive problem
+  `extract_numeric_tokens` had.
+
+**`extract_numeric_tokens` is retired, not revived by `extract_table_values`**
+— the latter never touches prose, so it can't reproduce the false positives
+that killed the former (previously an open "ask me" item).
 
 ## Assembling the prompt
 
@@ -534,9 +606,10 @@ whether its *content* is acceptable. Constrained decoding stops the sampler
 from emitting a shape that doesn't match the schema at all — a different
 failure class, currently unguarded.
 
-Apply it on **tool-call argument schemas** — the only structured-output
-surface now that `agent`'s final answer is plain text, not a separate
-structured call (below).
+Apply it on **tool-call argument schemas** — including `submit_answer`'s,
+which is how the final answer arrives now (below). Not a separate
+structured-output call; the answer is just one more tool call under the same
+`strict=True` binding as every other tool.
 
 **It eliminates a failure class rather than speeding up recovery from one.**
 If an invalid structure can't be sampled, "malformed output" stops being an
@@ -624,7 +697,7 @@ source the answer rests on. Every attempt is still in `agent_telemetry`.
 | **Absolute byte cap** → hard decline | `AgentState.bytes_consumed`, **cumulative across every loop** and carried through a pause | No approval offered above this |
 | BigQuery row cap (`max_results`) | Rows returned | Orthogonal to cost |
 | DAX row cap (`TOPN` + count check) | Rows returned | Different mechanism than BigQuery |
-| Answer-length check | Chars in `answer_markdown` | Separate from verification |
+| Answer-length check | Chars in `answer_markdown`, and rows in any single table | Separate from verification |
 | Question-length cap | Chars in the incoming `question` | Gateway request validation, not a turn guard |
 | `max_iterations` (10 tool calls) | Loop count | Conditional edge |
 | Per-tool timeout (40s) | One slow call | Recoverable — agent retries narrower. Sized to leave room under the ~90s gateway budget for retries + synthesis; a long query isn't inherently a wrong one |
@@ -652,10 +725,18 @@ implementation in `.claude/rules/tools.md`:
 Row caps protect the *tool result*. Nothing stops the model writing a giant
 markdown table into `answer_markdown` anyway — and the Power Apps HTML control
 has a hard **16,384-character limit** (HTML inflates markdown tables
-significantly). Kept separate from `verify_response` on purpose.
+significantly). Kept separate from `verify_response` on purpose — this is
+about whether an answer can be *displayed*, not whether its numbers are real.
+
+Two checks, not one: total length, and the size of any single table within
+it — a table can blow well past what's reasonable to read in chat while
+still fitting under the character cap.
 
 ```python
-MAX_ANSWER_CHARS = 6000  # real margin below 16,384 — HTML inflation + card chrome
+MAX_ANSWER_CHARS = 6000        # real margin below 16,384 — HTML inflation + card chrome
+MAX_ANSWER_TABLE_ROWS = 25     # a table this size is still fine as generate_chart's
+                                # input data -- this only ever checks answer_markdown,
+                                # never a tool's raw result, so the chart path is untouched
 
 # Separate budgets, deliberately: a length failure must not consume
 # verification's retries. Both are the graph's routing conditions.
@@ -666,19 +747,52 @@ def check_answer_length(answer_markdown: str) -> bool:
     return len(answer_markdown) <= MAX_ANSWER_CHARS
 
 
+def check_table_rows(answer_markdown: str) -> bool:
+    """True if every markdown table in the answer has at most
+    MAX_ANSWER_TABLE_ROWS data rows."""
+    lines = answer_markdown.split("\n") + [""]
+    rows, block = 0, []
+    for line in lines:
+        if line.strip().startswith("|"):
+            block.append(line)
+            continue
+        # A real table needs a separator row (e.g. |---|---|) as its 2nd
+        # line -- otherwise this is just prose that happens to start with "|".
+        if len(block) >= 2 and re.match(r"^\|[\s\-:|]+\|$", block[1].strip()):
+            rows = max(rows, len(block) - 2)
+        block = []
+    return rows <= MAX_ANSWER_TABLE_ROWS
+
+
+def check_answer_displayable(answer_markdown: str) -> bool:
+    return check_answer_length(answer_markdown) and check_table_rows(answer_markdown)
+
+
 async def check_length_node(state: AgentState) -> dict:
-    if check_answer_length(state["answer_markdown"]):
+    answer = state["answer_markdown"]
+    if check_answer_displayable(answer):
         return {}
+    if not check_answer_length(answer):
+        note = ("Your answer is too long to display. Summarize the key findings "
+                "concisely, or generate a chart instead of listing rows.")
+    else:
+        note = (f"Your answer includes a table with more than {MAX_ANSWER_TABLE_ROWS} rows. "
+                "Show only the top results, summarize the rest, or generate a chart "
+                "instead of listing every row.")
     return {
         "length_retry_count": state["length_retry_count"] + 1,
-        "messages": [HumanMessage(content=(
-            "Your answer is too long to display. Summarize the key findings "
-            "concisely, or generate a chart instead of listing rows."))],
+        "messages": [HumanMessage(content=note)],
     }
 ```
 
+**`check_table_rows`'s table-detection logic — the same block-scanning
+pattern `extract_table_values` reuses below**, for the verification check.
+One shared way of recognizing "this is a real markdown table," not two.
+
 1. **Steering:** many rows → summarize (top N, key stats) and/or offer a chart
-   via `generate_chart`.
+   via `generate_chart`. System prompt also tells the model the real
+   `MAX_ANSWER_TABLE_ROWS` figure directly (`app/orchestrator/context.py`), so
+   it can plan around a known number instead of guessing.
 2. **Backstop:** on failure, loop back — **same retry pattern and 1–2 cap as
    verification.** Never truncate silently; that can cut off a partial-answer
    caveat mid-sentence.
@@ -909,11 +1023,13 @@ def route_after_agent(state: AgentState) -> str:
 def route_after_call_tool(state: AgentState) -> str:
     if state["cancelled"] or state["needs_approval"]:
         return "finalize"
+    if state["answer_submitted"]:
+        return "check_length"
     return "agent"   # also cost_cap_exceeded and iteration_cap_hit — see
                      # "Hitting max_iterations"; symmetric, no special routing
 
 def route_after_check_length(state: AgentState) -> str:
-    if check_answer_length(state["answer_markdown"]):
+    if check_answer_displayable(state["answer_markdown"]):
         return "verify"
     if state["length_retry_count"] < MAX_LENGTH_RETRIES:
         return "agent"
@@ -945,7 +1061,7 @@ g.add_edge("execute_approved", "agent")   # even on failure — the agent sees
 g.add_conditional_edges("agent", route_after_agent,
     {"call_tool": "call_tool", "check_length": "check_length"})
 g.add_conditional_edges("call_tool", route_after_call_tool,
-    {"finalize": "finalize", "agent": "agent"})
+    {"finalize": "finalize", "check_length": "check_length", "agent": "agent"})
 g.add_conditional_edges("check_length", route_after_check_length,
     {"verify": "verify", "agent": "agent", "finalize": "finalize"})
 g.add_conditional_edges("verify", route_after_verify,
@@ -955,16 +1071,19 @@ g.add_edge("finalize", END)
 graph = g.compile()
 ```
 
-**`agent` writes `answer_markdown` itself, whenever it has no tool calls —
-no separate call to do it.** Plain text, not structured output, since
-verification no longer needs `Claim` objects to check against (above).
+**`agent` never writes `answer_markdown` directly — the model has to call
+`submit_answer` to produce one.** No `response.content` fallback: if the
+model ends a round with plain text instead of calling a tool,
+`answer_markdown` simply stays whatever it was before (`""` on a fresh turn),
+which is exactly the signal `verify_node`'s `model_validate` step needs to
+catch "never submitted" (above).
 
 ```python
-ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql}  # run_bigquery_sql
-                                                                  # isn't MCP-based
-                                                                  # (`.claude/rules/tools.md`)
-                                                                  # -- MCP_TOOLS alone
-                                                                  # would leave it uncallable
+ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql,
+             "submit_answer": submit_answer}  # neither is MCP-based
+                                              # (`.claude/rules/tools.md`)
+                                              # -- MCP_TOOLS alone would
+                                              # leave both uncallable
 
 async def agent_node(state: AgentState) -> dict:
     # llm is constructed with thinking={"type": "adaptive", "display": "summarized"}
@@ -973,18 +1092,15 @@ async def agent_node(state: AgentState) -> dict:
     model = llm.bind_tools(list(ALL_TOOLS.values()), strict=True)   # constrained
                                                                      # decoding, above
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
-    update = {"messages": [response], "llm_calls": state["llm_calls"] + 1}
-    if not response.tool_calls:
-        update["answer_markdown"] = response.content
-    return update
+    return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 ```
 
 | Node | Role |
 |---|---|
 | `route_entry` | Branches on `pending_queries`. Pure routing, no work |
 | `execute_approved` | Runs each `pending_queries` entry directly in Python — no LLM |
-| `agent` | The LLM call, tools bound. Emits tool calls, or writes `answer_markdown` |
-| `call_tool` | Dispatches tools, checks cancel, increments `iteration_count` |
+| `agent` | The LLM call, tools bound. Emits tool calls only — `answer_markdown` only ever arrives via `submit_answer` |
+| `call_tool` | Dispatches tools (including `submit_answer`), checks cancel, increments `iteration_count`, sets `answer_submitted` |
 | `check_length` | Owns `length_retry_count` |
 | `verify` | `verify_response()`. Owns `verification_retry_count` |
 | `finalize` | Sets `AgentResponse` fields and writes telemetry — six routes in, see below |
@@ -1002,15 +1118,19 @@ live, not assumed.** Claude refuses to generate a new response when the
 conversation already ends in an assistant turn ("This model does not support
 assistant message prefill. The conversation must end with a user message.")
 — exactly what `agent`'s own prior tool-call-free `AIMessage` leaves it as.
-`check_length`'s retry message (above) isn't optional styling — it's what
-keeps that specific path alive at all; the same applies to any future
-`verify` retry message once item 6 builds real verification.
+`check_length`'s retry message and `verify_node`'s (both `model_validate`
+failure and a claim that didn't match) aren't optional styling — each is what
+keeps that specific retry path alive at all. `submit_answer`'s own dispatch
+already produces a real `ToolMessage`, satisfying the "conversation can't end
+on an assistant turn" requirement on its own — the *retry* message on top of
+that is what actually carries the corrective instruction.
 
-**A minimal model, not the full `AgentResponse`.** Fields like
-`needs_approval` and `pending_query` are guardrail outcomes `finalize`
-assembles from graph state, not something the LLM should be asked to set —
-constraining the call's output type to exactly what it actually produces is
-what `strict=True` schemas are for (below).
+**`SubmitAnswerArgs` is a minimal model, not the full `AgentResponse`.**
+Fields like `needs_approval` and `pending_query` are guardrail outcomes
+`finalize` assembles from graph state, not something the LLM should be asked
+to set — constraining the tool's schema to exactly what the model actually
+produces (the answer, its claims, follow-ups) is what `strict=True` schemas
+are for (below).
 
 ### `finalize` — the single exit, five ways in
 

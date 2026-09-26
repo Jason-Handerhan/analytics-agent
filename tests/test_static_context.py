@@ -6,23 +6,14 @@ import app.orchestrator.context as context
 
 
 def test_static_context_contains_all_seven_components(monkeypatch):
-    """Orientation bundle, TABLE_REGISTRY, MEASURE_REGISTRY,
-    RELATIONSHIPS/PARAMETERS, bigquery_schema, system instructions, few-shots —
-    all seven, every turn, in a FIXED order: a cache hit needs a
-    byte-identical prefix.
-
-    Two silent-failure modes this covers. Table registry and relationships
-    describe DIFFERENT tables (disconnected vs. connected) — dropping either
-    blinds run_dax_query to half the model. And MEASURE_REGISTRY must carry
-    names and descriptions but NOT dax bodies; leaking those defeats the
-    reason the split exists (.claude/rules/gateway.md).
-    """
+    """All seven static-context components present, in a fixed order, and
+    MEASURE_REGISTRY contains no measure's DAX body."""
     monkeypatch.setattr(context, "get_bigquery_schema", lambda: "BIGQUERY SCHEMA -- fake")
     context.get_static_context.cache_clear()
 
     result = context.get_static_context()
 
-    #If List (Claude) extract text, otherwise (OpenAI, Gemini) use string directly.
+    # Claude returns a list of content blocks; OpenAI/Gemini return a string.
     text = result[0]["text"] if isinstance(result, list) else result
 
     markers = [
@@ -39,8 +30,7 @@ def test_static_context_contains_all_seven_components(monkeypatch):
     positions = [text.index(marker) for marker in markers]
     assert positions == sorted(positions), "static context components are out of order"
 
-    # No measure's DAX body leaked into the registry meant to hold only
-    # names and descriptions.
+    # No measure's DAX body in the registry
     from app.model_schema import MEASURE_DAX, MEASURE_REGISTRY
 
     for dax in MEASURE_DAX.values():

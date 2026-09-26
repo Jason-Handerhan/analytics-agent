@@ -1,9 +1,7 @@
 """Layer 1 test for app/main.py's shutdown-propagation logic (docs/testing.md).
 
-Only _propagate_shutdown's own mirroring logic is exercised here, with plain
-fakes standing in for uvicorn.Server. The OS-signal-to-should_exit wiring is
-uvicorn's own capture_signals()/handle_exit(), inside the public serve() —
-not our code, not retested here.
+Exercises _propagate_shutdown's mirroring logic with plain fakes standing in
+for uvicorn.Server.
 """
 import asyncio
 from types import SimpleNamespace

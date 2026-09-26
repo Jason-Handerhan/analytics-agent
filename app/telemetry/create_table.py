@@ -1,8 +1,12 @@
 """Creates telemetry.agent_telemetry from app/telemetry/schema.py's SCHEMA
 (.claude/rules/telemetry.md). exists_ok=True on both dataset and table --
 safe to re-run, and does NOT alter an already-existing table's schema if
-one's already there with different fields (BigQuery can't ALTER a column's
-mode or rename it -- a real schema change means dropping and recreating).
+one's already there with different fields. Adding a brand-new column to the
+live table is a small ALTER TABLE ADD COLUMN, handled ad hoc in
+notebooks/alter_agent_telemetry_table.ipynb -- this script won't do it for
+you. Only modifying or renaming an existing column needs a real drop and
+recreate (BigQuery can't ALTER a column's mode or rename it), via
+notebooks/delete_agent_telemetry_table.ipynb followed by a re-run here.
 
 Run manually after a schema change:
     uv run python -m app.telemetry.create_table

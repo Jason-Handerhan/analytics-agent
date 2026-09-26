@@ -26,8 +26,9 @@ paths:
 | `list_repo_files`, `read_repo_file` | Yes |
 | `generate_chart` | Yes |
 | `run_bigquery_sql` | **No** — a plain LangChain `@tool` in the orchestrator |
+| `submit_answer` | **No** — a plain LangChain `@tool` in the orchestrator |
 
-**`run_bigquery_sql` is the one exception, deliberately.** Its safety depends
+**`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
 whole *batch*, the absolute cap is cumulative across the *entire
 conversation*, and cancellation is wired to the gateway's turn timeout
@@ -37,6 +38,12 @@ replicate our exact budget-tracking and cancellation plumbing to use it
 safely at all. Every other tool's guardrails (row caps, schema constraints)
 are enforceable *inside a single call*, with no memory of anything outside
 it — that's what makes them safe to expose over MCP as-is.
+
+**`submit_answer` is the other, for a different reason: it isn't a data
+tool at all.** It's how the model delivers its final answer and numeric
+claims (`.claude/rules/orchestrator.md`) — control flow internal to this
+graph, not something an external MCP client would ever have a reason to
+call. See its own section below.
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -145,7 +152,9 @@ later changes the URL and adds auth headers — not this file.
 | `generate_chart` | Visualization | Renders already-fetched data; **never** a number source |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at
-all, see below.
+all, see below. `submit_answer` isn't either — it's not a number *source*,
+it's how the model delivers the answer built from everything above; see its
+own section below.
 
 **Eight tools, one vector store** — deliberately not 1:1:
 
@@ -268,6 +277,44 @@ not duplicated here.
   Fail loudly with the actionable message above, not a silent truncation —
   the agent needs to know the result was incomplete, the same instinct as
   `iteration_cap_hit`.
+
+## `submit_answer` — the structured-answer tool
+
+Not MCP-hosted, for the same reason given above — control flow internal to
+this graph, not something an external client would call. Contract only;
+dispatch/routing/verification mechanics are `.claude/rules/orchestrator.md`.
+
+```python
+class SubmitAnswerArgs(BaseModel):
+    answer_markdown: str = Field(min_length=1)  # non-empty is what flags a
+                                                 # never-submitted answer --
+                                                 # verify_node's model_validate
+    all_prose_numeric_claims: list[float]  # prose numbers only -- table cells
+                                            # are checked separately by
+                                            # extract_table_values
+    suggested_follow_ups: list[str] = []
+
+@tool(args_schema=SubmitAnswerArgs)
+async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
+                         suggested_follow_ups: list[str]) -> str:
+    """Call this with your final answer once you have everything you need.
+    This is how you respond to the user -- do not write your answer as
+    plain text.
+    """
+    return "Answer recorded."
+```
+
+**No forced tool choice, and that's a real constraint to design around, not
+an oversight.** `agent_node` can't set `tool_choice` to force `submit_answer`
+specifically — the same node handles every round of the loop, and sometimes
+the model legitimately needs `run_bigquery_sql` instead. It's one more
+*optional* tool; `verify_node`'s `model_validate` is what catches the model
+never calling it.
+
+**Excluded from `build_sources`'s badges** — not something the answer draws
+information *from*. **Included in `agent_telemetry.tool_calls`** like any
+other call, giving every submission a full audit trail regardless of
+verification outcome.
 
 ## `run_dax_query`
 

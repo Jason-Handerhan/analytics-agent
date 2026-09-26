@@ -9,17 +9,20 @@ from itertools import groupby
 from operator import itemgetter
 from typing import Annotated, TypedDict
 
+import mistune
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_anthropic import ChatAnthropic
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from pydantic import ValidationError
 
 from app.config import (
     ABSOLUTE_CAP,
     BIGQUERY_PRICE_PER_TIB,
     MAX_ANSWER_CHARS,
+    MAX_ANSWER_TABLE_ROWS,
     MAX_ITERATIONS,
     MAX_LENGTH_RETRIES,
     MAX_VERIFY_RETRIES,
@@ -29,7 +32,7 @@ from app.config import (
     MODEL,
 )
 from app.orchestrator.context import get_static_context
-from app.orchestrator.tools import dry_run, run_bigquery_sql
+from app.orchestrator.tools import SubmitAnswerArgs, dry_run, run_bigquery_sql, submit_answer
 from app.telemetry.writer import build_telemetry_row, write_telemetry_row
 
 MCP_TOOLS: dict[str, BaseTool] = {}
@@ -48,12 +51,8 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
     })
     tools = await client.get_tools()
     MCP_TOOLS = {t.name: t for t in tools}
-    ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql}
+    ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql, "submit_answer": submit_answer}
     SYSTEM_MESSAGE = SystemMessage(content=get_static_context())
-
-
-def check_answer_length(answer_markdown: str) -> bool:
-    return len(answer_markdown) <= MAX_ANSWER_CHARS
 
 
 # --- State & reducers --------------------------------------------------
@@ -122,27 +121,25 @@ class AgentState(TypedDict):
     estimated_cost: str | None
     cost_cap_exceeded: bool
     iteration_cap_hit: bool
+    answer_submitted: bool  # True only when submit_answer was the sole tool
+                            # call dispatched this round -- doesn't count
+                            # against iteration_count (it's the response
+                            # mechanism, not a data-gathering tool)
 
     # Building toward AgentResponse
     answer_markdown: str
     chart_url: str | None
     sources: list[str]
+    all_prose_numeric_claims: list[float]  # every number the model states in
+                                           # prose as fact -- set by call_tool_node
+                                           # from submit_answer's args
+    suggested_follow_ups: list[str]        # same source; flows straight to
+                                           # AgentResponse, unlike the claims
 
 
 # --- Helper functions ----------------------------------------------------
 
-# Past-tense badges -- distinct from FRIENDLY_TOOL_NAMES (.claude/rules/gateway.md)
-SOURCE_LABELS = {
-    "run_bigquery_sql": "Query warehouse",
-    "run_dax_query":    "Query dashboard",
-    "get_measure_dax":  "Measure Lookup",
-    "get_page_info":    "PBI page info",
-    "list_repo_files":  "list code",
-    "read_repo_file":   "Read code",
-    "search_docs":      "Doc Search",
-    "generate_chart":   "Create chart",
-}
-
+# call_tool_node: cost gate + tool-call bookkeeping
 
 def exceeds_absolute_cap(bytes_consumed: int, batch_bytes: int, cap: int = ABSOLUTE_CAP) -> bool:
     """True if dispatching this batch would push the turn's cumulative bytes at/over cap."""
@@ -152,23 +149,6 @@ def exceeds_absolute_cap(bytes_consumed: int, batch_bytes: int, cap: int = ABSOL
 def format_cost(num_bytes: int) -> str:
     """Byte count as a display dollar string -- display only, not the decision."""
     return f"${(num_bytes / 1024**4) * BIGQUERY_PRICE_PER_TIB:.2f}"
-
-
-def sum_token_usage(messages: list[BaseMessage]) -> tuple[int, int]:
-    """Sums prompt/completion tokens across every AIMessage this turn."""
-    ai_messages = [m for m in messages if isinstance(m, AIMessage)]
-    prompt_tokens = sum(m.usage_metadata["input_tokens"] for m in ai_messages)
-    completion_tokens = sum(m.usage_metadata["output_tokens"] for m in ai_messages)
-    return prompt_tokens, completion_tokens
-
-
-def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
-    """Ordered source labels for successful calls, consecutive runs collapsed with a count."""
-    ordered = sorted(tool_calls, key=itemgetter("started_at", "name"))
-    names = [SOURCE_LABELS.get(tc["name"], tc["name"])
-             for tc in ordered if tc["success"]]
-    return [f"{name} ({n})" if (n := len(list(grp))) > 1 else name
-            for name, grp in groupby(names)]
 
 
 def build_tool_call_record(
@@ -231,22 +211,181 @@ def iteration_cap_update(tool_calls: list[dict], iteration_count: int) -> dict:
     }
 
 
+# Shared GFM table parser -- used by check_table_rows below and by
+# extract_table_values further down (verify_node section).
+_markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
+
+
+# check_length_node: answer-length guardrail
+
+def check_answer_length(answer_markdown: str) -> bool:
+    return len(answer_markdown) <= MAX_ANSWER_CHARS
+
+
+def check_table_rows(answer_markdown: str) -> bool:
+    """True if every markdown table in the answer has at most
+    MAX_ANSWER_TABLE_ROWS data rows."""
+    for block in _markdown_ast(answer_markdown):
+        if block.get("type") != "table":
+            continue
+        body = next((c for c in block["children"] if c["type"] == "table_body"), None)
+        if body is None:
+            continue
+        if len(body["children"]) > MAX_ANSWER_TABLE_ROWS:
+            return False
+    return True
+
+
+# verify_node: pooled numeric-claim verification
+
+NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
+
+
+def extract_numeric_values(data: list[dict] | str) -> list[float]:
+    """Recursively pulls every numeric leaf out of a tool result."""
+    values: list[float] = []
+    if isinstance(data, bool):
+        return []
+    if isinstance(data, (int, float)):
+        values.append(float(data))
+    elif isinstance(data, dict):
+        for v in data.values():
+            values.extend(extract_numeric_values(v))
+    elif isinstance(data, list):
+        for item in data:
+            values.extend(extract_numeric_values(item))
+    return values
+
+
+def _cell_text(node: dict) -> str:
+    """Extracts text from a cell by recursively checking levels for the text node."""
+    if node.get("type") == "text":
+        return node.get("raw", "")
+    return "".join(_cell_text(child) for child in node.get("children", []))
+
+
+def extract_table_values(answer_markdown: str) -> list[float]:
+    """Pulls every numeric cell out of every markdown table in answer_markdown."""
+    values: list[float] = []
+    for block in _markdown_ast(answer_markdown):
+        if block.get("type") != "table":
+            continue
+        body = next((c for c in block["children"] if c["type"] == "table_body"), None)
+        if body is None:
+            continue
+        for row in body["children"]:
+            for cell in row["children"]:
+                text = _cell_text(cell).strip()
+                normalized = text.replace(",", "").replace("%", "").replace("$", "")
+                try:
+                    values.append(float(normalized))
+                except ValueError:
+                    pass
+    return values
+
+
+def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
+    """Every number from this turn's successful BigQuery/DAX query results --
+    the only tools that return genuine queried data, not incidental numbers
+    embedded in code, doc chunks, or metadata."""
+    pool: set[float] = set()
+    for tc in tool_calls:
+        if tc["success"] and tc["name"] in NUMERIC_SOURCE_TOOLS:
+            pool.update(extract_numeric_values(tc["result"]))
+    return pool
+
+
+def _decimal_places(value: float) -> int:
+    """Decimal digits in value's shortest string form -- a bare ".0"
+    means a whole number (0 decimals), not 1."""
+    text = str(value)
+    if "." not in text:
+        return 0
+    frac = text.split(".")[1]
+    return 0 if frac == "0" else len(frac)
+
+
+def claim_matches_pool(claim: float, pool: set[float]) -> bool:
+    """True if claim is a legitimately-rounded or percentage-scaled
+    representation of some tool result, not just numerically close to one."""
+    precision = _decimal_places(claim)
+    return any(
+        round(v, precision) == claim or round(v * 100, precision) == claim
+        for v in pool
+    )
+
+
+VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
+                                 "question. Please try rephrasing or asking again.")
+
+
+# finalize_node: token/source tallying for the telemetry row
+
+# Separate from FRIENDLY_TOOL_NAMES (.claude/rules/gateway.md): those are
+# present-tense progress messages, these are past-tense badges. No tool jargon
+# -- the reader is field-operations staff. "Model fields" is the SEMANTIC
+# model's, not BigQuery's.
+SOURCE_LABELS = {
+    "run_bigquery_sql": "Query warehouse",
+    "run_dax_query":    "Query dashboard",
+    "get_measure_dax":  "Measure Lookup",
+    "get_page_info":    "PBI page info",
+    "list_repo_files":  "list code",
+    "read_repo_file":   "Read code",
+    "search_docs":      "Doc Search",
+    "generate_chart":   "Create chart",
+}
+
+
+def sum_token_usage(messages: list[BaseMessage]) -> tuple[int, int]:
+    """Sums prompt/completion tokens across every AIMessage this turn."""
+    ai_messages = [m for m in messages if isinstance(m, AIMessage)]
+    prompt_tokens = sum(m.usage_metadata["input_tokens"] for m in ai_messages)
+    completion_tokens = sum(m.usage_metadata["output_tokens"] for m in ai_messages)
+    return prompt_tokens, completion_tokens
+
+
+def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
+    """Ordered source labels for successful calls, consecutive runs collapsed with a count."""
+    ordered = sorted(tool_calls, key=itemgetter("started_at", "name"))
+    names = [SOURCE_LABELS.get(tc["name"], tc["name"])
+             for tc in ordered if tc["success"]]
+    return [f"{name} ({n})" if (n := len(list(grp))) > 1 else name
+            for name, grp in groupby(names)]
+
+
 # --- Node functions ------------------------------------------------------
 
 async def agent_node(state: AgentState) -> dict:
-    """Calls the LLM with tools bound. Emits tool calls, or writes answer_markdown."""
+    """Calls the LLM with tools bound. Emits tool calls -- the final answer
+    only ever arrives via submit_answer, never plain text."""
     model = ChatAnthropic(model=MODEL).bind_tools(list(ALL_TOOLS.values()), strict=True)
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
-    update = {"messages": [response], "llm_calls": state["llm_calls"] + 1}
-    if not response.tool_calls:
-        update["answer_markdown"] = response.content
-    return update
+    return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 
 
 async def call_tool_node(state: AgentState) -> dict:
     """Dispatches tool calls under the iteration/cost-cap guardrails;
     records a ToolCallRecord and, for any declined/failed call, a TurnError."""
     tool_calls = state["messages"][-1].tool_calls
+
+    # A sole submit_answer call is always dispatched, even past the iteration
+    # cap -- it's the response mechanism, not a data-gathering tool, so it
+    # doesn't count against iteration_count and doesn't get a ToolCallRecord
+    # (its content -- answer_markdown, claims, follow-ups -- is already
+    # captured directly in state).
+    answer_submitted = len(tool_calls) == 1 and tool_calls[0]["name"] == "submit_answer"
+    if answer_submitted:
+        tc = tool_calls[0]
+        msg = await submit_answer.ainvoke(tc)
+        args = tc["args"]
+        return {
+            "messages": [msg],
+            "answer_submitted": True,
+            "answer_markdown": args["answer_markdown"],
+            "all_prose_numeric_claims": args["all_prose_numeric_claims"],
+            "suggested_follow_ups": args["suggested_follow_ups"],
+        }
 
     if state["iteration_count"] >= MAX_ITERATIONS:
         return iteration_cap_update(tool_calls, state["iteration_count"])
@@ -287,9 +426,13 @@ async def call_tool_node(state: AgentState) -> dict:
         build_tool_call_record(tc, msg, bq_started_at, bq_completed_at)
         for tc, msg in zip(bq_calls, bq_messages)
     ]
+    # submit_answer excluded -- if batched with a real tool, its ToolMessage
+    # is still dispatched above (satisfies the API's tool_use/tool_result
+    # protocol) but the submission itself is ignored.
     other_records = [
         build_tool_call_record(tc, msg, other_started_at, other_completed_at)
         for tc, msg in zip(other_calls, other_messages)
+        if tc["name"] != "submit_answer"
     ]
 
     bq_error_type = "cost_cap_exceeded" if cost_cap_exceeded else "tool_error"
@@ -316,35 +459,80 @@ async def call_tool_node(state: AgentState) -> dict:
         "estimated_cost": format_cost(batch_bytes) if cost_cap_exceeded else state["estimated_cost"],
         "tool_calls": bq_records + other_records,
         "errors": errors,
+        "answer_submitted": False,
     }
 
 
 async def check_length_node(state: AgentState) -> dict:
-    """Checks answer_markdown length; on failure, requests a shorter answer."""
-    if check_answer_length(state["answer_markdown"]):
+    """Checks answer_markdown length and table size; on failure, requests a
+    shorter answer or a smaller table."""
+    answer = state["answer_markdown"]
+    if check_answer_length(answer) and check_table_rows(answer):
         return {}
+    if not check_answer_length(answer):
+        note = ("Your answer is too long to display. Summarize the key findings "
+                "concisely, or generate a chart instead of listing rows.")
+    else:
+        note = (f"Your answer includes a table with more than {MAX_ANSWER_TABLE_ROWS} rows. "
+                "Show only the top results, summarize the rest, or generate a chart "
+                "instead of listing every row.")
     return {
         "length_retry_count": state["length_retry_count"] + 1,
-        "messages": [HumanMessage(content=(
-            "Your answer is too long to display. Summarize the key findings "
-            "concisely, or generate a chart instead of listing rows."))],
+        "messages": [HumanMessage(content=note)],
     }
 
 
+def verify_response(state: AgentState) -> tuple[bool, str | None]:
+    """Shape-checks the submission, then checks every claimed number --
+    prose claims plus every markdown table value -- against this turn's
+    BigQuery/DAX results."""
+    try:
+        SubmitAnswerArgs.model_validate({
+            "answer_markdown": state["answer_markdown"],
+            "all_prose_numeric_claims": state["all_prose_numeric_claims"],
+            "suggested_follow_ups": state["suggested_follow_ups"],
+        })
+    except ValidationError as e:
+        return False, (f"No valid answer was submitted: {e}. Call submit_answer "
+                        "with your final answer_markdown and numeric claims.")
+
+    pool = build_numeric_pool(state["tool_calls"])
+    all_claimed = state["all_prose_numeric_claims"] + extract_table_values(state["answer_markdown"])
+    for claim in all_claimed:
+        if not claim_matches_pool(claim, pool):
+            return False, f"{claim} does not match any tool result this turn."
+    return True, None
+
+
 async def verify_node(state: AgentState) -> dict:
-    """Placeholder -- always verifies. Real checks land later."""
-    return {"verified": True}
+    """Runs verify_response; retries are handled by route_after_verify's
+    existing retry-budget check."""
+    verified, error_message = verify_response(state)
+    if verified:
+        return {"verified": True}
+    return {
+        "verified": False,
+        "verification_retry_count": state["verification_retry_count"] + 1,
+        "messages": [HumanMessage(content=error_message)],
+    }
 
 
 async def finalize_node(state: AgentState) -> dict:
-    """Tallies tokens/sources, builds and writes the telemetry row."""
+    """Tallies tokens/sources, builds and writes the telemetry row. A turn
+    that ran verification and never passed ships the static failure message
+    instead -- cancelled/needs_approval turns bypass verification entirely,
+    so they're untouched here."""
+    answer_markdown = state["answer_markdown"]
+    if not state["verified"] and not state["cancelled"] and not state["needs_approval"]:
+        answer_markdown = VERIFICATION_FAILURE_MESSAGE
+
     prompt_tokens, completion_tokens = sum_token_usage(state["messages"])
     sources = build_sources(state["tool_calls"])
     row = build_telemetry_row(
         conversation_id=state["conversation_id"],
         user_id=state["user_id"],
         question=state["question"],
-        answer_markdown=state["answer_markdown"],
+        answer_markdown=answer_markdown,
         turn_started_at=state["turn_started_at"],
         turn_completed_at=datetime.now(timezone.utc),
         filter_context=state["filter_context"],
@@ -367,9 +555,12 @@ async def finalize_node(state: AgentState) -> dict:
         pending_queries=state["pending_queries"],
         deferred_dax=state["deferred_dax"],
         chart_url=state["chart_url"],
+        suggested_follow_ups=state["suggested_follow_ups"],
+        all_prose_numeric_claims=state["all_prose_numeric_claims"],
     )
     await write_telemetry_row(row)
     return {
+        "answer_markdown": answer_markdown,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "sources": sources,
@@ -385,11 +576,14 @@ def route_after_agent(state: AgentState) -> str:
 def route_after_call_tool(state: AgentState) -> str:
     if state["cancelled"] or state["needs_approval"]:
         return "finalize"
+    if state["answer_submitted"]:
+        return "check_length"
     return "agent"   # also cost_cap_exceeded and iteration_cap_hit
 
 
 def route_after_check_length(state: AgentState) -> str:
-    if check_answer_length(state["answer_markdown"]):
+    answer = state["answer_markdown"]
+    if check_answer_length(answer) and check_table_rows(answer):
         return "verify"
     if state["length_retry_count"] < MAX_LENGTH_RETRIES:
         return "agent"
@@ -421,7 +615,7 @@ g.add_edge(START, "agent")
 g.add_conditional_edges("agent", route_after_agent,
     ["call_tool", "check_length"])
 g.add_conditional_edges("call_tool", route_after_call_tool,
-    ["finalize", "agent"])
+    ["finalize", "agent", "check_length"])
 g.add_conditional_edges("check_length", route_after_check_length,
     ["verify", "agent", "finalize"])
 g.add_conditional_edges("verify", route_after_verify,

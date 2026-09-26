@@ -218,6 +218,14 @@ to the server; it isn't the history, and the server already has its own.
 
 - **Agent-suggested follow-up chips:** bound to `suggested_follow_ups` on the response envelope; system prompt asks for 1–3 short suggestions (e.g. "Would you like to see a graph?"). Natural because `generate_chart` (`.claude/rules/tools.md`) is a real callable tool, not a promise the agent can't keep.
 
+  **Populate the input, don't auto-send.** A chip's `OnSelect` sets the
+  existing `TextInput` (`Set(localQuestion, chipText)`); the user still hits
+  Send. Two reasons: it reuses
+  `btnSend.OnSelect`'s existing turn-launch path entirely — no second trigger
+  into the in-flight-disable/status-polling logic to build and keep in sync
+  with the first — and it means a mistaken tap fills a box instead of firing
+  a real, potentially cost-bearing query with no chance to reconsider or edit.
+
 ## Visual grounding — filter context and the optional screenshot
 
 **Design: manual screenshot upload, not automatic capture.** Automatic capture

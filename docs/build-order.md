@@ -2,15 +2,62 @@
 
 ## Current status — update this as we go
 
-**Phase: 3 in progress — items 1-5 complete.** All of it promoted out of
+**Phase: 3 in progress — items 1-6 complete.** All of it promoted out of
 the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
-nodes, routing, graph) and the new `app/orchestrator/tools.py`
-(`run_bigquery_sql`, `dry_run`) — verified live end to end against a real
-MCP server, real Claude calls, and a real telemetry write.
+nodes, routing, graph) and `app/orchestrator/tools.py`
+(`run_bigquery_sql`, `dry_run`, `submit_answer`) — verified live end to end
+against a real MCP server, real Claude calls, and a real telemetry write.
 
-Item 6 (verification) next — `verify_node` is still a placeholder.
+**Item 6 (verification) done, 2026-09-25 — with real deviations from the
+originally-documented design.** `verify_node`/`verify_response` are real, not
+placeholders: shape-checks the submission via `SubmitAnswerArgs.model_validate`,
+then checks every claim (`all_prose_numeric_claims` + `extract_table_values`)
+against `build_numeric_pool` (only `run_bigquery_sql`/`run_dax_query` results
+— an explicit allowlist, not a denylist, so an incidental number in code or
+doc text can never leak in). Two deviations from the doc's original sketch:
+- **Matching is precision-aware, not a flat `abs(claim - v) < 0.01` tolerance.**
+  `claim_matches_pool`/`_decimal_places` round the pool value to the claim's
+  own decimal precision (derived from its shortest string form) before
+  comparing for equality — handles both ordinary rounding (a raw `0.379987`
+  displayed as `0.38`) and percentage-scaled display (a raw fraction shown as
+  a percent) without the false-accept risk a wider flat tolerance would carry
+  on large numbers.
+- **`extract_table_values` uses `mistune`'s real GFM table parser (AST
+  walk), not hand-rolled regex.** Caught a real bug the regex version had —
+  silently dropping bold-formatted cells (`**66.8%**`) — before it shipped.
+- **Exhaustion fallback lives in `finalize_node`, not `verify_node`.**
+  `verify_node` stays a simple two-branch function; `finalize_node` swaps in
+  a static `VERIFICATION_FAILURE_MESSAGE` when verification ran and never
+  passed (`not verified and not cancelled and not needs_approval` — the
+  guard needed so a cancelled/paused turn, which never reached `verify_node`
+  at all, doesn't get the same message).
 
-_Last updated: 2026-09-24._ **Phase 0 (2026-09-13): all nine items verified
+Live-verified: a real turn where the model stated an invented rounded
+threshold (`0.62`, describing "all above 0.62"), got correctly rejected by
+verification with an actionable message, and self-corrected on retry by
+dropping the number entirely rather than guessing a different one.
+
+**Telemetry gained `all_prose_numeric_claims`** (new `REPEATED FLOAT`
+column) and `suggested_follow_ups` is now a real `build_telemetry_row`
+parameter instead of hardcoded `[]`. Added to the **live** table via
+`ALTER TABLE ADD COLUMN`, not drop+recreate — confirmed against BigQuery's
+own docs that adding a new column (never modifying/renaming an existing
+one) doesn't have that restriction, contrary to `telemetry.md`'s original
+blanket claim. `notebooks/alter_agent_telemetry_table.ipynb` is the new
+scratchpad for this class of future additive migration, alongside the
+existing `delete_agent_telemetry_table.ipynb` for real breaking changes.
+
+**`tests/test_orchestrator.py` — first real Layer 1 coverage for the
+graph module**, deliberately scoped to pure functions and plain-dict state,
+no LLM/BigQuery/MCP mocking: `verify_response` (as the integration point
+exercising `extract_numeric_values`/`build_numeric_pool`/`claim_matches_pool`
+together), `extract_table_values` on its own (its failure mode — silently
+under-extracting a cell — can't be observed through `verify_response`'s
+pass/fail outcome, so it needs a direct test), all four routing functions,
+and `iteration_cap_update`. Broader end-to-end/mocked tests are deliberately
+deferred until the module is closer to final, not skipped.
+
+_Last updated: 2026-09-25._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
 verification detail if ever needed; kept brief here since it's done, not
 current.
@@ -357,6 +404,10 @@ actually are — everything below is the static plan. When a phase completes,
 update the line above and note anything that turned out differently from the
 plan (a step that was skipped, a decision that changed). If you finish a step
 and this block is stale, say so rather than guessing what's done.
+
+**Also at each phase boundary:** check whether there's now enough real usage
+data to revisit the prompt-cache TTL choice (5-minute default vs. 1-hour) —
+pending decision, details in memory, not repeated here.
 
 ---
 

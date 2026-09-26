@@ -107,13 +107,13 @@ drift apart. Re-run `create_table.py` after any schema change (BigQuery can't
 | `approval_decision` | No — null | Phase 3 — `"approved"`/`"rejected"` on the response row; null on the pause row |
 | `cost_cap_exceeded` | No — `False` | Phase 3 — hard decline, logged synchronously like any normal turn |
 | `chart_url` | No — null | Phase 3 (`generate_chart`) |
-| `suggested_follow_ups` | No — empty | Phase 4 |
+| `suggested_follow_ups` | No — empty | Phase 3 item 6, via `submit_answer` (`.claude/rules/orchestrator.md`) — moved up from its original Phase 4 slot |
+| `all_prose_numeric_claims` | No — empty | Phase 3 item 6, via `submit_answer` — the model's declared prose claims, promoted to a top-level `REPEATED FLOAT` column for the same reason as `query_text`: direct queryability, no `JSON_VALUE(args, ...)` needed on the `submit_answer` entry in `tool_calls` |
 | `is_projection` | **Not a field yet** | Added *with* the Phase 7 `run_projection` tool, not before |
 | `prompt_tokens`, `completion_tokens`, `llm_calls` | No — 0 | Accumulated in `AgentState` across every LLM call. **Instrument, don't gate**: `max_iterations` and the retry caps already bound LLM spend, and there's no unbounded-tail case like a table scan. Also the signal for prompt bloat — rising prompt tokens means static context grew or cache hits dropped |
 | `bytes_consumed` | No — 0 | Phase 3 — the turn's BigQuery total, same counter the cost guardrail reads. The pause/response split means **summing both rows** gives the turn's real spend |
 | `iteration_count` | No — 0 | Phase 3 — **the count, not just `iteration_cap_hit`.** The cap is a calibration starting point (`.claude/rules/orchestrator.md`); a boolean only says how often 12 was hit, never what the 95th percentile actually needs |
 | `errors` | No — `[]` | Turn-level failures (stage, type, message, timestamp, `tool_call_id`). A tool-call-scoped failure carries the matching `tool_call_id` — a direct join to `tool_calls`, not a duplicate of it — one entry per failed call, not deduped per batch. Also covers LLM call failures, verification exhaustion, chart failures (`tool_call_id: null`). Carried in `AgentState.errors`; write it or the diagnosis is lost |
-| `claims` | **Not a field** — dropped | Superseded by pooled numeric matching (`.claude/rules/orchestrator.md`); nothing produces a `Claim` list anymore. `AgentResponse.claims` stays only as an always-`[]` wire-contract placeholder and isn't mirrored here |
 | `cancelled` | No — `False` | Phase 3 — set when `POST /ask/cancel` fires. **Different from abandoned approvals**, which are deliberately unlogged: a cancel is a real synchronous event with a clean trigger, not silence over time |
 | `iteration_cap_hit` | No — `False` | Phase 3 — same name and value as the `AgentResponse` field; one boolean, logged once |
 

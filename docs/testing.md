@@ -230,9 +230,17 @@ def test_every_turn_logs_a_row_with_every_required_field():
 
 ```python
 # tests/test_guardrails.py
-def test_verification_rejects_an_unfounded_number():
-    """A number in answer_markdown with no match in this turn's tool_calls
+def test_verification_rejects_an_unfounded_claim():
+    """A value in all_prose_numeric_claims with no match in this turn's tool_calls
     pool fails verify_response, regardless of how plausible it looks."""
+
+def test_verification_rejects_a_never_submitted_answer():
+    """answer_markdown still at its untouched "" default (submit_answer was
+    never called) fails model_validate before any claim is even checked."""
+
+def test_verification_checks_table_values_without_redeclaring_them():
+    """A number only inside a markdown table (not in all_prose_numeric_claims)
+    still gets checked -- extract_table_values, not the model, is the source."""
 
 def test_cost_threshold_triggers_approval():
 

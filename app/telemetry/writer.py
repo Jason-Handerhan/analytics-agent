@@ -67,11 +67,13 @@ def build_telemetry_row(
     pending_queries: list[dict],
     deferred_dax: list[dict],
     chart_url: str | None,
+    suggested_follow_ups: list[str],
+    all_prose_numeric_claims: list[float],
 ) -> dict:
-    """Full agent_telemetry row. `pending_query`, `approval_decision`, and
-    `suggested_follow_ups` stay null/empty -- nothing produces them yet
-    (route_entry/execute_approved, the approval response path, and Phase 4
-    respectively), so there's no AgentState field to pass through for them."""
+    """Full agent_telemetry row. `pending_query` and `approval_decision` stay
+    null -- nothing produces them yet (route_entry/execute_approved and the
+    approval response path respectively), so there's no AgentState field to
+    pass through for them."""
     pending_query = max((pq["query"] for pq in pending_queries), key=len, default=None)
     return {
         "conversation_id": conversation_id,
@@ -102,7 +104,8 @@ def build_telemetry_row(
         "iteration_cap_hit": iteration_cap_hit,
         "tool_calls": [_serialize_tool_call(tc) for tc in tool_calls],
         "errors": [_serialize_error(e) for e in errors],
-        "suggested_follow_ups": [],
+        "suggested_follow_ups": suggested_follow_ups,
+        "all_prose_numeric_claims": all_prose_numeric_claims,
     }
 
 

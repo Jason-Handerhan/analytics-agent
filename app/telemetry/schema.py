@@ -78,6 +78,8 @@ SCHEMA = [
     bigquery.SchemaField("tool_calls", "RECORD", mode="REPEATED", fields=TOOL_CALL_FIELDS),
     bigquery.SchemaField("errors", "RECORD", mode="REPEATED", fields=ERROR_FIELDS),
     bigquery.SchemaField("suggested_follow_ups", "STRING", mode="REPEATED"),
+    # From submit_answer -- top-level for direct queryability, same reasoning as query_text.
+    bigquery.SchemaField("all_prose_numeric_claims", "FLOAT", mode="REPEATED"),
     bigquery.SchemaField("pending_queries", "RECORD", mode="REPEATED", fields=PENDING_QUERY_FIELDS),
     bigquery.SchemaField("deferred_dax", "RECORD", mode="REPEATED", fields=DEFERRED_DAX_FIELDS),
 ]
