@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 from itertools import groupby
 from operator import itemgetter
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 import mistune
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -21,6 +21,8 @@ from pydantic import ValidationError
 from app.config import (
     ABSOLUTE_CAP,
     BIGQUERY_PRICE_PER_TIB,
+    DAX_ROW_CAP,
+    DAX_TIMEOUT_SECONDS,
     MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_ITERATIONS,
@@ -30,9 +32,18 @@ from app.config import (
     MCP_SERVER_NAME,
     MCP_SERVER_URL,
     MODEL,
+    POWER_BI_DATASET_ID,
+    POWER_BI_WORKSPACE_ID,
 )
 from app.orchestrator.context import get_static_context
-from app.orchestrator.tools import SubmitAnswerArgs, dry_run, run_bigquery_sql, submit_answer
+from app.orchestrator.power_bi_auth import get_power_bi_token
+from app.orchestrator.tools import (
+    SubmitAnswerArgs,
+    dry_run,
+    get_measure_dax,
+    run_bigquery_sql,
+    submit_answer,
+)
 from app.telemetry.writer import build_telemetry_row, write_telemetry_row
 
 MCP_TOOLS: dict[str, BaseTool] = {}
@@ -51,7 +62,12 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
     })
     tools = await client.get_tools()
     MCP_TOOLS = {t.name: t for t in tools}
-    ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql, "submit_answer": submit_answer}
+    ALL_TOOLS = {
+        **MCP_TOOLS,
+        "run_bigquery_sql": run_bigquery_sql,
+        "submit_answer": submit_answer,
+        "get_measure_dax": get_measure_dax,
+    }
     SYSTEM_MESSAGE = SystemMessage(content=get_static_context())
 
 
@@ -62,7 +78,7 @@ class ToolCallRecord(TypedDict):
     name: str
     args: dict
     query_text: str | None  # args["query"] or args["dax"] -- SQL/DAX only, else None
-    result: list[dict] | str
+    result: Any  # shape depends on the tool
     success: bool
     error: str | None
     started_at: datetime
@@ -91,10 +107,9 @@ class AgentState(TypedDict):
     filter_context: list[dict]
     active_page: str | None
     image_base64: str | None
-    history_messages: list[BaseMessage]  # reconstructed history, kept OUT of
-                                         # `messages` -- see orchestrator.md
+    history_messages: list[BaseMessage]  # conversation history
 
-    # Accumulated during the loop
+    # Accumulated during the tool loop
     messages: Annotated[list[BaseMessage], add_messages]
     tool_calls: Annotated[list[ToolCallRecord], append_list]
     iteration_count: int
@@ -122,19 +137,13 @@ class AgentState(TypedDict):
     cost_cap_exceeded: bool
     iteration_cap_hit: bool
     answer_submitted: bool  # True only when submit_answer was the sole tool
-                            # call dispatched this round -- doesn't count
-                            # against iteration_count (it's the response
-                            # mechanism, not a data-gathering tool)
 
     # Building toward AgentResponse
     answer_markdown: str
     chart_url: str | None
     sources: list[str]
-    all_prose_numeric_claims: list[float]  # every number the model states in
-                                           # prose as fact -- set by call_tool_node
-                                           # from submit_answer's args
-    suggested_follow_ups: list[str]        # same source; flows straight to
-                                           # AgentResponse, unlike the claims
+    all_prose_numeric_claims: list[float]  # llm provided numeric claims in prose                                        
+    suggested_follow_ups: list[str]        
 
 
 # --- Helper functions ----------------------------------------------------
@@ -151,6 +160,29 @@ def format_cost(num_bytes: int) -> str:
     return f"${(num_bytes / 1024**4) * BIGQUERY_PRICE_PER_TIB:.2f}"
 
 
+def inject_dax_args(tc: dict) -> dict:
+    """Adds Power BI auth/target/guardrail values to a run_dax_query call --
+    excluded from the model's schema (exclude_args)"""
+    return {
+        **tc,
+        "args": {
+            **tc["args"],
+            "access_token": get_power_bi_token(),
+            "workspace_id": POWER_BI_WORKSPACE_ID,
+            "dataset_id": POWER_BI_DATASET_ID,
+            "row_cap": DAX_ROW_CAP,
+            "timeout_seconds": DAX_TIMEOUT_SECONDS,
+        },
+    }
+
+
+def _unwrap_content(content: str | list) -> str:
+    """LangChain tools' content is a plain JSON string; MCP tools' content
+    (via langchain_mcp_adapters) is a list of content blocks -- unwrap to
+    the plain text either way."""
+    return content[0]["text"] if isinstance(content, list) else content
+
+
 def build_tool_call_record(
     tc: dict, message: ToolMessage, started_at: datetime, completed_at: datetime
 ) -> ToolCallRecord:
@@ -160,12 +192,11 @@ def build_tool_call_record(
     if not success:
         return ToolCallRecord(
             id=tc["id"], name=tc["name"], args=tc["args"], query_text=query_text, result="",
-            success=False, error=message.content,
+            success=False, error=_unwrap_content(message.content),
             started_at=started_at, completed_at=completed_at,
         )
 
-    # MCP tools: result in artifact (dict). Plain tools: JSON string in content.
-    result = message.artifact if message.artifact is not None else json.loads(message.content)
+    result = json.loads(_unwrap_content(message.content))
     return ToolCallRecord(
         id=tc["id"], name=tc["name"], args=tc["args"], query_text=query_text, result=result,
         success=True, error=None,
@@ -402,7 +433,10 @@ async def call_tool_node(state: AgentState) -> dict:
         cost_cap_exceeded = exceeds_absolute_cap(state["bytes_consumed"], batch_bytes)
 
     other_started_at = datetime.now(timezone.utc)
-    other_messages = await asyncio.gather(*[ALL_TOOLS[tc["name"]].ainvoke(tc) for tc in other_calls])
+    other_messages = await asyncio.gather(*[
+        ALL_TOOLS[tc["name"]].ainvoke(inject_dax_args(tc) if tc["name"] == "run_dax_query" else tc)
+        for tc in other_calls
+    ])
     other_completed_at = datetime.now(timezone.utc)
 
     bq_started_at = datetime.now(timezone.utc)

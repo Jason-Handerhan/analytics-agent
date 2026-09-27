@@ -1,4 +1,4 @@
-"""Non-MCP tools: run_bigquery_sql and submit_answer (.claude/rules/tools.md)."""
+"""Non-MCP tools: run_bigquery_sql, submit_answer, get_measure_dax (.claude/rules/tools.md)."""
 import asyncio
 import concurrent.futures
 from datetime import date, time
@@ -17,6 +17,7 @@ from app.config import (
     MAX_ANSWER_TABLE_ROWS,
     MAX_BYTES_BILLED,
 )
+from app.model_schema import MEASURE_DAX, MEASURE_NAMES
 
 
 @lru_cache
@@ -124,3 +125,22 @@ async def dry_run(query: str) -> int:
         job = get_bq_client().query(query, job_config=bigquery.QueryJobConfig(dry_run=True))
         return job.total_bytes_processed
     return await asyncio.to_thread(_run)
+
+
+class GetMeasureDaxArgs(BaseModel):
+    measure_names: list[MEASURE_NAMES]
+
+
+@tool(args_schema=GetMeasureDaxArgs)
+async def get_measure_dax(measure_names: list[MEASURE_NAMES]) -> dict[str, str]:
+    """The DAX body for one or more measures, by exact name -- includes any
+    measure referenced inside that DAX, one hop, not recursive.
+    Measure names come from the in context measure registry.
+    """
+    result = {name: MEASURE_DAX[name] for name in measure_names}
+    for dax in list(result.values()):
+        # Find DAX for any measure referenced inside requested measure DAX
+        for candidate_name, candidate_dax in MEASURE_DAX.items():
+            if candidate_name not in result and f"[{candidate_name}]" in dax:
+                result[candidate_name] = candidate_dax
+    return result

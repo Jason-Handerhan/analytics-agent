@@ -2,7 +2,9 @@
 
 ## Current status — update this as we go
 
-**Phase: 3 in progress — items 1-6 complete.** All of it promoted out of
+**Phase: 3 in progress — items 1-6 complete, item 7 in progress
+(`run_dax_query` done, `get_measure_dax` pending).** All of items 1-6 promoted
+out of
 the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
 nodes, routing, graph) and `app/orchestrator/tools.py`
 (`run_bigquery_sql`, `dry_run`, `submit_answer`) — verified live end to end
@@ -57,7 +59,49 @@ pass/fail outcome, so it needs a direct test), all four routing functions,
 and `iteration_cap_update`. Broader end-to-end/mocked tests are deliberately
 deferred until the module is closer to final, not skipped.
 
-_Last updated: 2026-09-25._ **Phase 0 (2026-09-13): all nine items verified
+**Item 7, `run_dax_query` half done and live-smoke-tested; `get_measure_dax`
+still pending, 2026-09-27.** `run_dax_query` is registered on the real MCP
+server and confirmed live end to end: a compound question using both
+`run_bigquery_sql` and `run_dax_query` in one turn, a question that failed
+verification and correctly got the honest-decline message, and a DAX-sourced
+table answer. Real deviations from the doc's original sketch:
+- **Auth/target/guardrail values (`access_token`, `workspace_id`,
+  `dataset_id`, `row_cap`, `timeout_seconds`) are genuine per-call tool
+  arguments, hidden from the model via `exclude_args`, not baked into the
+  tool's own code.** `call_tool_node`'s `inject_dax_args` supplies them from
+  `app.config`/`power_bi_auth.get_power_bi_token()` right before dispatch.
+  `app/mcp_server/dax_tool.py` itself has zero project-specific imports —
+  a different deployment could reuse it unmodified under its own credentials.
+  Deliberately *not* wired for real per-end-user identity (OAuth
+  on-behalf-of token exchange) — one shared service-principal token for
+  every caller is an accepted, documented tradeoff for this project, not a
+  limitation of the tool's own shape.
+- **Fixed a real bug in `build_tool_call_record`'s MCP-result handling.** It
+  assumed `message.artifact` held the raw tool result directly; live testing
+  showed FastMCP/`langchain_mcp_adapters` actually wrap it
+  (`{"structured_content": ...}`, further nested under `"result"` for a
+  list-returning tool) — switched to reading `message.content` uniformly
+  instead (unwrapping LangChain's content-blocks list when present). Never
+  surfaced before this, since `ping` (the only prior MCP tool) returns a
+  plain string.
+- **Best-effort DAX cancellation, explicitly deferred to item 12** — no cost
+  exposure like BigQuery's, so no urgency; not built as part of this item.
+- **A real smoke-test finding, fixed via the system prompt, not code:** the
+  model wrote literal `|` characters in a table header for absolute-value
+  notation (`Mean |SHAP|`), which breaks GFM table parsing entirely —
+  confirmed the malformed table is invisible to both `check_table_rows` and
+  `extract_table_values`, a real gap that only didn't bite this time because
+  the model also (redundantly) listed the same numbers in
+  `all_prose_numeric_claims`. `SYSTEM_INSTRUCTIONS` now tells the model to
+  escape a literal `|` as `\|`.
+- `MAX_VERIFY_RETRIES` raised 2 → 3 based on live testing.
+
+`get_measure_dax` is not yet built. Per a reusability discussion this
+session, it'll land in `app/orchestrator/tools.py`, **not MCP-hosted** — it's
+a pure lookup against this project's committed `model_schema.json`, not a
+generically reusable Power BI wrapper the way `run_dax_query` is.
+
+_Last updated: 2026-09-27._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
 verification detail if ever needed; kept brief here since it's done, not
 current.
@@ -763,6 +807,15 @@ XMLA is a documented backup only. REST is the plan.
   same-domain derivations are handled by pushing the computation into the
   query itself (`.claude/rules/orchestrator.md`). Revisit if testing shows
   a bigger need than expected. Full design: `docs/cross-domain-compute.md`.
+- **A `search_semantic_model_schema`-style discovery tool on the MCP
+  server.** Not needed by this project's own agent — the full table/measure/
+  relationship registries already sit in static context
+  (`.claude/rules/tools.md`, "Composing DAX"), which is better for latency
+  and keeps the agent always aware of relationships than a per-call search
+  would be. But `run_dax_query` alone gives a *different* MCP client no way
+  to discover a dataset's schema before querying it — noted for the
+  "genuinely shareable MCP server" story (2026-09-27 reusability
+  discussion), not because this project needs it.
 - **Narrate the sensitivity assumption** — have the answer state the
   field-parameter value it used (*"$5M at a 10% adoption assumption"*)
   rather than applying it silently. A bare number reads as more certain

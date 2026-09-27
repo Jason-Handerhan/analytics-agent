@@ -62,7 +62,7 @@ class AgentResponse(BaseModel):
 superset carried *through* the graph — scratchpad included.
 
 ```python
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 from datetime import datetime
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -80,10 +80,7 @@ class ToolCallRecord(TypedDict):
                             # exists so agent_telemetry's tool_calls RECORD can
                             # be queried directly (`WHERE name = 'run_bigquery_sql'`)
                             # without parsing JSON out of args.
-    result: list[dict] | str   # query tools: one dict per ROW, native Python
-                               # types (no serialization in state). Other tools
-                               # return their own shape. FastMCP JSON-encodes
-                               # whatever the tool returns for the model.
+    result: Any  # shape depends on the tool
     success: bool
     error: str | None    # WHICH failure — agent retry behavior distinguishes
                          # ToolError from ToolTimeoutError; `success` alone loses that

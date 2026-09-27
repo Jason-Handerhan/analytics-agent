@@ -20,13 +20,13 @@ paths:
 | Tool | Hosted on the MCP server? |
 |---|---|
 | `run_dax_query` | Yes |
-| `get_measure_dax` | Yes |
 | `search_docs` | Yes |
 | `get_page_info` | Yes |
 | `list_repo_files`, `read_repo_file` | Yes |
 | `generate_chart` | Yes |
-| `run_bigquery_sql` | **No** — a plain LangChain `@tool` in the orchestrator |
-| `submit_answer` | **No** — a plain LangChain `@tool` in the orchestrator |
+| `run_bigquery_sql` | **No** — a plain function in the orchestrator |
+| `submit_answer` | **No** — a plain function in the orchestrator |
+| `get_measure_dax` | **No** — a plain function in the orchestrator |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -39,11 +39,22 @@ safely at all. Every other tool's guardrails (row caps, schema constraints)
 are enforceable *inside a single call*, with no memory of anything outside
 it — that's what makes them safe to expose over MCP as-is.
 
-**`submit_answer` is the other, for a different reason: it isn't a data
+**`submit_answer` is another, for a different reason: it isn't a data
 tool at all.** It's how the model delivers its final answer and numeric
 claims (`.claude/rules/orchestrator.md`) — control flow internal to this
 graph, not something an external MCP client would ever have a reason to
 call. See its own section below.
+
+**`get_measure_dax` is a third exception, for a third reason: it isn't
+generically reusable at all.** Unlike `run_dax_query` (a real wrapper
+around Power BI's own API, usable against any dataset), `get_measure_dax`
+is a pure lookup against `MEASURE_DAX` — a dict built at startup from *this
+project's own committed* `model_schema.json`. A different deployment of
+this MCP server, pointed at a different semantic model, would need this
+project's exact schema file to make it work at all, so hosting it
+generically alongside `run_dax_query` would misrepresent it as portable
+infrastructure when it's really project-specific application logic
+(2026-09-27 reusability discussion, see `run_dax_query`'s own note above).
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -110,12 +121,12 @@ mcp = FastMCP(MCP_SERVER_NAME)
 
 # Importing each module runs its @mcp.tool() decorators, which is what
 # registers the tools. Import for side effect only — nothing is called here.
-# run_bigquery_sql is NOT here — it's a plain @tool in the orchestrator, not
-# MCP-registered (see the hosting table above). bigquery_schema isn't here
-# either — it's not exposed via MCP at all, see the section below.
+# run_bigquery_sql, submit_answer, and get_measure_dax are NOT here — all
+# three are plain functions in the orchestrator, not MCP-registered (see the
+# hosting table above). bigquery_schema isn't here either — it's not exposed
+# via MCP at all, see the section below.
 from app.mcp_server import (          # noqa: F401,E402
-    dax_tools,                        # run_dax_query
-    measure_dax,                      # get_measure_dax
+    dax_tool,                         # run_dax_query
     docs_search,                      # search_docs
     page_info,                        # get_page_info
     code_search,                      # list_repo_files, read_repo_file
@@ -442,39 +453,58 @@ there's no retrieval step to require first — the model composes DAX against a
 schema it can already see. `get_measure_dax` is for reading a *formula*, not
 for discovering that a measure exists.
 
+**This is a deliberate choice for *this* agent, not a property of
+`run_dax_query` as a shareable MCP tool.** A different client connecting to
+this same server — one without a static-context pipeline built the same
+way — has no way to discover a dataset's tables/measures/relationships at
+all today; `run_dax_query` alone can't help until the caller already knows
+what to ask for. A `search_semantic_model_schema`-style discovery tool would
+close that gap for a generic client, at some latency/relationship-awareness
+cost this project's own static-context approach avoids. Not building it here
+— tracked as an optional Phase 7 item (`docs/build-order.md`).
+
 ## `get_measure_dax` — lookup, not search
 
-```python
-import re
+**Not MCP-hosted** (see the hosting table above) — a plain function in
+`app/orchestrator/tools.py`, dispatched the same way as `run_bigquery_sql`
+and `submit_answer`.
 
+```python
 # MEASURE_NAMES is built at startup from model_schema.json — the same parse
 # that produces the registry, so the tool's argument type and the registry
 # the model reads from CANNOT disagree (.claude/rules/gateway.md).
-def get_measure_dax(measure_names: list[MEASURE_NAMES],
-                     include_dependencies: bool = False) -> dict[str, str]:
-    """The DAX body for one or more measures, by exact name.
+def get_measure_dax(measure_names: list[MEASURE_NAMES]) -> dict[str, str]:
+    """The DAX body for one or more measures, by exact name -- includes any
+    OTHER measure referenced inside that DAX, one hop, not recursive.
 
     Names come from the measure registry, which is already in context — this
     returns HOW a measure is calculated, not whether it exists.
-
-    include_dependencies=True adds any OTHER measure referenced inside the
-    requested DAX — one hop, not recursive. Saves a second round trip for
-    the "explain the full calculation chain" case; the model can ask again
-    if it needs to go deeper.
     """
     result = {name: MEASURE_DAX[name] for name in measure_names}
-    if include_dependencies:
-        for dax in list(result.values()):
-            # Sloppy on purpose: [Bracket] also matches columns, which this
-            # can't tell apart from measures by syntax alone. The `in
-            # MEASURE_DAX` check is the real filter — it's the enumerable,
-            # authoritative measure set, so a column reference just fails
-            # the test and gets dropped, silently and correctly.
-            for ref in re.findall(r"\[([^\]]+)\]", dax):
-                if ref in MEASURE_DAX and ref not in result:
-                    result[ref] = MEASURE_DAX[ref]
+    for dax in list(result.values()):
+        # One hop only -- recursing through the full dependency tree of
+        # every measure found could genuinely balloon the result. A DAX
+        # reference to a measure always looks like [MeasureName] --
+        # checking every known measure name against the text (rather than
+        # extracting bracketed tokens with regex and filtering) can't be
+        # tricked by anything unexpected inside the brackets. A [Bracket]
+        # that names a column, not a measure, just fails the membership
+        # check below and gets dropped, silently and correctly.
+        for candidate_name, candidate_dax in MEASURE_DAX.items():
+            if candidate_name not in result and f"[{candidate_name}]" in dax:
+                result[candidate_name] = candidate_dax
     return result
 ```
+
+**Always expands one hop — not opt-in.** A flag was considered and dropped:
+in this schema, only one measure (`Champion Recall` → `Champion_Model`)
+references another at all, so unconditional expansion costs nothing in the
+overwhelmingly common case where there's no dependency to find, and removes
+a real failure mode — the model forgetting to ask for the dependency and
+describing a wrapping measure's calculation as complete when it isn't. The
+actual bloat risk this guards against is recursion depth, not the lookup
+itself — walking the full dependency tree of every measure found could
+genuinely balloon the result, which is why it's one hop, never recursive.
 
 **No KeyError path.** `MEASURE_NAMES` is a `Literal` built from `MEASURE_DAX`
 and tool schemas use constrained decoding (below), so an invented name can't

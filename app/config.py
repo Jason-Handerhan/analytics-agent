@@ -35,10 +35,11 @@ HISTORY_ROW_CAP = 100     # rows kept per stored tool result
 MAX_ANSWER_CHARS = 6000
 MAX_ANSWER_TABLE_ROWS = 25  # cap on any single markdown table in an answer -- a display limit, not a fetch limit
 MAX_LENGTH_RETRIES = 2
-MAX_VERIFY_RETRIES = 2
+MAX_VERIFY_RETRIES = 3
 BIGQUERY_TIMEOUT_SECONDS = 40
 BIGQUERY_ROW_CAP = 1000  # cap on rows fetched -- LIMIT doesn't reduce bytes scanned
 DAX_ROW_CAP = BIGQUERY_ROW_CAP  # same constraint as BigQuery's cap, not platform-specific
+DAX_TIMEOUT_SECONDS = BIGQUERY_TIMEOUT_SECONDS  # same turn-budget reasoning as BigQuery's timeout
 MAX_ITERATIONS = 10  # max tool-call rounds per turn before falling back to a partial answer
 
 # MCP server (app/main.py, app/orchestrator/orchestrator.py) -- co-located with the gateway for now

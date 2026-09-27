@@ -15,7 +15,7 @@ from functools import lru_cache
 from google.cloud import bigquery
 
 from app.config import (
-    AGENT_SAFE_DATASET, CONTEXT_DIR, GCP_PROJECT_ID, HISTORY_ROW_CAP,
+    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, HISTORY_ROW_CAP,
     MAX_ANSWER_TABLE_ROWS, MODEL,
 )
 from app.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_REGISTRY
@@ -141,6 +141,8 @@ You are a senior data professional supporting business stakeholders evaluating a
 TOOLS
 BigQuery answers upstream/warehouse questions -- raw order and product features, pre-model data. DAX answers post-model, dashboard-displayed questions -- model evaluation metrics, financial impact. These domains don't overlap.
 
+run_dax_query results are capped at {DAX_ROW_CAP} rows -- prefer TOPN or a tighter filter over a query likely to return more.
+
 Tools that search or render (search_docs, get_page_info, generate_chart) are never a source of a number themselves. Same for an uploaded screenshot, when present -- it's layout and attention context only.
 
 GROUNDING
@@ -160,11 +162,13 @@ CONVERSATION HISTORY
 Prior turns' tool calls and their results are part of this conversation, exactly as they ran -- adapt a working query for a related follow-up rather than re-deriving one from scratch. Their results are historical, not a source for this turn's answer -- every number you state still needs its own live call this turn, even one that looks identical to what's shown there. Results in that history are truncated to the first {HISTORY_ROW_CAP} rows, so a fresh call this turn may correctly return a different count -- that's expected, not an error.
 
 RESPONDING
-You must call submit_answer to respond -- never answer in plain text. This is the only way an answer reaches the user; a plain-text reply will not be delivered and the turn will be asked to try again. Write answer_markdown in plain Markdown, list every number stated in prose as fact in all_prose_numeric_claims (table cells don't need to be repeated there), and put 1-3 short natural follow-up questions in suggested_follow_ups when one would genuinely help -- leave it empty when nothing natural fits. If you can't fully answer within a reasonable number of steps, submit the best partial answer available and say plainly that it's partial, rather than presenting it as complete.
+You must call submit_answer to respond -- never answer in plain text. This is the only way an answer reaches the user; a plain-text reply will not be delivered and the turn will be asked to try again. Write answer_markdown in plain Markdown, list every number stated in prose as fact in all_prose_numeric_claims (exclude markdown table cells from this list), and put 1-3 short natural follow-up questions in suggested_follow_ups when one would genuinely help -- leave it empty when nothing natural fits. If you can't fully answer within a reasonable number of steps, submit the best partial answer available and say plainly that it's partial, rather than presenting it as complete.
 
 Never round, average, or otherwise collapse multiple exact values into one approximate number anywhere in the answer -- prose or table. For example, don't write "roughly 65-67%" to describe three departments' different reorder rates, and don't add a table row averaging several departments together. State each exact value on its own, or describe the pattern in words with no number.
 
-Keep any single markdown table in answer_markdown to at most {MAX_ANSWER_TABLE_ROWS} rows -- for a larger result, show the top results and summarize the rest in words, use a tool to run a new query aggregated to fewer rows, or use generate_chart instead of listing every row."""
+Keep any single markdown table in answer_markdown to at most {MAX_ANSWER_TABLE_ROWS} rows -- for a larger result, show the top results and summarize the rest in words, use a tool to run a new query aggregated to fewer rows, or use generate_chart instead of listing every row.
+
+Never write a literal | inside a table cell without escaping it as \\| -- an unescaped one is read as an extra column and breaks the table (write "Mean Absolute SHAP" instead of "Mean |SHAP|")."""
 
 
 def build_static_context(model: str, static_text: str) -> list[dict] | str:
