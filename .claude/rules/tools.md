@@ -10,12 +10,18 @@ paths:
 
 # Tools: inventory, contracts, data access boundary
 
-> **Deep dives:** `docs/chart-tool.md` before touching `chart_tools.py` — it
+> **Deep dives:** `docs/chart-tool.md` before touching `chart_tool.py` — it
 > has the full spec hierarchy, all 10 chart types, and the styling contract.
 > `docs/data-pipeline.md` for how `agent_safe` and the vector index are built.
 > `docs/data-pipeline.md` for the access-boundary reasoning.
 
 ## Where each tool runs — not all of them are MCP-hosted
+
+**The defining rule: MCP hosting declares a tool safe and useful for someone
+outside this project to pick up and run as-is.** Anything that will only
+ever execute as `agent-sa`, for this project, doesn't belong on the server no
+matter how clean its contract looks. The three exceptions below are each an
+instance of this, not three independent rules.
 
 | Tool | Hosted on the MCP server? |
 |---|---|
@@ -130,7 +136,7 @@ from app.mcp_server import (          # noqa: F401,E402
     docs_search,                      # search_docs
     page_info,                        # get_page_info
     code_search,                      # list_repo_files, read_repo_file
-    chart_tools,                      # generate_chart
+    chart_tool,                       # generate_chart
 )
 
 if __name__ == "__main__":
@@ -295,22 +301,47 @@ Not MCP-hosted, for the same reason given above — control flow internal to
 this graph, not something an external client would call. Contract only;
 dispatch/routing/verification mechanics are `.claude/rules/orchestrator.md`.
 
+**Field descriptions and the docstring carry the real formatting contract —
+deliberately, not left thin.** They were migrated here from the system
+prompt's old `RESPONDING` section (2026-09-29): a tool's own schema is more
+salient to the model at the moment it's deciding how to call that tool than
+equivalent prose sitting in the static system block, confirmed via live
+transcripts during that migration. `context.py`'s `RESPONDING` section is now
+just a pointer to this contract, not a restatement of it — don't duplicate
+detail back into the system prompt when tuning this further.
+
 ```python
 class SubmitAnswerArgs(BaseModel):
-    answer_markdown: str = Field(min_length=1)  # non-empty is what flags a
-                                                 # never-submitted answer --
-                                                 # verify_node's model_validate
-    all_prose_numeric_claims: list[float]  # prose numbers only -- table cells
-                                            # are checked separately by
-                                            # extract_table_values
-    suggested_follow_ups: list[str] = []
+    answer_markdown: str = Field(
+        min_length=1,  # non-empty is what flags a never-submitted answer --
+                       # verify_node's model_validate
+        description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
+                    "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
+                    "or use generate_chart instead. Include the chart_url from generate_chart here as an "
+                    "image -- the user sees no chart otherwise. Escape a literal | inside a table cell as "
+                    "\\| or it's read as an extra column and breaks the table.")
+    all_prose_numeric_claims: list[float] = Field(
+        # prose numbers only -- table cells are checked separately by
+        # extract_table_values, not re-declared here
+        description="Every number stated in prose as fact. Never include a number that already "
+                    "appears in a markdown table -- table cells are checked separately, "
+                    "automatically, not exempt from verification.")
+    suggested_follow_ups: list[str] = Field(
+        default=[],
+        description="1-3 short, natural follow-up questions -- include these by default, since "
+                    "they help the user continue the conversation. Leave empty only when nothing "
+                    "natural genuinely fits.")
 
 @tool(args_schema=SubmitAnswerArgs)
 async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
                          suggested_follow_ups: list[str]) -> str:
     """Call this with your final answer once you have everything you need.
-    This is how you respond to the user -- do not write your answer as
-    plain text.
+    This is how you respond to the user -- a plain-text reply will not be
+    delivered and the turn will be asked to retry. If you can't fully
+    answer within a reasonable number of steps, submit the best partial
+    answer available and say plainly it's partial, rather than presenting
+    it as complete. Do not batch this with other tool calls -- if you do,
+    the submission is ignored and the loop continues.
     """
     return "Answer recorded."
 ```
@@ -561,10 +592,18 @@ are already coupled.
 
 ## Tool schemas use constrained decoding
 
-Every tool's argument schema is bound with `strict=True` so the model can't
-emit a structurally invalid call at all (`.claude/rules/orchestrator.md` for
-the reasoning). **Structural only** — it can't validate that a SQL query is
-*correct*, just that the call's shape is valid.
+Every tool's argument schema is designed to be bound with `strict=True` so
+the model can't emit a structurally invalid call at all
+(`.claude/rules/orchestrator.md` for the reasoning). **Structural only** — it
+can't validate that a SQL query is *correct*, just that the call's shape is
+valid.
+
+**`strict=True` is currently dropped globally, not applied** — `generate_chart`'s
+discriminated union and numeric bounds aren't representable under it on
+Claude, confirmed live (`docs/chart-tool.md`, `.claude/rules/orchestrator.md`'s
+"Constrained decoding" section). Every schema below is still written as if
+strict mode applies; re-enabling it (globally or per-tool) shouldn't need
+reshaping any of them except `generate_chart`'s.
 
 **Every tool gets an explicit args model.** FastMCP already infers a schema
 from type hints and validates against it, but a named model buys two things:
@@ -591,8 +630,8 @@ currently-open failure in LangChain (issues #33646, #34246, #34581), and
 site avoids the whole class.
 
 **`generate_chart` is a variant of the same rule: substitution instead of
-addition.** The model's bound schema has `source_tool_call_id`; the real MCP
-tool's schema has `data` instead — never both. `dispatch_tool` resolves one
+addition.** The model's bound schema has `source_ref`; the real MCP tool's
+schema has `data` instead — never both. `resolve_chart_data` resolves one
 into the other before invoking. Full reasoning in `docs/chart-tool.md`.
 
 **Discriminated unions must be a field on a wrapping `BaseModel`, never the

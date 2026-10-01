@@ -58,7 +58,6 @@ SCHEMA = [
     bigquery.SchemaField("pending_query", "STRING", mode="NULLABLE"),   # the largest pending query
     bigquery.SchemaField("estimated_cost", "STRING", mode="NULLABLE"),  # display dollars, not numeric
     bigquery.SchemaField("approval_decision", "STRING", mode="NULLABLE"),  # "approved" | "rejected"
-    bigquery.SchemaField("chart_url", "STRING", mode="NULLABLE"),
 
     # --- Required, writer defaults to False/0 until Phase 3 ---
     bigquery.SchemaField("verified", "BOOLEAN", mode="REQUIRED"),
@@ -82,4 +81,5 @@ SCHEMA = [
     bigquery.SchemaField("all_prose_numeric_claims", "FLOAT", mode="REPEATED"),
     bigquery.SchemaField("pending_queries", "RECORD", mode="REPEATED", fields=PENDING_QUERY_FIELDS),
     bigquery.SchemaField("deferred_dax", "RECORD", mode="REPEATED", fields=DEFERRED_DAX_FIELDS),
+    bigquery.SchemaField("chart_urls", "STRING", mode="REPEATED"),
 ]

@@ -1,14 +1,17 @@
-"""LangGraph tool-calling loop: state, nodes, routing, graph
-(.claude/rules/orchestrator.md). init_orchestrator() populates MCP_TOOLS/
-ALL_TOOLS/SYSTEM_MESSAGE lazily -- call once before running graph.
+"""LangGraph tool-calling loop: state, nodes, routing, graph.
+init_orchestrator() populates MCP_TOOLS/ALL_TOOLS/SYSTEM_MESSAGE lazily --
+call once before running graph.
 """
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import groupby
 from operator import itemgetter
 from typing import Annotated, Any, TypedDict
 
+import google.auth
+import google.auth.transport.requests
 import mistune
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -20,9 +23,12 @@ from pydantic import ValidationError
 
 from app.config import (
     ABSOLUTE_CAP,
+    AGENT_SA_EMAIL,
     BIGQUERY_PRICE_PER_TIB,
+    CHART_URL_EXPIRATION_HOURS,
     DAX_ROW_CAP,
     DAX_TIMEOUT_SECONDS,
+    GCS_CHART_BUCKET,
     MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_ITERATIONS,
@@ -38,7 +44,10 @@ from app.config import (
 from app.orchestrator.context import get_static_context
 from app.orchestrator.power_bi_auth import get_power_bi_token
 from app.orchestrator.tools import (
+    GenerateChartToolCallArgs,
     SubmitAnswerArgs,
+    ToolError,
+    chart_tool_call_standin,
     dry_run,
     get_measure_dax,
     run_bigquery_sql,
@@ -48,12 +57,13 @@ from app.telemetry.writer import build_telemetry_row, write_telemetry_row
 
 MCP_TOOLS: dict[str, BaseTool] = {}
 ALL_TOOLS: dict[str, BaseTool] = {}
+BIND_TOOLS_LIST: list[BaseTool] = []
 SYSTEM_MESSAGE: SystemMessage | None = None
 
 
 async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
-    """Populates MCP_TOOLS, ALL_TOOLS, SYSTEM_MESSAGE. Idempotent."""
-    global MCP_TOOLS, ALL_TOOLS, SYSTEM_MESSAGE
+    """Populates MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE. Idempotent."""
+    global MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE
     if MCP_TOOLS and ALL_TOOLS and SYSTEM_MESSAGE:
         return
     client = MultiServerMCPClient({
@@ -68,6 +78,10 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "submit_answer": submit_answer,
         "get_measure_dax": get_measure_dax,
     }
+    # Model binds here, not ALL_TOOLS -- generate_chart's entry is swapped for
+    # a stand-in schema (source_ref + spec). Dispatch still uses ALL_TOOLS.
+    BIND_TOOLS_LIST = [chart_tool_call_standin if name == "generate_chart" else t
+                       for name, t in ALL_TOOLS.items()]
     SYSTEM_MESSAGE = SystemMessage(content=get_static_context())
 
 
@@ -81,6 +95,7 @@ class ToolCallRecord(TypedDict):
     result: Any  # shape depends on the tool
     success: bool
     error: str | None
+    ref_id: str | None  # set only for a chartable tool's successful result
     started_at: datetime
     completed_at: datetime
 
@@ -140,10 +155,10 @@ class AgentState(TypedDict):
 
     # Building toward AgentResponse
     answer_markdown: str
-    chart_url: str | None
+    chart_urls: Annotated[list[str], append_list]
     sources: list[str]
-    all_prose_numeric_claims: list[float]  # llm provided numeric claims in prose                                        
-    suggested_follow_ups: list[str]        
+    all_prose_numeric_claims: list[float]  # llm provided numeric claims in prose
+    suggested_follow_ups: list[str]
 
 
 # --- Helper functions ----------------------------------------------------
@@ -159,7 +174,7 @@ def format_cost(num_bytes: int) -> str:
     """Byte count as a display dollar string -- display only, not the decision."""
     return f"${(num_bytes / 1024**4) * BIGQUERY_PRICE_PER_TIB:.2f}"
 
-
+# Inject Dax Args: For llm excluded MCP tool (run_dax_query) args
 def inject_dax_args(tc: dict) -> dict:
     """Adds Power BI auth/target/guardrail values to a run_dax_query call --
     excluded from the model's schema (exclude_args)"""
@@ -176,6 +191,71 @@ def inject_dax_args(tc: dict) -> dict:
     }
 
 
+# Chart dispatch -- source_ref resolution and GCS args for generate_chart
+
+def get_gcp_access_token() -> str:
+    """An OAuth access token for agent-sa, via ADC."""
+    creds, _ = google.auth.default()
+    creds.refresh(google.auth.transport.requests.Request())
+    return creds.token
+
+
+def inject_chart_args(tc: dict) -> dict:
+    """Adds GCS storage/auth values to a generate_chart call -- excluded
+    from the model's schema (exclude_args), never stored in ToolCallRecord/telemetry."""
+    return {
+        **tc,
+        "args": {
+            **tc["args"],
+            "bucket_name": GCS_CHART_BUCKET,
+            "storage_backend": "gcs",
+            "expiration_hours": CHART_URL_EXPIRATION_HOURS,
+            "access_token": get_gcp_access_token(),
+            "service_account_email": AGENT_SA_EMAIL,
+        },
+    }
+
+
+CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
+
+
+def _lookup_chart_source(source_ref: str, prior_tool_calls: list["ToolCallRecord"]) -> "ToolCallRecord":
+    """Finds the successful, chartable tool call source_ref points at, or
+    raises an actionable error if it can't be found."""
+    source_tc = next(
+        (r for r in prior_tool_calls
+         if r.get("ref_id") == source_ref and r["success"] and r["name"] in CHARTABLE_TOOLS),
+        None)
+    if source_tc is None:
+        raise ToolError(
+            f"'{source_ref}' is not a successfully completed run_bigquery_sql or "
+            "run_dax_query call from earlier this turn -- it may not exist, may have failed, "
+            "or may be from later in this same batch and hasn't run yet. Fetch the data "
+            "first, then call generate_chart in a follow-up step.")
+    return source_tc
+
+
+def resolve_chart_data(chart_tc: dict, prior_tool_calls: list["ToolCallRecord"]) -> dict:
+    """Rewrites a model-facing chart call into the real MCP tool's args shape."""
+    call_args = GenerateChartToolCallArgs.model_validate(chart_tc["args"])
+    source_tc = _lookup_chart_source(call_args.source_ref, prior_tool_calls)
+    return {
+        **chart_tc,
+        "args": {"args": {"data": source_tc["result"], "spec": call_args.spec.model_dump()}},
+    }
+
+
+def _label_chartable_result(msg: ToolMessage, ref_id: str) -> ToolMessage:
+    """Rebuilds a tool result's message with a visible reference label for
+    the model to copy into generate_chart's source_ref."""
+    return ToolMessage(
+        content=f"Reference id for charting this result: {ref_id}\n{msg.content}",
+        name=msg.name, tool_call_id=msg.tool_call_id, status=msg.status,
+    )
+
+
+# Tool-call record / batch bookkeeping
+
 def _unwrap_content(content: str | list) -> str:
     """LangChain tools' content is a plain JSON string; MCP tools' content
     (via langchain_mcp_adapters) is a list of content blocks -- unwrap to
@@ -184,7 +264,8 @@ def _unwrap_content(content: str | list) -> str:
 
 
 def build_tool_call_record(
-    tc: dict, message: ToolMessage, started_at: datetime, completed_at: datetime
+    tc: dict, message: ToolMessage, started_at: datetime, completed_at: datetime,
+    ref_id: str | None = None,
 ) -> ToolCallRecord:
     """Builds a ToolCallRecord from a dispatched tool call and its ToolMessage."""
     query_text = tc["args"].get("query") or tc["args"].get("dax")
@@ -192,14 +273,14 @@ def build_tool_call_record(
     if not success:
         return ToolCallRecord(
             id=tc["id"], name=tc["name"], args=tc["args"], query_text=query_text, result="",
-            success=False, error=_unwrap_content(message.content),
+            success=False, error=_unwrap_content(message.content), ref_id=ref_id,
             started_at=started_at, completed_at=completed_at,
         )
 
     result = json.loads(_unwrap_content(message.content))
     return ToolCallRecord(
         id=tc["id"], name=tc["name"], args=tc["args"], query_text=query_text, result=result,
-        success=True, error=None,
+        success=True, error=None, ref_id=ref_id,
         started_at=started_at, completed_at=completed_at,
     )
 
@@ -210,6 +291,71 @@ def build_turn_error(
     """Builds a TurnError -- a guardrail decline or a real tool failure."""
     return TurnError(stage=stage, error_type=error_type, message=message,
                       occurred_at=occurred_at, tool_call_id=tool_call_id)
+
+
+@dataclass
+class ToolBatch:
+    calls: list[dict]
+    messages: list[ToolMessage]
+    started_at: datetime
+    completed_at: datetime
+    error_type: str
+
+
+@dataclass
+class BatchResult:
+    records: list[ToolCallRecord]
+    display_messages: list[ToolMessage]
+    errors: list[TurnError]
+    ref_counter: int
+
+
+def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> BatchResult:
+    """Builds each call's ToolCallRecord, its message for state["messages"],
+    and a TurnError for any failure."""
+    records = []
+    display_messages = []
+    errors = []
+
+    # asyncio.gather() preserves input order in its results -- zip preserves order correctly
+    for tc, msg in zip(batch.calls, batch.messages):
+        if tc["name"] in CHARTABLE_TOOLS and msg.status != "error":
+            ref_id = f"ref_{ref_counter}"
+            ref_counter += 1
+            record = build_tool_call_record(tc, msg, batch.started_at, batch.completed_at, ref_id=ref_id)
+            records.append(record)
+            display_messages.append(_label_chartable_result(msg, ref_id))
+        elif tc["name"] == "submit_answer":  # Anthropic requires a tool message for every tool call
+            display_messages.append(msg)
+            record = None
+        else:
+            record = build_tool_call_record(tc, msg, batch.started_at, batch.completed_at)
+            records.append(record)
+            display_messages.append(msg)
+
+        if record is not None and not record["success"]:
+            errors.append(build_turn_error(
+                "call_tool", batch.error_type, record["error"], record["completed_at"], record["id"]))
+    return BatchResult(records, display_messages, errors, ref_counter)
+
+
+async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord]) -> ToolMessage:
+    """Dispatches one non-BigQuery tool call, injecting hidden args first."""
+    if tc["name"] == "submit_answer":
+        # Only reachable when not the sole call this round.
+        return ToolMessage(
+            content="Not recorded -- submit_answer must be your only tool call "
+                    "this round. Call it alone, with nothing else.",
+            name=tc["name"], tool_call_id=tc["id"], status="error")
+    if tc["name"] == "run_dax_query":
+        return await ALL_TOOLS[tc["name"]].ainvoke(inject_dax_args(tc))
+    if tc["name"] == "generate_chart":
+        try:
+            resolved = resolve_chart_data(tc, prior_tool_calls)
+        except ToolError as e:
+            return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
+        return await ALL_TOOLS[tc["name"]].ainvoke(inject_chart_args(resolved))
+    return await ALL_TOOLS[tc["name"]].ainvoke(tc)
 
 
 def iteration_cap_update(tool_calls: list[dict], iteration_count: int) -> dict:
@@ -352,10 +498,7 @@ VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to t
 
 # finalize_node: token/source tallying for the telemetry row
 
-# Separate from FRIENDLY_TOOL_NAMES (.claude/rules/gateway.md): those are
-# present-tense progress messages, these are past-tense badges. No tool jargon
-# -- the reader is field-operations staff. "Model fields" is the SEMANTIC
-# model's, not BigQuery's.
+# Past-tense badges, no tool jargon -- reader is field-operations staff.
 SOURCE_LABELS = {
     "run_bigquery_sql": "Query warehouse",
     "run_dax_query":    "Query dashboard",
@@ -389,8 +532,15 @@ def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
 
 async def agent_node(state: AgentState) -> dict:
     """Calls the LLM with tools bound. Emits tool calls -- the final answer
-    only ever arrives via submit_answer, never plain text."""
-    model = ChatAnthropic(model=MODEL).bind_tools(list(ALL_TOOLS.values()), strict=True)
+    only ever arrives via submit_answer, never plain text.
+
+    Extended thinking enabled for frontend display value -- incompatible with
+    tool_choice="any", so a plain-text finish without submit_answer is
+    possible again; verify_node's retry already recovers from that."""
+    model = ChatAnthropic(
+        model=MODEL,
+        thinking={"type": "adaptive", "display": "summarized"},
+    ).bind_tools(BIND_TOOLS_LIST)
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 
@@ -400,22 +550,22 @@ async def call_tool_node(state: AgentState) -> dict:
     records a ToolCallRecord and, for any declined/failed call, a TurnError."""
     tool_calls = state["messages"][-1].tool_calls
 
-    # A sole submit_answer call is always dispatched, even past the iteration
-    # cap -- it's the response mechanism, not a data-gathering tool, so it
-    # doesn't count against iteration_count and doesn't get a ToolCallRecord
-    # (its content -- answer_markdown, claims, follow-ups -- is already
-    # captured directly in state).
+    # A sole submit_answer call is always dispatched, even past the iteration cap
     answer_submitted = len(tool_calls) == 1 and tool_calls[0]["name"] == "submit_answer"
     if answer_submitted:
         tc = tool_calls[0]
         msg = await submit_answer.ainvoke(tc)
-        args = tc["args"]
+        if msg.status == "error":
+            # Malformed call -- let the model see the error and retry.
+            return {"messages": [msg], "answer_submitted": False}
+        #Validate Args
+        args = SubmitAnswerArgs.model_validate(tc["args"])
         return {
             "messages": [msg],
             "answer_submitted": True,
-            "answer_markdown": args["answer_markdown"],
-            "all_prose_numeric_claims": args["all_prose_numeric_claims"],
-            "suggested_follow_ups": args["suggested_follow_ups"],
+            "answer_markdown": args.answer_markdown,
+            "all_prose_numeric_claims": args.all_prose_numeric_claims,
+            "suggested_follow_ups": args.suggested_follow_ups,
         }
 
     if state["iteration_count"] >= MAX_ITERATIONS:
@@ -434,8 +584,7 @@ async def call_tool_node(state: AgentState) -> dict:
 
     other_started_at = datetime.now(timezone.utc)
     other_messages = await asyncio.gather(*[
-        ALL_TOOLS[tc["name"]].ainvoke(inject_dax_args(tc) if tc["name"] == "run_dax_query" else tc)
-        for tc in other_calls
+        dispatch_other_call(tc, state["tool_calls"]) for tc in other_calls
     ])
     other_completed_at = datetime.now(timezone.utc)
 
@@ -455,45 +604,33 @@ async def call_tool_node(state: AgentState) -> dict:
         bq_messages = await asyncio.gather(*[ALL_TOOLS[tc["name"]].ainvoke(tc) for tc in bq_calls])
     bq_completed_at = datetime.now(timezone.utc)
 
-    # gather() preserves input order, so zip(calls, messages) pairs correctly.
-    bq_records = [
-        build_tool_call_record(tc, msg, bq_started_at, bq_completed_at)
-        for tc, msg in zip(bq_calls, bq_messages)
-    ]
-    # submit_answer excluded -- if batched with a real tool, its ToolMessage
-    # is still dispatched above (satisfies the API's tool_use/tool_result
-    # protocol) but the submission itself is ignored.
-    other_records = [
-        build_tool_call_record(tc, msg, other_started_at, other_completed_at)
-        for tc, msg in zip(other_calls, other_messages)
-        if tc["name"] != "submit_answer"
-    ]
-
+    ref_counter = sum(1 for r in state["tool_calls"] if r.get("ref_id")) + 1
     bq_error_type = "cost_cap_exceeded" if cost_cap_exceeded else "tool_error"
-    errors = [
-        build_turn_error("call_tool", bq_error_type, r["error"], r["completed_at"], r["id"])
-        for r in bq_records if not r["success"]
-    ] + [
-        build_turn_error("call_tool", "tool_error", r["error"], r["completed_at"], r["id"])
-        for r in other_records if not r["success"]
-    ]
 
-    # Only bill bytes for calls that actually ran to completion -- a query
-    # that fails (MAX_BYTES_BILLED, timeout, bad SQL) was never billed by
-    # BigQuery, so charging its dry-run estimate against bytes_consumed would
-    # deplete the turn's budget for work that cost nothing.
+    bq_batch = ToolBatch(bq_calls, bq_messages, bq_started_at, bq_completed_at, bq_error_type)
+    bq_result = build_tool_call_records_and_messages(bq_batch, ref_counter)
+
+    other_batch = ToolBatch(other_calls, other_messages, other_started_at, other_completed_at, "tool_error")
+    other_result = build_tool_call_records_and_messages(other_batch, bq_result.ref_counter)
+
+    # Only bill bytes for calls that actually ran -- a failed query was never billed.
     billed_bytes = 0 if cost_cap_exceeded else sum(
-        est for est, r in zip(estimates, bq_records) if r["success"]
+        est for est, r in zip(estimates, bq_result.records) if r["success"]
     )
+    chart_urls = [
+        r["result"]["chart_url"] for r in other_result.records
+        if r["name"] == "generate_chart" and r["success"]
+    ]
     return {
-        "messages": bq_messages + other_messages,
+        "messages": bq_result.display_messages + other_result.display_messages,
         "iteration_count": state["iteration_count"] + 1,
         "bytes_consumed": state["bytes_consumed"] + billed_bytes,
         "cost_cap_exceeded": cost_cap_exceeded,
         "estimated_cost": format_cost(batch_bytes) if cost_cap_exceeded else state["estimated_cost"],
-        "tool_calls": bq_records + other_records,
-        "errors": errors,
+        "tool_calls": bq_result.records + other_result.records,
+        "errors": bq_result.errors + other_result.errors,
         "answer_submitted": False,
+        "chart_urls": chart_urls,
     }
 
 
@@ -532,9 +669,9 @@ def verify_response(state: AgentState) -> tuple[bool, str | None]:
 
     pool = build_numeric_pool(state["tool_calls"])
     all_claimed = state["all_prose_numeric_claims"] + extract_table_values(state["answer_markdown"])
-    for claim in all_claimed:
-        if not claim_matches_pool(claim, pool):
-            return False, f"{claim} does not match any tool result this turn."
+    unmatched = [c for c in all_claimed if not claim_matches_pool(c, pool)]
+    if unmatched:
+        return False, f"{unmatched} do not match any tool result this turn."
     return True, None
 
 
@@ -588,7 +725,7 @@ async def finalize_node(state: AgentState) -> dict:
         estimated_cost=state["estimated_cost"],
         pending_queries=state["pending_queries"],
         deferred_dax=state["deferred_dax"],
-        chart_url=state["chart_url"],
+        chart_urls=state["chart_urls"],
         suggested_follow_ups=state["suggested_follow_ups"],
         all_prose_numeric_claims=state["all_prose_numeric_claims"],
     )

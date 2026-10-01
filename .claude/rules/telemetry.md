@@ -106,7 +106,7 @@ drift apart. Re-run `create_table.py` after any schema change (BigQuery can't
 | `pending_query`, `pending_queries`, `deferred_dax`, `estimated_cost` | No — null | Phase 3 — **top-level, not nested in `tool_calls`**: a query that hasn't run yet has no `started_at`/`result` to live alongside. `pending_query` (singular) is the largest pending query, same value as `AgentResponse.pending_query`, kept for cheap querying; `pending_queries`/`deferred_dax` (both plural) are the full lists, BigQuery and DAX respectively. `estimated_cost` scopes to *this batch only* — combine with `bytes_consumed` for the turn's running total at the moment of pause |
 | `approval_decision` | No — null | Phase 3 — `"approved"`/`"rejected"` on the response row; null on the pause row |
 | `cost_cap_exceeded` | No — `False` | Phase 3 — hard decline, logged synchronously like any normal turn |
-| `chart_url` | No — null | Phase 3 (`generate_chart`) |
+| `chart_urls` | No — empty | Phase 3 (`generate_chart`) — every successful chart URL this turn, not just one |
 | `suggested_follow_ups` | No — empty | Phase 3 item 6, via `submit_answer` (`.claude/rules/orchestrator.md`) — moved up from its original Phase 4 slot |
 | `all_prose_numeric_claims` | No — empty | Phase 3 item 6, via `submit_answer` — the model's declared prose claims, promoted to a top-level `REPEATED FLOAT` column for the same reason as `query_text`: direct queryability, no `JSON_VALUE(args, ...)` needed on the `submit_answer` entry in `tool_calls` |
 | `is_projection` | **Not a field yet** | Added *with* the Phase 7 `run_projection` tool, not before |

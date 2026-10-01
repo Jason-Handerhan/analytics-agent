@@ -54,7 +54,7 @@ async def test_write_telemetry_row_success(monkeypatch):
             {"id": "b", "query": "SELECT department, AVG(reordered) FROM orders GROUP BY department"},
         ],
         deferred_dax=[{"id": "c", "dax": 'EVALUATE ROW("x", 1)'}],
-        chart_url=None,
+        chart_urls=[],
         suggested_follow_ups=["What about last quarter?"],
         all_prose_numeric_claims=[0.42, 100.0],
     )

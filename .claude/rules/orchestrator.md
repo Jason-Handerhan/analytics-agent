@@ -43,7 +43,7 @@ class AgentResponse(BaseModel):
     answer_markdown: str
     sources: list[str]
     needs_approval: bool = False
-    chart_url: str | None = None
+    chart_urls: list[str] = []
     suggested_follow_ups: list[str] = []
     iteration_cap_hit: bool = False   # see "Hitting max_iterations" below
     pending_query: str | None = None   # set ONLY when needs_approval is True.
@@ -68,8 +68,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 class ToolCallRecord(TypedDict):
-    id: str              # matches the AIMessage.tool_calls id — what
-                         # generate_chart's source_tool_call_id resolves
+    id: str              # matches the AIMessage.tool_calls id
     name: str
     args: dict            # the query lives HERE — {"query": "SELECT ..."} or
                           # {"dax": "EVALUATE ..."}.
@@ -84,6 +83,9 @@ class ToolCallRecord(TypedDict):
     success: bool
     error: str | None    # WHICH failure — agent retry behavior distinguishes
                          # ToolError from ToolTimeoutError; `success` alone loses that
+    ref_id: str | None    # set only for a successful run_bigquery_sql/run_dax_query
+                          # call -- "ref_1", "ref_2", ... -- what generate_chart's
+                          # source_ref resolves against ("Batch ordering" below)
     started_at: datetime
     completed_at: datetime
 
@@ -214,7 +216,7 @@ class AgentState(TypedDict):
                                             # against build_numeric_pool()
     suggested_follow_ups: list[str]        # same source; flows straight to
                                             # AgentResponse, unlike the claims
-    chart_url: str | None
+    chart_urls: list[str]
     sources: list[str]
 ```
 
@@ -272,14 +274,32 @@ transcription-drift risk, and the model doesn't pay extra tokens re-stating
 a table it already wrote.
 
 ```python
+NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
+
 def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
-    """Every number across this turn's non-search_docs, non-submit_answer
-    tool results."""
+    """Every number from this turn's successful BigQuery/DAX query results --
+    the only tools that return genuine queried data, not incidental numbers
+    embedded in code, doc chunks, or metadata."""
     pool: set[float] = set()
     for tc in tool_calls:
-        if tc["success"] and tc["name"] not in ("search_docs", "submit_answer"):
+        if tc["success"] and tc["name"] in NUMERIC_SOURCE_TOOLS:
             pool.update(extract_numeric_values(tc["result"]))
     return pool
+
+def claim_matches_pool(claim: float, pool: set[float]) -> bool:
+    """True if claim is a legitimately-rounded or percentage-scaled
+    representation of some tool result, not just numerically close to one --
+    precision-aware, not a flat tolerance. Rounds each pool value to the
+    claim's own decimal precision (from its shortest string form) before
+    comparing for equality -- handles ordinary rounding (0.379987 -> 0.38)
+    and percentage-scaled display (a raw fraction shown as a percent)
+    without the false-accept risk a wider flat tolerance carries on large
+    numbers."""
+    precision = _decimal_places(claim)
+    return any(
+        round(v, precision) == claim or round(v * 100, precision) == claim
+        for v in pool
+    )
 
 def verify_response(state: AgentState) -> tuple[bool, str | None]:
     # 1. Shape check first -- catches "never called submit_answer" (answer_markdown
@@ -296,12 +316,14 @@ def verify_response(state: AgentState) -> tuple[bool, str | None]:
                        "with your final answer_markdown and any numeric claims it makes.")
 
     # 2. Pooled matching -- declared prose claims plus automatically-extracted
-    # table values, both checked against the same pool.
+    # table values, both checked against the same pool. Every unmatched claim
+    # is collected and reported together, not just the first -- a multi-number
+    # answer that fixed one claim per retry was the real bug this replaced.
     pool = build_numeric_pool(state["tool_calls"])
     all_claimed = state["all_prose_numeric_claims"] + extract_table_values(state["answer_markdown"])
-    for claim in all_claimed:
-        if not any(abs(claim - v) < 0.01 for v in pool):
-            return False, f"{claim} does not match any tool result this turn."
+    unmatched = [c for c in all_claimed if not claim_matches_pool(c, pool)]
+    if unmatched:
+        return False, f"{unmatched} do not match any tool result this turn."
     return True, None
 ```
 
@@ -321,11 +343,15 @@ model computes something itself instead of the query, that value won't exist
 in any tool result, `verify_response` won't find it, and the turn retries —
 the prompt only affects how often it succeeds on the first try, never the
 safety guarantee. System instructions (`app/orchestrator/context.py`):
-*"When your answer needs a computed value — a percentage change, a
-difference, a ratio, an average — add it to the query itself (a calculated
-DAX measure, a SQL expression) rather than computing it in your response.
-Only compare BigQuery and DAX results directly when no query can produce
-the computed value already — Phase 7 (`docs/cross-domain-compute.md`)."*
+*"If you need a value you'd otherwise compute by hand — a rank, percentage
+change, difference, ratio, average — you have two options: add it to the
+query (RANKX/ROW_NUMBER, a calculated DAX measure, a SQL expression) and
+re-run it before calling submit_answer, or leave it out of the table/prose
+entirely and describe the pattern in words instead."* A hand-numbered rank
+column is the concrete case that surfaced this: not grounded in a live tool
+call, so verification correctly rejects it — confirmed live, not
+hypothetical. Cross-domain comparison (BigQuery vs. DAX) is Phase 7
+(`docs/cross-domain-compute.md`), not covered by this instruction.
 
 **No `is_projection` field — deliberately not carried.** The Phase 7
 `run_projection` tool (§9) would need one, because a
@@ -347,14 +373,17 @@ own Layer-1 test — see `docs/testing.md`):
   `results[0].tables[0].rows` shape, where keys are fully qualified
   (`Table[Column]`) — irrelevant here since this returns values, not keys.
 - `extract_table_values(answer_markdown) -> list[float]` — **called by
-  `verify_response`.** Same table-block-detection *shape* as `check_table_rows`
-  (a `|---|`-style separator as a block's 2nd line means it's a real table) —
-  its own independent scan, not a shared call, per the no-pass-through-helpers
-  rule (`CLAUDE.md`). For each detected block, float-parses every cell,
-  normalizing commas/`%`/currency, skipping cells that aren't numeric.
-  Deliberately scoped to table cells only — never runs on prose lines, so it
-  can't reproduce the year/version/index false-positive problem
-  `extract_numeric_tokens` had.
+  `verify_response`.** Shares `_markdown_ast` (mistune's GFM table parser, an
+  AST walk) with `check_table_rows` above — not duplicated, per the
+  no-pass-through-helpers rule (`CLAUDE.md`), since both need the identical
+  "find every real table block" walk. Replaced an earlier hand-rolled regex
+  scan after it silently dropped bold-formatted cells (`**66.8%**`) —
+  confirmed live before shipping (`docs/build-order.md`). For each cell,
+  recursively extracts its text (`_cell_text`, since a bold cell nests inside
+  its own AST node) and float-parses it, normalizing commas/`%`/currency,
+  skipping cells that aren't numeric. Deliberately scoped to table cells
+  only — never runs on prose lines, so it can't reproduce the
+  year/version/index false-positive problem `extract_numeric_tokens` had.
 
 **`extract_numeric_tokens` is retired, not revived by `extract_table_values`**
 — the latter never touches prose, so it can't reproduce the false positives
@@ -624,6 +653,19 @@ parameter surface through the LangChain wrapper — and how closely its
 guarantees match OpenAI's — needs verifying, not assuming. Same category as
 `query_job.result()`'s param name.
 
+**Currently dropped globally, not enabled (2026-09-28).** Confirmed live:
+Claude's `strict=True` rejects `oneOf`/`discriminator` and `ge=`/`le=`
+outright, both of which `generate_chart`'s schema needs
+(`docs/chart-tool.md`). A per-tool split exists (pre-convert just that tool
+to a raw Anthropic-format dict, which bypasses `strict` entirely, and hand
+it to the same `bind_tools()` call alongside the rest) and works, but ties
+the fix to Anthropic's own tool-dict shape — the opposite of this section's
+model-swappable intent. Dropped everywhere instead, accepting the weaker
+structural guarantee project-wide rather than a provider-specific mechanism;
+Pydantic validation still catches a malformed call before dispatch either
+way. **Circle back before `generate_chart` is done**: work out the OpenAI/
+Gemini equivalent, or confirm this trade-off stands.
+
 ## Shared exceptions
 
 `ToolError` and `ToolTimeoutError` are referenced throughout these docs but
@@ -646,14 +688,14 @@ from itertools import groupby
 # — the reader is field-operations staff. "Model fields" is the SEMANTIC
 # model's, not BigQuery's.
 SOURCE_LABELS = {
-    "run_bigquery_sql": "Queried warehouse",
-    "run_dax_query":    "Queried dashboard data",
-    "get_measure_dax":  "Looked up a measure",
-    "get_page_info":    "Read dashboard page",
-    "list_repo_files":  "Browsed project code",
-    "read_repo_file":   "Read project code",
-    "search_docs":      "Searched documentation",
-    "generate_chart":   "Created chart",
+    "run_bigquery_sql": "Query warehouse",
+    "run_dax_query":    "Query dashboard",
+    "get_measure_dax":  "Measure Lookup",
+    "get_page_info":    "PBI page info",
+    "list_repo_files":  "list code",
+    "read_repo_file":   "Read code",
+    "search_docs":      "Doc Search",
+    "generate_chart":   "Create chart",
 }
 
 def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
@@ -720,10 +762,20 @@ implementation in `.claude/rules/tools.md`:
 ### Answer-length check — display feasibility, not numeric trust
 
 Row caps protect the *tool result*. Nothing stops the model writing a giant
-markdown table into `answer_markdown` anyway — and the Power Apps HTML control
-has a hard **16,384-character limit** (HTML inflates markdown tables
-significantly). Kept separate from `verify_response` on purpose — this is
-about whether an answer can be *displayed*, not whether its numbers are real.
+markdown table into `answer_markdown` anyway, and HTML inflates markdown
+tables significantly. Kept separate from `verify_response` on purpose — this
+is about whether an answer can be *displayed*, not whether its numbers are
+real.
+
+**`MAX_ANSWER_CHARS` is a readability ceiling, not a workaround for a
+platform limit — confirmed live (2026-09-28) that no such limit exists.**
+This previously cited a "hard 16,384-character limit" on the Power Apps HTML
+text control; Microsoft's Power Fx docs state Text/Hyperlink/Image/Media
+properties have no preset character limit at all (memory is the real
+constraint). Corrected here and in `docs/frontend.md`, which also has an open
+decision — inline chart images vs. a separate `Image` control — that would
+bump this to 7000 if resolved one particular way. Decide before Phase 4's
+frontend build-out (`docs/build-order.md`).
 
 Two checks, not one: total length, and the size of any single table within
 it — a table can blow well past what's reasonable to read in chat while
@@ -744,21 +796,23 @@ def check_answer_length(answer_markdown: str) -> bool:
     return len(answer_markdown) <= MAX_ANSWER_CHARS
 
 
+# Shared GFM table parser (mistune, AST walk) -- used by check_table_rows
+# here and by extract_table_values below. Replaced an earlier hand-rolled
+# regex scan, see that section for why.
+_markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
+
 def check_table_rows(answer_markdown: str) -> bool:
     """True if every markdown table in the answer has at most
     MAX_ANSWER_TABLE_ROWS data rows."""
-    lines = answer_markdown.split("\n") + [""]
-    rows, block = 0, []
-    for line in lines:
-        if line.strip().startswith("|"):
-            block.append(line)
+    for block in _markdown_ast(answer_markdown):
+        if block.get("type") != "table":
             continue
-        # A real table needs a separator row (e.g. |---|---|) as its 2nd
-        # line -- otherwise this is just prose that happens to start with "|".
-        if len(block) >= 2 and re.match(r"^\|[\s\-:|]+\|$", block[1].strip()):
-            rows = max(rows, len(block) - 2)
-        block = []
-    return rows <= MAX_ANSWER_TABLE_ROWS
+        body = next((c for c in block["children"] if c["type"] == "table_body"), None)
+        if body is None:
+            continue
+        if len(body["children"]) > MAX_ANSWER_TABLE_ROWS:
+            return False
+    return True
 
 
 def check_answer_displayable(answer_markdown: str) -> bool:
@@ -881,19 +935,40 @@ nonexistent measures. Instead, on engine failure append a fuzzy-match hint:
 in `docs/chart-tool.md`; what matters here is only *when* it may be dispatched.
 
 LangGraph dispatches a batch concurrently, so a data-fetch call and a
-`generate_chart` referencing it in the *same* batch would race.
+`generate_chart` referencing it in the *same* batch would race. **Not solved
+with an explicit same-batch id check (`check_batch_ordering`, the originally
+planned design) — superseded by how `source_ref` resolution actually works.**
+A chart call's `source_ref` is matched against `ref_id`s already present in
+`state["tool_calls"]`, which only holds *prior rounds'* results — the current
+round's own records aren't accumulated into state until after `call_tool_node`
+returns. A same-batch reference therefore can't resolve at all;
+`_lookup_chart_source` raises the same actionable `ToolError` it would for any
+other unresolvable reference, with no separate ordering check needed:
 
 ```python
-def check_batch_ordering(tool_calls: list[dict]) -> None:
-    ids = {tc["id"] for tc in tool_calls}
-    for tc in tool_calls:
-        ref = tc.get("args", {}).get("source_tool_call_id")
-        if ref and ref in ids:
-            raise ToolError(
-                f"{tc['name']} references '{ref}' from this same batch. "
-                "Fetch first, wait for the result, then call it in a follow-up step."
-            )
+CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
+
+def _lookup_chart_source(source_ref: str, prior_tool_calls: list[ToolCallRecord]) -> ToolCallRecord:
+    """Finds the successful, chartable tool call source_ref points at, or
+    raises an actionable error if it can't be found."""
+    source_tc = next(
+        (r for r in prior_tool_calls
+         if r.get("ref_id") == source_ref and r["success"] and r["name"] in CHARTABLE_TOOLS),
+        None)
+    if source_tc is None:
+        raise ToolError(
+            f"'{source_ref}' is not a successfully completed run_bigquery_sql or "
+            "run_dax_query call from earlier this turn -- it may not exist, may have failed, "
+            "or may be from later in this same batch and hasn't run yet. Fetch the data "
+            "first, then call generate_chart in a follow-up step.")
+    return source_tc
 ```
+
+`ref_id` (`"ref_1"`, `"ref_2"`, ...) is assigned only to a successful
+`run_bigquery_sql`/`run_dax_query` result and printed back to the model
+alongside that result, so it has something real to copy into `source_ref` —
+never the raw tool-call id (`source_tool_call_id`, the field's original name,
+dropped along with the id-based design).
 
 ### Cancellation — two levels, because stopping and killing are different
 
@@ -1077,17 +1152,27 @@ catch "never submitted" (above).
 
 ```python
 ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql,
-             "submit_answer": submit_answer}  # neither is MCP-based
-                                              # (`.claude/rules/tools.md`)
-                                              # -- MCP_TOOLS alone would
-                                              # leave both uncallable
+             "submit_answer": submit_answer, "get_measure_dax": get_measure_dax}
+             # none of the three is MCP-based (`.claude/rules/tools.md`) --
+             # MCP_TOOLS alone would leave all three uncallable
+
+# generate_chart's entry is swapped for a stand-in schema (source_ref + spec,
+# `.claude/rules/tools.md`) in the list bound to the model -- dispatch still
+# uses ALL_TOOLS, which keeps the real MCP-loaded tool object.
+BIND_TOOLS_LIST = [chart_tool_call_standin if name == "generate_chart" else t
+                   for name, t in ALL_TOOLS.items()]
 
 async def agent_node(state: AgentState) -> dict:
-    # llm is constructed with thinking={"type": "adaptive", "display": "summarized"}
-    # -- readable thinking text for append_thinking() (.claude/rules/gateway.md).
-    # No cost difference: thinking tokens bill the same regardless of display.
-    model = llm.bind_tools(list(ALL_TOOLS.values()), strict=True)   # constrained
-                                                                     # decoding, above
+    """Extended thinking enabled for frontend display value -- incompatible
+    with tool_choice="any" (confirmed live: "Thinking may not be enabled when
+    tool_choice forces tool use"), so a plain-text finish without
+    submit_answer is possible again; verify_node's retry already recovers
+    from that. No cost difference: thinking tokens bill the same regardless
+    of display."""
+    model = ChatAnthropic(
+        model=MODEL,
+        thinking={"type": "adaptive", "display": "summarized"},
+    ).bind_tools(BIND_TOOLS_LIST)   # strict=True dropped -- see the note below
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 ```

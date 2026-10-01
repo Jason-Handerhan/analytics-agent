@@ -5,6 +5,8 @@ from google.cloud import secretmanager
 # GCP Project Configuration
 GCP_PROJECT_ID = "instacart-ml-model"
 GCS_CHART_BUCKET = "instacart-ml-model-charts"
+AGENT_SA_EMAIL = "agent-sa@instacart-ml-model.iam.gserviceaccount.com"
+CHART_URL_EXPIRATION_HOURS = 1.0
 
 # Repo-relative paths
 CONTEXT_DIR = pathlib.Path(__file__).resolve().parent.parent / "context"

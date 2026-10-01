@@ -15,8 +15,7 @@ from functools import lru_cache
 from google.cloud import bigquery
 
 from app.config import (
-    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, HISTORY_ROW_CAP,
-    MAX_ANSWER_TABLE_ROWS, MODEL,
+    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, HISTORY_ROW_CAP, MODEL,
 )
 from app.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_REGISTRY
 
@@ -97,7 +96,34 @@ TOPN(
 Note: TOPN selects the right rows, but executeQueries doesn't guarantee they arrive sorted -- sort client-side before presenting a ranked list.
 
 Q: "What are the top SHAP features for the champion model?"
-Note: power_bi_shap_barplots only covers the four base models -- an ensemble like the champion model has no SHAP decomposition. Use a specific base model, or say none exists, rather than filtering on [Champion_Model] and getting nothing back.'''
+Note: power_bi_shap_barplots only covers the four base models -- an ensemble like the champion model has no SHAP decomposition. Use a specific base model, or say none exists, rather than filtering on [Champion_Model] and getting nothing back.
+
+Q: "Show a stacked bar chart of each ensemble model's total annual profit lift, broken down by profit-lift driver, for the test split."
+EVALUATE
+VAR Base0 =
+    SUMMARIZECOLUMNS(
+        evaluation_metrics[Model],
+        TREATAS({"Test"}, dataset_split_dimension[dataset_split]),
+        FILTER(evaluation_metrics, evaluation_metrics[Type] = "Ensemble"),
+        "ConvLift", [Conversion_Profit_Lift],
+        "ChurnLift", [Churn_Profit_Lift],
+        "AOVLift", [AOV_Profit_Lift]
+    )
+VAR Base =
+    SELECTCOLUMNS(
+        Base0,
+        "Model", [Model],
+        "ConvLift", [ConvLift],
+        "ChurnLift", [ChurnLift],
+        "AOVLift", [AOVLift]
+    )
+RETURN
+UNION(
+    SELECTCOLUMNS(Base, "Model", [Model], "Driver", "Conversion", "ProfitLift", [ConvLift]),
+    SELECTCOLUMNS(Base, "Model", [Model], "Driver", "Churn", "ProfitLift", [ChurnLift]),
+    SELECTCOLUMNS(Base, "Model", [Model], "Driver", "AOV", "ProfitLift", [AOVLift])
+)
+Note: reshaping into long form (one row per category+segment, what stacked_horizontal_bar/grouped_bar need) means UNIONing several SELECTCOLUMNS calls. DAX can't bracket-reference a qualified column from inside another expression -- [evaluation_metrics[Model]] is invalid syntax, brackets don't nest -- so alias it to a bare name first via an intermediate SELECTCOLUMNS (Base0 -> Base above), then build the UNION against that alias.'''
 
 BIGQUERY_FEW_SHOT_EXAMPLES = '''BIGQUERY EXAMPLES
 
@@ -146,9 +172,9 @@ run_dax_query results are capped at {DAX_ROW_CAP} rows -- prefer TOPN or a tight
 Tools that search or render (search_docs, get_page_info, generate_chart) are never a source of a number themselves. Same for an uploaded screenshot, when present -- it's layout and attention context only.
 
 GROUNDING
-Every number in an answer must come from a live run_bigquery_sql or run_dax_query call made this turn. Never state a number from memory or from the background material in this prompt.
+Every number in an answer -- prose or table cell -- must come from a live run_bigquery_sql or run_dax_query call made this turn; each one is checked against this turn's tool results after you submit, whether or not it's in all_prose_numeric_claims. Never state a number from memory, background material, or your own arithmetic.
 
-When your answer needs a computed value -- a percentage change, a difference, a ratio, an average -- add it to the query itself (a calculated DAX measure, a SQL expression) rather than computing it yourself in your response. This includes collapsing several exact values into a rounded range or bucket in prose (e.g. don't write "roughly 65-67%" to describe three different figures) -- state the specific exact value, or describe the pattern in words with no number at all.
+If you need a value you'd otherwise compute by hand -- a rank, percentage change, difference, ratio, average -- you have two options: add it to the query (RANKX/ROW_NUMBER, a calculated DAX measure, a SQL expression) and re-run it before calling submit_answer, or leave it out of the table/prose entirely and describe the pattern in words instead. Never collapse several exact values into one approximate number either -- in prose (e.g. don't write "roughly 65-67%" for three different figures) or in a table (don't add a row averaging several departments together) -- state each specific value, or describe the pattern with no number at all.
 
 There is no live source for future data, only current and historical figures. Decline requests for forecasts or projections rather than generating one.
 
@@ -162,13 +188,7 @@ CONVERSATION HISTORY
 Prior turns' tool calls and their results are part of this conversation, exactly as they ran -- adapt a working query for a related follow-up rather than re-deriving one from scratch. Their results are historical, not a source for this turn's answer -- every number you state still needs its own live call this turn, even one that looks identical to what's shown there. Results in that history are truncated to the first {HISTORY_ROW_CAP} rows, so a fresh call this turn may correctly return a different count -- that's expected, not an error.
 
 RESPONDING
-You must call submit_answer to respond -- never answer in plain text. This is the only way an answer reaches the user; a plain-text reply will not be delivered and the turn will be asked to try again. Write answer_markdown in plain Markdown, list every number stated in prose as fact in all_prose_numeric_claims (exclude markdown table cells from this list), and put 1-3 short natural follow-up questions in suggested_follow_ups when one would genuinely help -- leave it empty when nothing natural fits. If you can't fully answer within a reasonable number of steps, submit the best partial answer available and say plainly that it's partial, rather than presenting it as complete.
-
-Never round, average, or otherwise collapse multiple exact values into one approximate number anywhere in the answer -- prose or table. For example, don't write "roughly 65-67%" to describe three departments' different reorder rates, and don't add a table row averaging several departments together. State each exact value on its own, or describe the pattern in words with no number.
-
-Keep any single markdown table in answer_markdown to at most {MAX_ANSWER_TABLE_ROWS} rows -- for a larger result, show the top results and summarize the rest in words, use a tool to run a new query aggregated to fewer rows, or use generate_chart instead of listing every row.
-
-Never write a literal | inside a table cell without escaping it as \\| -- an unescaped one is read as an extra column and breaks the table (write "Mean Absolute SHAP" instead of "Mean |SHAP|")."""
+You must call submit_answer to respond -- never plain text. See its own field descriptions for exact formatting requirements (table size and remediation, chart inclusion, table escaping, suggested follow-ups) and when a partial answer is appropriate."""
 
 
 def build_static_context(model: str, static_text: str) -> list[dict] | str:

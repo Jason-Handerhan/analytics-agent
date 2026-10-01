@@ -247,6 +247,15 @@ for `get_page_info`** — same "mutate `args` before invoking" shape, just a
 lookup instead of a direct state read. Defined in `docs/chart-tool.md`, next
 to the args models it translates between.
 
+**Revisit when this is actually built (2026-09-27):** `dispatch_tool` above
+doesn't yet inject `generate_chart`'s `bucket_name`/`storage_backend`/
+`expiration_hours`/`access_token` (`docs/chart-tool.md`), and has no branch
+for `run_dax_query` at all — today that injection lives inline in
+`orchestrator.py` as `inject_dax_args`, a separate mechanism from this
+function. Reconcile both into whatever this function actually looks like
+once the approval-workflow/cost-tier system is built — not before, since too
+much could still change between now and then.
+
 **`dry_run` is a plain helper, not a tool.** It wraps
 `QueryJobConfig(dry_run=True)` and returns bytes. The model never calls it —
 the node does, on queries the model already produced. Exposing it would add a

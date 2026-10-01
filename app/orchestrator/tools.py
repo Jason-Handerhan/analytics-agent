@@ -8,7 +8,7 @@ from functools import lru_cache
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 from langchain_core.tools import tool, ToolException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from app.config import (
     BIGQUERY_ROW_CAP,
@@ -17,6 +17,7 @@ from app.config import (
     MAX_ANSWER_TABLE_ROWS,
     MAX_BYTES_BILLED,
 )
+from app.mcp_server.chart_tool import GenerateChartArgs
 from app.model_schema import MEASURE_DAX, MEASURE_NAMES
 
 
@@ -92,31 +93,43 @@ async def run_bigquery_sql(query: str) -> list[dict]:
         ]
     return await asyncio.to_thread(_run)
 
-#Ensures that ToolError exceptions raised in run_bigquery_sql() are converted to ToolMessage and handled by
-# the agent instead of crashing the agent.
+#Ensures that ToolError exceptions raised in run_bigquery_sql() are converted to a ToolMessage.
 run_bigquery_sql.handle_tool_error = True
+
+# Surface Pydantic's own message as an actionable ToolMessage instead of crashing the turn.
+run_bigquery_sql.handle_validation_error = lambda e: str(e)
 
 
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
         min_length=1,
-        description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- summarize the rest or use generate_chart instead.")
+        description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
+                    "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
+                    "or use generate_chart instead. Include the chart_url from generate_chart here as an "
+                    "image -- the user sees no chart otherwise. Escape a literal | inside a table cell as "
+                    "\\| or it's read as an extra column and breaks the table.")
     all_prose_numeric_claims: list[float] = Field(
-        description="Every number stated in prose as fact. Never include a number that already appears in a markdown table.")
+        description="Every number stated in prose as fact. Never include a number that already appears in a markdown table -- table cells are checked separately, automatically, not exempt from verification.")
     suggested_follow_ups: list[str] = Field(
         default=[],
-        description="1-3 short, natural follow-up questions, only when one would genuinely help. Leave empty otherwise.")
+        description="1-3 short, natural follow-up questions -- include these by default, since they help the user continue the conversation. Leave empty only when nothing natural genuinely fits.")
 
 
 @tool(args_schema=SubmitAnswerArgs)
 async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
                          suggested_follow_ups: list[str]) -> str:
     """Call this with your final answer once you have everything you need.
-    This is how you respond to the user -- do not write your answer as
-    plain text. Do not batch this with other tool calls -- if you do,
+    This is how you respond to the user -- a plain-text reply will not be
+    delivered and the turn will be asked to retry. If you can't fully
+    answer within a reasonable number of steps, submit the best partial
+    answer available and say plainly it's partial, rather than presenting
+    it as complete. Do not batch this with other tool calls -- if you do,
     the submission is ignored and the loop continues.
     """
     return "Answer recorded."
+
+# Surface Pydantic's own message as an actionable ToolMessage instead of crashing the turn.
+submit_answer.handle_validation_error = lambda e: str(e)
 
 
 async def dry_run(query: str) -> int:
@@ -144,3 +157,30 @@ async def get_measure_dax(measure_names: list[MEASURE_NAMES]) -> dict[str, str]:
             if candidate_name not in result and f"[{candidate_name}]" in dax:
                 result[candidate_name] = candidate_dax
     return result
+
+get_measure_dax.handle_validation_error = lambda e: str(e)
+
+
+_chart_spec_field = GenerateChartArgs.model_fields["spec"]
+
+GenerateChartToolCallArgs = create_model(
+    "GenerateChartToolCallArgs",
+    source_ref=(str, Field(
+        ..., description="The reference id printed alongside the run_bigquery_sql or "
+                          "run_dax_query result you want to chart -- e.g. 'ref_1'. Copy it "
+                          "exactly as shown in that tool's result; never invent one.")),
+    spec=(_chart_spec_field.annotation, _chart_spec_field),
+)
+
+
+@tool("generate_chart", args_schema=GenerateChartToolCallArgs)
+async def chart_tool_call_standin(**kwargs) -> None:
+    """Renders a chart from an earlier tool call's result and returns its
+    image URL. source_ref must be the reference id printed alongside the
+    run_bigquery_sql or run_dax_query result you want to chart (e.g.
+    'ref_1') -- copy it exactly as shown; never invent one. See the spec
+    type's own description for its exact shape and grain.
+    """
+    raise NotImplementedError(
+        "generate_chart's real MCP tool object handles dispatch -- this "
+        "stand-in exists only so bind_tools() advertises a different schema.")

@@ -2,8 +2,7 @@
 
 ## Current status — update this as we go
 
-**Phase: 3 in progress — items 1-6 complete, item 7 in progress
-(`run_dax_query` done, `get_measure_dax` pending).** All of items 1-6 promoted
+**Phase: 3 in progress — items 1-7 complete.** All of items 1-6 promoted
 out of
 the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
 nodes, routing, graph) and `app/orchestrator/tools.py`
@@ -96,12 +95,52 @@ table answer. Real deviations from the doc's original sketch:
   escape a literal `|` as `\|`.
 - `MAX_VERIFY_RETRIES` raised 2 → 3 based on live testing.
 
-`get_measure_dax` is not yet built. Per a reusability discussion this
-session, it'll land in `app/orchestrator/tools.py`, **not MCP-hosted** — it's
-a pure lookup against this project's committed `model_schema.json`, not a
-generically reusable Power BI wrapper the way `run_dax_query` is.
+**Item 7 fully complete, 2026-09-27.** `get_measure_dax` added to
+`app/orchestrator/tools.py` (not MCP-hosted — a pure lookup against the
+committed schema, not a portable Power BI wrapper). One-hop dependency
+expansion via plain key-matching (`f"[{name}]" in dax`), not regex —
+deliberate, after regex bugs elsewhere in this build. `ToolCallRecord.result`
+widened to `Any` (no type checker runs on this project; a precise Union needs
+perfect upkeep or it's misleading). Verified live end to end with both
+`run_dax_query` and `get_measure_dax` bound, including the one-hop dependency
+case (`Champion Recall` → `Champion_Model`).
 
-_Last updated: 2026-09-27._ **Phase 0 (2026-09-13): all nine items verified
+**Item 8, `generate_chart`, complete, 2026-09-30.** All ten spec classes
+built with grain guardrails, MCP-hosted, and live-tested end to end through
+GCS signed-url upload/read-back. Dispatch wiring (`resolve_chart_data`,
+`inject_chart_args`, the bind-time substitution via `BIND_TOOLS_LIST`) landed
+for real in `orchestrator.py`, replacing the notebook's by-hand chart data and
+injected GCS args. State gained `chart_urls: list[str]` (plural — every
+successful chart this turn, not just one), with a matching `agent_telemetry`
+schema change (`chart_url` → `chart_urls REPEATED`, table dropped and
+recreated by hand, not yet re-run against the live table).
+`tests/test_chart_tool.py` is the new, consolidated Layer 1 suite (11 tests,
+one per chart type packing render/dispatch/every guardrail into one function
+rather than one test per concern — a deliberate pullback from a first,
+46-test draft).
+
+Two real deviations from the originally-documented design:
+- **`check_batch_ordering` was never built as its own function — superseded
+  by the `ref_id`/`CHARTABLE_TOOLS` mechanism.** A chart call's `source_ref`
+  only resolves against `ref_id`s already in `state["tool_calls"]` (prior
+  rounds only — the current round's own results aren't accumulated into
+  state until after it completes), so a same-batch fetch-then-chart race is
+  structurally unreachable rather than caught by an explicit same-batch id
+  check. The model-facing field is also `source_ref`, not
+  `source_tool_call_id` — a reference label the tool result prints
+  (`"ref_1"`, ...), never the raw tool-call id.
+- **`strict=True` dropped globally from `agent_node`'s `bind_tools()` call,
+  still the standing trade-off.** Confirmed live: Claude's `strict=True`
+  rejects `generate_chart`'s discriminated union (`oneOf`) and
+  Concentration's `ge=`/`le=` bounds outright. A per-tool split (pre-convert
+  just `generate_chart` to a raw Anthropic-format dict, which bypasses
+  `strict` entirely) works, confirmed live, but ties the fix to Anthropic's
+  own tool-dict shape — full reasoning in `docs/chart-tool.md` and
+  `.claude/rules/orchestrator.md`. **Still circle back**: work out the
+  OpenAI/Gemini equivalent, or confirm the global drop is the right call to
+  keep long-term.
+
+_Last updated: 2026-09-30._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
 verification detail if ever needed; kept brief here since it's done, not
 current.
@@ -398,6 +437,8 @@ sets, and the final assembly).
 **Phase 3, item 4 (graph skeleton) — complete.** `app/orchestrator/models.py`
 implements `Claim`/`AgentResponse` exactly as specified in
 `.claude/rules/orchestrator.md`'s verification contract (from Phase 1).
+**`Claim` was later removed (item 6/`submit_answer`'s own fields superseded
+it) — `models.py` now has `AgentResponse` only.**
 `app/orchestrator/orchestrator.py` has the five nodes, routing functions,
 list-form `path_map` graph wiring, and `finalize`'s real
 `write_telemetry_row` call — `MCP_TOOLS`/`SYSTEM_MESSAGE` populated lazily by
@@ -745,6 +786,10 @@ layer failed.
    numeric values.
 2. Response formatting: HTML, source badges, approval cards (incl. the
    approve/reject buttons for Phase 3's workflow), chart display.
+   **Decide before building chart display**: native `Image` control bound to
+   `chart_url` vs. inline `<img>` embedded in `answer_markdown` (both
+   confirmed to work; the inline option needs `MAX_ANSWER_CHARS` 6000 → 7000
+   and a mistune renderer change) — full write-up in `docs/frontend.md`.
 3. **The cancel button** — a Power Apps button firing
    `POST /ask/cancel/{conversation_id}` (`docs/frontend.md`). The endpoint and
    cancellation path shipped in Phase 3; this is the UI half, alongside the
@@ -830,3 +875,48 @@ XMLA is a documented backup only. REST is the plan.
   choosing a value rather than mirroring dashboard state, so it needs its
   own design pass (how the value is validated, how the answer signals it
   diverges from what's displayed).
+- **`ask_user` tool — a second way to end the turn, alongside
+  `submit_answer`.** Needs none of `pending_approval`'s persistence trick.
+  That trick exists only because `pending_queries`/`deferred_dax` are real
+  unexecuted work that must survive the request boundary intact — even
+  `pending_approval` doesn't literally pause a running process across an
+  HTTP round-trip, it genuinely ends the turn and starts a new
+  `graph.astream()` on resume, just fed the cached state so it *feels*
+  continuous. `ask_user` has no equivalent unexecuted work: once called,
+  there's nothing left pending, so the turn can just genuinely end —
+  `sessions.recent_messages`/`agent_telemetry` written normally, `live_turns`
+  cleared normally, no new Firestore field, no resume endpoint. Mechanically:
+  recognized in `call_tool_node` before the normal batch-dispatch path (sets
+  `question_asked=True` + `clarifying_question` from args), routes straight
+  to `finalize` from `route_after_call_tool` (bypassing `check_length`/
+  `verify` — nothing to verify, same reasoning as `needs_approval`/
+  `cancelled` already skipping them), and rides a normal telemetry row like
+  `iteration_cap_hit` does today rather than `needs_approval`'s special
+  pause row. The user's reply is just the next ordinary `POST /ask` —
+  same `route_entry` → `agent` path any follow-up takes, with the
+  clarifying exchange already in `history_messages` via the normal
+  `sessions.recent_messages` read-back. One honest trade-off: the tool
+  calls made before the question demote from this turn's live messages to
+  history one turn earlier than they otherwise would, so `HISTORY_ROW_CAP`
+  (tighter than the live per-tool cap) applies to them a turn sooner —
+  minor, already an accepted property of history elsewhere. Real
+  motivating case (2026-09-30 transcript): asked for "training vs. test,"
+  the model discovered no training split exists, silently substituted
+  validation vs. test, and explained the substitution only after already
+  computing and charting it — a clarifying question up front would have
+  been the better UX. Open question: whether it counts against
+  `MAX_ITERATIONS` (leaning no, same exemption as `submit_answer`).
+  **A `generate_chart` `ref_id` from before the question won't resolve
+  after it** — `state["tool_calls"]` resets fresh next turn like any other
+  turn boundary, so a chart referencing data fetched pre-question fails the
+  same way a stale `source_tool_call_id` replayed from history already does
+  (`.claude/rules/gateway.md`) — an existing, already-actionable `ToolError`,
+  not a new failure mode, just a re-fetch. Likely rare in practice (the
+  model usually asks *because* it doesn't have the data yet), but verify
+  live once built, not just assumed from this reasoning.
+  **Good time to reconsider building this: when item 10 (Firestore
+  conversation state) lands.** `ask_user`'s reply path depends on the exact
+  same `sessions.recent_messages`/`build_history_messages()` plumbing that
+  item 10 builds — implementing it right after, while that machinery is
+  fresh, likely costs less than picking it up cold later as a standalone
+  Phase 7 item.

@@ -288,7 +288,7 @@ working DAX/SQL query beats re-deriving one from schema chunks.
 
 **Every tool call the turn made is stored — no per-tool exclusion.** Includes
 `generate_chart`: it only ever returns a `chart_url` string, and a stale
-`source_tool_call_id` replayed from history already fails with
+`source_ref` replayed from history already fails with
 `resolve_chart_data`'s existing `ToolError` (`docs/chart-tool.md`) — an
 ordinary, actionable tool error, not a new hazard.
 

@@ -66,7 +66,7 @@ def build_telemetry_row(
     estimated_cost: str | None,
     pending_queries: list[dict],
     deferred_dax: list[dict],
-    chart_url: str | None,
+    chart_urls: list[str],
     suggested_follow_ups: list[str],
     all_prose_numeric_claims: list[float],
 ) -> dict:
@@ -89,7 +89,7 @@ def build_telemetry_row(
         "deferred_dax": deferred_dax,
         "estimated_cost": estimated_cost,
         "approval_decision": None,
-        "chart_url": chart_url,
+        "chart_urls": chart_urls,
         "verified": verified,
         "verification_retry_count": verification_retry_count,
         "length_retry_count": length_retry_count,

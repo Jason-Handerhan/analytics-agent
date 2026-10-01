@@ -193,7 +193,7 @@ correct.
    Platform reserves it once OAuth 2.0 is configured and rejects the
    definition outright; it injects the bearer token itself.
 4. Define request/response schemas so Power Apps gets typed objects
-   (`answer_markdown`, `chart_url`, etc. bindable directly in the gallery —
+   (`answer_markdown`, `chart_urls`, etc. bindable directly in the gallery —
    snake_case, straight from the Pydantic model).
 5. Test in the connector's Test tab before wiring into the app — this catches
    a missing `x-api-key` immediately, before any Power Apps wiring.

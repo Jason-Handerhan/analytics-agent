@@ -1,20 +1,12 @@
 from pydantic import BaseModel
 
 
-class Claim(BaseModel):
-    text: str
-    numeric_value: float | None = None
-    source_tool_call_id: str | None = None
-
-
 class AgentResponse(BaseModel):
-    """The wire format the gateway returns. Schema of record:
-    .claude/rules/orchestrator.md — implement exactly."""
+    """The wire format the gateway returns."""
     answer_markdown: str
     sources: list[str]
     needs_approval: bool = False
-    chart_url: str | None = None
-    claims: list[Claim] = []
+    chart_urls: list[str] = []
     suggested_follow_ups: list[str] = []
     iteration_cap_hit: bool = False
     pending_query: str | None = None

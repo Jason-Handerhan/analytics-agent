@@ -733,6 +733,18 @@ instead of failing on a missing API you then have to go enable and re-run.
      --role="roles/iam.serviceAccountTokenCreator"
    ```
 
+   **Optional — to test chart generation locally without deploying**, grant
+   yourself the same role, then impersonate `agent-sa` for a real token:
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding \
+     agent-sa@YOUR_PROJECT.iam.gserviceaccount.com \
+     --member="user:YOUR_EMAIL" \
+     --role="roles/iam.serviceAccountTokenCreator"
+   gcloud auth print-access-token --impersonate-service-account=agent-sa@YOUR_PROJECT.iam.gserviceaccount.com
+   ```
+   `roles/iam.serviceAccountUser` (needed to deploy/attach `agent-sa`) does
+   **not** cover this — it's a separate role.
+
    Also worth setting a lifecycle rule so charts don't accumulate forever —
    every chart request writes a new object nothing cleans up:
    ```bash

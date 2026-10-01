@@ -80,7 +80,18 @@ def test_verify_response():
     }
     verified, message = verify_response(bad)
     assert verified is False
-    assert "42.0 does not match any tool result this turn" in message
+    assert "42.0" in message and "do not match any tool result this turn" in message
+
+    # Multiple unmatched claims -- all reported together, not just the first
+    multi_bad = {
+        "answer_markdown": "Some answer.",
+        "all_prose_numeric_claims": [42.0, 99.0],
+        "suggested_follow_ups": [],
+        "tool_calls": tool_calls,
+    }
+    verified, message = verify_response(multi_bad)
+    assert verified is False
+    assert "42.0" in message and "99.0" in message
 
 
 def test_route_after_agent():

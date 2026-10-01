@@ -92,7 +92,7 @@ just created.
 ```
 colChat record:  { role: "user" | "agent",
                    body: <escaped plain text for user, HTML for agent>,
-                   chart_url: <optional, agent only> }
+                   chart_urls: <optional, agent only, list -- a turn can chart more than once> }
 ```
 
 **Gallery uses the Flexible height layout, not the standard `TemplateSize`
@@ -343,11 +343,61 @@ control**, not a plain `Label` (which shows raw Markdown literally).
 - Structured response envelope (`AgentResponse`, `.claude/rules/orchestrator.md`)
   reused for rendering,
   not a separate schema — `sources` badges (plural; a turn can use more than
-  one), a distinct approval card for `needs_approval`, charts as a native
-  `Image` control bound to `chart_url`. **`sources` arrives render-ready** —
-  ordered, grouped with counts, failed calls excluded. Built in `finalize`
-  (`.claude/rules/orchestrator.md`), not the client, so the React rebuild
-  doesn't reimplement it.
+  one), a distinct approval card for `needs_approval`. **`sources` arrives
+  render-ready** — ordered, grouped with counts, failed calls excluded. Built
+  in `finalize` (`.claude/rules/orchestrator.md`), not the client, so the
+  React rebuild doesn't reimplement it.
+
+### Chart display — open decision, decide before building this out (2026-09-28)
+
+**`chart_urls` stays its own field on the message/response, regardless of
+which option below wins.** `colChat`'s row schema (above) and
+`AgentResponse.chart_urls` (`.claude/rules/orchestrator.md`) already carry it
+separately from `body`/`answer_markdown` — not in question. **It's a list,
+not a single URL** — a turn can call `generate_chart` more than once, so
+either option below needs to handle zero, one, or several charts per
+message, not just the one-chart case this section was originally sketched
+against.
+
+**What's undecided is how the chart actually renders**, and it's a real
+choice, not a placeholder:
+
+- **Option A — native `Image` control per URL, bound to `chart_urls`.** The
+  original plan (for one chart; a multi-chart message needs a small repeating
+  container, not a single bound control). Predictable sizing (a Power Apps
+  control, not raw pixels), no HTML rendering question to depend on.
+- **Option B — inline `<img>`, embedded directly in `answer_markdown`'s HTML,
+  narrated with text above and below in one flowing message.** Confirmed
+  live (2026-09-28) that the HTML text control *does* render a plain
+  `<img src="...">` from an external HTTPS URL — unlike `<iframe>`, already
+  confirmed blocked (above) — sized correctly with an inline
+  `style="max-width:100%; height:auto;"` so it scales to the control's actual
+  width instead of the chart's native ~1350×825px (`FIGSIZE`/`DPI` in
+  `app/mcp_server/chart_tool.py`). Tested directly in Studio against a real
+  signed URL. **Visually the better result** — genuinely reads like one
+  message instead of an answer plus a bolted-on separate image.
+
+  Requires: the mistune custom renderer needs its own image-handling
+  override to inject that `style` attribute (a plain `![alt](url)` converts
+  to a bare `<img>` with no styling by default), and the model needs
+  steering to embed the chart URL in prose rather than treating it as a
+  hidden field it shouldn't reference directly.
+
+**If Option B wins, bump `MAX_ANSWER_CHARS` 6000 → 7000**
+(`.claude/rules/orchestrator.md`) to absorb the signed URL's ~1000 characters
+of query string — no real change to the readable-text budget, just room for
+the URL itself.
+
+**Correction to the answer-length rationale, confirmed live (2026-09-28):**
+Microsoft's Power Fx docs state Text/Hyperlink/Image/Media properties,
+including `HtmlText`, have **no preset character limit** — the real
+constraint is available browser/device memory (100+ MB on desktop, ~30-70 MB
+on phone), not a fixed count. The "hard 16,384-character limit" previously
+stated here and in `.claude/rules/orchestrator.md` doesn't appear in current
+Microsoft documentation and was never independently verified — flagging per
+`CLAUDE.md` rather than leaving it stated as fact. `MAX_ANSWER_CHARS` stands
+regardless: a readability/display-sanity ceiling, not a workaround for a
+platform limit that turned out not to exist.
 - **The approval card needs two buttons, not just a display.** `Approve` and
   `Reject` both fire `POST /ask/respond/{conversation_id}` with their
   decision (`docs/approval-workflow.md`), then replace the card with whatever
