@@ -20,19 +20,19 @@ paths:
 **The defining rule: MCP hosting declares a tool safe and useful for someone
 outside this project to pick up and run as-is.** Anything that will only
 ever execute as `agent-sa`, for this project, doesn't belong on the server no
-matter how clean its contract looks. The three exceptions below are each an
-instance of this, not three independent rules.
+matter how clean its contract looks. The five exceptions below are each an
+instance of this, not five independent rules.
 
 | Tool | Hosted on the MCP server? |
 |---|---|
 | `run_dax_query` | Yes |
-| `search_docs` | Yes |
-| `get_page_info` | Yes |
 | `list_repo_files`, `read_repo_file` | Yes |
 | `generate_chart` | Yes |
 | `run_bigquery_sql` | **No** — a plain function in the orchestrator |
 | `submit_answer` | **No** — a plain function in the orchestrator |
 | `get_measure_dax` | **No** — a plain function in the orchestrator |
+| `search_docs` | **No** — a plain function in the orchestrator |
+| `get_page_info` | **No** — a plain function in the orchestrator |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -61,6 +61,31 @@ project's exact schema file to make it work at all, so hosting it
 generically alongside `run_dax_query` would misrepresent it as portable
 infrastructure when it's really project-specific application logic
 (2026-09-27 reusability discussion, see `run_dax_query`'s own note above).
+
+**`search_docs` is a fourth exception, and a deliberate deviation from how
+this tool was originally documented here** (2026-10-01) — it was specified
+as MCP-hosted before being built, then moved local once the reasoning was
+worked through against a real implementation. For `run_dax_query`/
+`generate_chart` to be reusable, the hidden args a different deployer
+supplies are pure *identity/connection* info (`access_token`, `workspace_id`,
+`dataset_id`) — the model still writes 100% of the real query logic.
+`search_docs` doesn't clear that bar: reaching it would mean hiding the
+table name, the embedding column, the full embedding-model resource path,
+*and* the output column list — not connection info, the tool's entire
+behavioral shape. A reuser would already have had to build the tool
+themselves to supply all of that, leaving nothing of standalone value in
+hosting it. It's also impersonation-backed (`vector-search-sa`, below), and
+a live `Credentials`/`bigquery.Client` object can't cross MCP's JSON-only
+transport anyway — `run_dax_query` already proves the alternative
+(`access_token` minted outside the tool as a plain string), but being local
+sidesteps needing that pattern here at all.
+
+**`get_page_info` is a fifth exception, same reusability gap as
+`get_measure_dax`.** It's a pure lookup against `context/page_info/`'s two
+committed files — a different deployment would need this project's exact
+page names and content to make it work at all, not just connection info.
+Full design (including a real deviation from how this was originally
+sketched) in its own section below.
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -127,14 +152,13 @@ mcp = FastMCP(MCP_SERVER_NAME)
 
 # Importing each module runs its @mcp.tool() decorators, which is what
 # registers the tools. Import for side effect only — nothing is called here.
-# run_bigquery_sql, submit_answer, and get_measure_dax are NOT here — all
-# three are plain functions in the orchestrator, not MCP-registered (see the
-# hosting table above). bigquery_schema isn't here either — it's not exposed
-# via MCP at all, see the section below.
+# run_bigquery_sql, submit_answer, get_measure_dax, search_docs, and
+# get_page_info are NOT here — all five are plain functions in the
+# orchestrator, not MCP-registered (see the hosting table above).
+# bigquery_schema isn't here either — it's not exposed via MCP at all, see
+# the section below.
 from app.mcp_server import (          # noqa: F401,E402
     dax_tool,                         # run_dax_query
-    docs_search,                      # search_docs
-    page_info,                        # get_page_info
     code_search,                      # list_repo_files, read_repo_file
     chart_tool,                       # generate_chart
 )
@@ -160,7 +184,7 @@ later changes the URL and adds auth headers — not this file.
 | Tool | Purpose | Authority |
 |---|---|---|
 | `search_docs` | Project methodology — the README's approach/evaluation narrative | Authoritative for *intent*, **never** numbers |
-| `get_page_info` | What a Power BI page shows — returns the page-info HTML **whole**, no search | Authoritative for dashboard content, **never** numbers |
+| `get_page_info` | What a Power BI page shows — returns the page-info text **whole**, no search | Authoritative for dashboard content, **never** numbers |
 | `run_bigquery_sql` | Warehouse numbers | Only authority for raw/warehouse numbers |
 | `run_dax_query` | Semantic-model numbers | Only authority for measure-level numbers |
 | `get_measure_dax` | One measure's DAX body, by exact name | The *how* behind a measure; names come from the registry in static context |
@@ -598,12 +622,16 @@ the model can't emit a structurally invalid call at all
 can't validate that a SQL query is *correct*, just that the call's shape is
 valid.
 
-**`strict=True` is currently dropped globally, not applied** — `generate_chart`'s
-discriminated union and numeric bounds aren't representable under it on
-Claude, confirmed live (`docs/chart-tool.md`, `.claude/rules/orchestrator.md`'s
-"Constrained decoding" section). Every schema below is still written as if
-strict mode applies; re-enabling it (globally or per-tool) shouldn't need
-reshaping any of them except `generate_chart`'s.
+**`strict=True` is enabled globally, with one tool bound outside it —
+confirmed live (2026-10-02).** `generate_chart`'s discriminated union and
+numeric bounds aren't representable under it on Claude (`docs/chart-tool.md`,
+`.claude/rules/orchestrator.md`'s "Constrained decoding" section), so it's
+pre-converted to a raw Anthropic tool dict (no `strict` kwarg) that
+`bind_tools(BIND_TOOLS_LIST, strict=True)` passes through untouched —
+every other tool gets real strict enforcement. `SearchDocsArgs.top_k` also
+needed reshaping (its `ge=1` dropped, clamped at runtime instead) — strict
+mode's `ge=`/`le=` rejection isn't unique to `generate_chart`, confirmed
+against a second tool.
 
 **Every tool gets an explicit args model.** FastMCP already infers a schema
 from type hints and validates against it, but a named model buys two things:
@@ -618,7 +646,7 @@ class RunBigQuerySqlArgs(BaseModel):
     query: str
 
 class GetPageInfoArgs(BaseModel):
-    page_name: Literal["Financial Impact", "Model Performance"] | None = None
+    page_name: Literal[PAGES]
 ```
 
 **Never put an injected argument in an args model.** `conversation_id` and
@@ -659,34 +687,32 @@ schema-valid tool call can still carry a wrong value, which is why
 
 ## `get_page_info` — lookup, not search
 
+**Not MCP-hosted** (see the hosting table above) — a plain function in
+`app/orchestrator/tools.py`, same category as `get_measure_dax`/`search_docs`.
+
 ```python
-PAGES = ("Financial Impact", "Model Performance")
+PAGES = tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
+if not PAGES:
+    raise RuntimeError(f"No page-info files found in {PAGE_INFO_DIR}.")
 
-def get_page_info(
-    page_name: Literal["Financial Impact", "Model Performance"] | None = None,
-    active_page: str | None = None,          # injected by dispatch_tool
-) -> str:
-    """Omit page_name for the page the user is currently viewing.
 
-    active_page comes from report.getActivePage().displayName, captured
-    client-side and sent as its own request field — NOT from filter_context,
-    which carries no page information at all (.claude/rules/gateway.md).
+class GetPageInfoArgs(BaseModel):
+    page_name: Literal[PAGES]
 
-    Also present in the HumanMessage each turn for general grounding
-    (.claude/rules/orchestrator.md) — that's a separate, additional use, not
-    a replacement for injecting it here. The model shouldn't be trusted to
-    correctly relay which page is CURRENT back into a tool argument; this
-    parameter exists so it never has to.
+
+@tool(args_schema=GetPageInfoArgs)
+async def get_page_info(page_name: Literal[PAGES]) -> dict[str, str]:
+    """Whole-page content for one of this dashboard's two pages. Use the
+    page named in "Current dashboard page" for what the user is currently
+    viewing, or the other one if the question is clearly about it instead.
     """
-    page_name = page_name or active_page
-    if page_name not in PAGES:
-        # Fail loudly. Silently reading a missing file, or defaulting to a
-        # page the user isn't on, produces a confidently wrong answer.
-        raise ToolError(
-            f"No page context available (got {page_name!r}). "
-            f"Pass page_name explicitly: one of {PAGES}.")
-    return (PAGE_INFO_DIR / f"{page_name}.html").read_text()
+    content = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
+    return {"page_name": page_name, "content": content}
 ```
+
+**`PAGES` is derived from `context/page_info/`'s real files, not a hardcoded
+tuple.** Adding a third page is dropping a new `.txt` file there, no code
+change — the `Literal[PAGES]` schema picks it up automatically.
 
 **Why an enum, not a system-instruction sentence.** The page set is fixed and
 fully enumerable — exactly the condition where a hard schema constraint is
@@ -697,16 +723,30 @@ also cheaper: schemas are already sent every turn, so naming the pages there
 costs nothing extra, while system-instruction prose is paid on every turn
 including ones that never touch page info.
 
-**Why the optional parameter rather than always-current-page.** Defaulting to
-the active page (same `getActivePage()` mechanism as filter context) handles
-*"what does this page show"* with no reasoning. But a fixed current-page-only
-tool structurally can't answer *"what's on the financial impact page"* asked
-from the other page — plausible with only two pages. One optional arg covers
-both.
+**`page_name` is required, with no `active_page` fallback/injection at
+all — a deliberate simplification over the original design, confirmed live
+(2026-10-02).** The original sketch made `page_name` optional and injected
+`active_page` (from `report.getActivePage().displayName`) as a code-supplied
+fallback, on the reasoning that "the model shouldn't be trusted to correctly
+relay which page is CURRENT." That reasoning was retested rather than
+assumed: with only two pages, and `"Current dashboard page: {active_page}"`
+already in every `HumanMessage` (`.claude/rules/gateway.md`), the model
+reads its own context and supplies `page_name` correctly every time —
+confirmed across both same-page questions (no page named, relying on
+transcription) and cross-page questions (naming the *other* page than the
+one it's on). No injection plumbing, no `dispatch_other_call` special case,
+no optional field.
 
-**Trade-off:** a third page means editing the enum. Same accepted shape as
-`FILE_DESCRIPTIONS` and the HTML-measure exclusion list — small, static,
-rarely changing.
+**Returns a `dict`, not a bare `str` — a real bug, not a style choice.**
+LangChain JSON-encodes a tool's non-string return into the `ToolMessage`
+content automatically, the same as every other tool here; a bare `str`
+return instead passes through as raw, unencoded text, and
+`build_tool_call_record`'s `json.loads(...)` (`.claude/rules/orchestrator.md`)
+fails on it immediately. Confirmed live before shipping.
+
+**Trade-off:** a third page means a new file, not an enum edit anymore —
+smaller trade-off than `FILE_DESCRIPTIONS`/the HTML-measure exclusion list,
+which still need a manual line added.
 
 ## Tool error quality
 

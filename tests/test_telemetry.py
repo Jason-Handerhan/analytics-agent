@@ -14,6 +14,7 @@ COMPLETED = datetime(2026, 9, 18, 12, 0, 5, tzinfo=timezone.utc)
 
 @pytest.mark.asyncio
 async def test_write_telemetry_row_success(monkeypatch):
+    """Builds a full row, inserts it, and checks its JSON/native-type shape."""
     fake_client = MagicMock()
     fake_client.insert_rows.return_value = []
     monkeypatch.setattr(writer, "get_bq_client", lambda: fake_client)

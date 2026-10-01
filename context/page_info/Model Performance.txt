@@ -1,0 +1,63 @@
+Executive Summary & Context
+
+This page provides an evaluation of candidate machine learning models developed using the Instacart Kaggle dataset. To solve the task of predicting user reorder patterns, I built, optimized, and compared several classification and ranking frameworks (XGBoost and LightGBM), alongside a heuristic baseline. The objective of these models is to power a personalized 'Top 5' recommendation widget for customers—minimizing customer friction during active shopping sessions. By serving relevant product suggestions, this product is engineered to improve user conversion rates, increase Average Order Value (AOV), and decrease customer churn. Leveraging SHAP (SHapley Additive exPlanations) feature importance visualizations, this page moves beyond 'black-box' predictions, illustrating how key behavioral features drive recommendation probabilities.
+
+How to Navigate This Page
+
+Top Right Controls: Access global page toggle and supplementary information:
+
+Data Split Toggle: Flip page metrics between Validation and Test datasets.
+
+Pie Chart Icon: Opens a pop-up window displaying the optimal model blending weights used to build ensemble predictions.
+
+Spreadsheet Icon: Expands a table displaying all evaluation metrics for all models.
+
+Evaluation Metric Slicer (Horizontal Bar Chart): Click a metric (Recall@5, NDCG@5, Precision@5, F1@5) to swap the evaluation metric.
+
+Plot Selection Buttons (Feature Importance Charts): Select a plot type (Beeswarm or Barplot).
+
+Model Selection Slicer (Feature Importance Charts): Select any base model to view its feature importance.
+
+Optimal Ensemble Weights: Toggle different model pairings to view the ratios used for ensemble predictions.
+
+Key Formulas & Definitions
+
+Recall @ 5 (Primary Metric): Out of all the products a user actually reordered in their next basket, what percentage did the model successfully capture in its top 5 recommendations?
+
+Recall@5 =
+
+True Reorders in Top 5 / Total Actual Reorders
+
+NDCG @ 5 (Normalized Discounted Cumulative Gain): Measures the quality of the ranking. It rewards the model for placing true reorders higher in the top 5 list.
+
+NDCG@5 =
+
+DCG@5 / IDCG@5
+
+DCG@5: ∑ (Relevancei / log2(i+1)) — Penalizes relevant items found lower in the list. IDCG@5: The maximum possible DCG (Ideal list) which normalizes the score between 0 and 1.
+
+Precision @ 5: Out of the 5 recommendations presented to the user, what percentage were actual reorders?
+
+Precision@5 =
+
+True Reorders in Top 5 / 5
+
+F1-Score @ 5: The harmonic mean of Precision and Recall, identifying if one metric is inflated at the expense of another.
+
+F1@5 = 2 ×
+
+Precision@5 × Recall@5 / Precision@5 + Recall@5
+
+Understanding the SHAP Beeswarm Plot
+
+What is SHAP? SHAP breaks down how much each feature contributed to predictions.
+
+X-Axis (SHAP Value): Represents direction of impact. Dots to the right indicate increased reorder probability; dots to the left indicate decreased reorder probability.
+
+Color Scale: Blue indicates low feature values; Red indicates high values.
+
+Example: For Days Since Last Purchase, a high value (Red) sitting on the left means that longer gaps since a product was last purchased reduce reorder likelihood.
+
+Data Sources
+
+'InstaCart' Online Grocery Basket Analysis Dataset: Models and dashboard were built utilizing: https://www.kaggle.com/datasets/yasserh/instacart-online-grocery-basket-analysis-dataset

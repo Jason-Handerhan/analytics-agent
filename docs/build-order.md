@@ -2,7 +2,9 @@
 
 ## Current status — update this as we go
 
-**Phase: 3 in progress — items 1-7 complete.** All of items 1-6 promoted
+**Phase: 3 in progress — items 1-8 complete, `POST /ask` wired to the
+real graph and verified live, and item 9's first two tools (`search_docs`,
+`get_page_info`) done (see the entries below item 8).** All of items 1-6 promoted
 out of
 the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
 nodes, routing, graph) and `app/orchestrator/tools.py`
@@ -140,7 +142,159 @@ Two real deviations from the originally-documented design:
   OpenAI/Gemini equivalent, or confirm the global drop is the right call to
   keep long-term.
 
-_Last updated: 2026-09-30._ **Phase 0 (2026-09-13): all nine items verified
+**`POST /ask` wired to the real graph, 2026-10-01 — not a numbered item, a
+direct request to close the gap between "the graph works" and "the graph is
+reachable over HTTP."** `/ask` had been a Phase 1 canned echo this whole time;
+this is the first turn the real orchestrator has ever served over live
+traffic. Three new entry/exit helpers landed in `orchestrator.py`
+(`build_human_message`, `build_initial_state`, `build_agent_response` —
+gateway-boundary concerns, deliberately not called by the notebook, which
+builds its own state by hand) and `run_agent_turn` landed in `gateway.py`,
+consuming `graph.astream(...)` via the exact `(kind, data)` tuple shape
+already proven live in `phase3_graph.ipynb`'s own "Run it end to end" cell —
+**not** the dict-shaped `chunk["type"]`/`chunk["data"]` pseudocode (and the
+`version="v2"` argument) `.claude/rules/gateway.md`'s `run_agent_turn` sketch
+shows; both are wrong, confirmed against the real proof, not yet fixed in
+that doc. `GATEWAY_TURN_TIMEOUT_SECONDS` (115 — a deliberately thin ~5s
+margin under Power Platform's non-adjustable 120s connector ceiling, so a
+genuinely slow-but-answerable turn isn't truncated by our own cap) and
+`MAX_QUESTION_CHARS` (2000) are new `app/config.py` constants. No live
+status/history/approval-resume/cancellation — all explicitly out of scope,
+deferred to items 10-12.
+
+Being the first real traffic through the full pipeline surfaced two genuine,
+previously-latent bugs — neither new, both just never exercised before:
+- **The Dockerfile never copied `context/` into the image, and `.dockerignore`
+  explicitly excluded it too.** `model_schema.py`/`context.py` read from it
+  eagerly at *import* time, not lazily — harmless before now because
+  `gateway.py` never imported `orchestrator.py` (only
+  `app.orchestrator.models`, which does no file I/O) until this change. Fixed
+  both: `COPY context ./context` added to the `Dockerfile`, `context/` removed
+  from `.dockerignore`. Confirmed locally with a real `docker build` +
+  `docker run` before redeploying.
+- **`ANTHROPIC_API_KEY` was never set anywhere in the real app.** `agent_node`
+  constructs `ChatAnthropic()` with no explicit key, relying on the
+  environment — the notebook has always set this itself in its own
+  "Notebook-only" cell, but nothing in `orchestrator.py`/`gateway.py`/
+  `app/main.py` had a production equivalent. Fixed inside `init_orchestrator()`
+  (`os.environ["ANTHROPIC_API_KEY"] = get_secret("anthropic-api-key", GCP_PROJECT_ID)`),
+  ported into the notebook's copy too — the notebook's own separate line is
+  now removed as genuinely redundant, not just stale.
+
+**A third issue, unrelated to this task's own code but found at the same
+time:** `agent-sa`'s write grant on `telemetry.agent_telemetry` was gone —
+confirmed live (`403 ... Permission bigquery.tables.updateData denied`).
+Table-level IAM doesn't survive a table drop+recreate (a new table is a new
+resource, no inherited ACL), and the `chart_url` → `chart_urls` migration
+(item 8) had done exactly that. Re-granted at the **dataset** level this time,
+so future schema-migration recreates don't lose it again. `bq
+add-iam-policy-binding` — the same command that originally granted
+`agent_safe`'s `dataViewer` in Phase 0 — failed with "this feature requires
+allowlisting" when tried against `telemetry`; worked via the classic,
+pre-IAM `bigquery.AccessEntry` dataset ACL API instead (`entity_type=
+"userByEmail"`, not `"serviceAccount"` — the REST schema has no separate
+service-account entity type).
+
+`tests/test_orchestrator.py` gained 3 tests for the new helpers;
+`tests/test_gateway_auth.py`'s `test_post_ask_success` now mocks
+`init_orchestrator`/`graph` (a small `_FakeGraph` stand-in) instead of
+asserting the old echo text, plus a new test for the `MAX_QUESTION_CHARS`
+rejection. Live-verified end to end against the deployed Cloud Run service:
+real synthesized answers (not echoes), the question-length guardrail (400),
+and the ownership check (404) all confirmed via curl.
+
+**`search_docs` done, 2026-10-01 — item 9's first tool, built local in
+`app/orchestrator/tools.py`, not MCP-hosted as originally documented.** The
+hosting call was revisited once impersonation entered the picture: MCP's
+JSON-only transport can't carry a live `Credentials`/`bigquery.Client`
+object, and reaching `run_dax_query`'s level of real reusability would mean
+externalizing the tool's entire schema (table, embedding column, embedding
+model path, output columns) rather than just connection info — not worth
+it for a single-corpus, 66-row tool. Full reasoning in
+`.claude/rules/tools.md`'s hosting table and item 9 above.
+
+Built and proven live in `notebooks/phase3_graph.ipynb` first (per the
+established notebook-then-port workflow), then ported byte-for-byte into
+`app/orchestrator/tools.py` (`get_vector_search_client`, `SearchDocsArgs`,
+`search_docs`) and wired into `init_orchestrator()`'s `ALL_TOOLS`. New
+`app/config.py` constants: `VECTOR_DB_DATASET`, `VECTOR_DB_TABLE`,
+`EMBEDDING_MODEL`, `VECTOR_SEARCH_SA_EMAIL`, `SEARCH_DOCS_TOP_K_DEFAULT` (5),
+`SEARCH_DOCS_MAX_TOP_K` (20, a corpus-size-appropriate guardrail cap, not a
+tuned value). `top_k` is LLM-provided, not fixed — mirrors how `run_dax_query`
+already lets the model steer `TOPN` itself.
+
+First real use of `google.auth.impersonated_credentials` in this codebase —
+`get_vector_search_client()` wraps `google.auth.default()`'s own credentials
+(resolves to `agent-sa` on Cloud Run, the developer's identity locally, no
+code branching) and mints a short-lived token for `vector-search-sa`, the
+only identity with read access to `vector_db`. Needed two real IAM grants
+neither `agent_safe`'s original setup nor `docs/data-pipeline.md`'s spec had
+anticipated as separate steps: `roles/iam.serviceAccountTokenCreator` on
+`vector-search-sa` for the calling identity, and `roles/bigquery.connectionUser`
+on the `vertex_conn` *connection* (a different resource type than a dataset,
+reached only via the BigQuery Connection API's own `getIamPolicy`/
+`setIamPolicy` — `bq add-iam-policy-binding` and the Console UI both failed
+against it, for reasons not fully root-caused).
+
+**No Layer 1 test for `search_docs`, decided deliberately, not skipped
+silently.** Unlike `get_measure_dax` (mocking `MEASURE_DAX` leaves real
+control flow — the one-hop expansion walk — independently under test),
+mocking `search_docs`'s only dependency (`get_vector_search_client`) mocks
+the entire tool: everything left (building two `ScalarQueryParameter`s,
+passing a mocked `.result()` through) is pass-through, not logic. The one
+real piece of logic, the `top_k` clamp, is two lines already exercised live
+in both notebooks. Layer 2 (manual, live) coverage already happened —
+proven end to end in `notebooks/phase3_graph.ipynb` and
+`notebooks/phase3_orchestrator_e2e.ipynb`.
+
+**`strict=True` tool binding, done and live-verified 2026-10-01** — landed in
+`orchestrator.py` first this round (a deviation from the notebook-first
+workflow, caught and corrected), then ported into `phase3_graph.ipynb` and
+confirmed live in both it and `phase3_orchestrator_e2e.ipynb`. `agent_node`
+binds with `bind_tools(BIND_TOOLS_LIST, strict=True)`; `generate_chart`'s
+stand-in is pre-converted to a raw Anthropic tool dict (no `strict` kwarg)
+in `init_orchestrator()`, which `convert_to_anthropic_tool` passes through
+untouched, keeping it non-strict while every other tool gets `strict=True`.
+`SearchDocsArgs.top_k` lost its `ge=1` for the same reason `generate_chart`
+needed the exception — confirmed `SubmitAnswerArgs.answer_markdown`'s
+`min_length=1` survives strict mode fine, no equivalent fix needed there.
+This resolves the `submit_answer` malformed-call failure from the live run
+earlier the same day, for Anthropic — Phase 6 item 1 is where this gets
+proven against OpenAI/Gemini too.
+
+**`get_page_info` done, 2026-10-02 — item 9's second tool, built local in
+`app/orchestrator/tools.py`, not MCP-hosted as originally documented.**
+Same reusability-gap reasoning as `search_docs` (`.claude/rules/tools.md`).
+Also a real simplification over the original design, tested live rather
+than assumed: no `active_page` injection at all. `page_name` is a required
+`Literal`, derived from the actual files in `context/page_info/`
+(`PAGES = tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))`), and
+the model supplies it every turn from `"Current dashboard page: {active_page}"`
+— already in every `HumanMessage` — rather than code injecting a fallback.
+Confirmed live across same-page and cross-page questions, consistently
+correct, including one case where the model correctly refused to cite a
+number from `get_page_info`'s content and re-ran a live BigQuery/DAX query
+instead, unprompted, since that tool isn't in `NUMERIC_SOURCE_TOOLS`.
+
+`context/page_info/*.txt` is sourced by a new section in
+`scripts/build_model_context.py`: the two whole-page-info measures'
+Scanner-API expressions are DAX string literals (the expression *is* the
+HTML, confirmed, not assumed), so no live `EVALUATE` call is needed — just
+unescaping the literal and running it through `unstructured.partition_html`.
+Found and fixed one real markup issue along the way: the dashboard's
+fraction-style formulas use a CSS `border-bottom` for the bar with no
+distinguishing tag, which `partition_html` silently drops — fixed by
+inserting a literal `/` before each numerator span's closing tag.
+
+Found and fixed a second real bug, in `app/orchestrator/tools.py` itself:
+`get_page_info` originally returned a bare `str`, which LangChain passes
+through as raw `ToolMessage` content instead of JSON-encoding it the way
+every other tool's `dict`/`list` return is — broke `build_tool_call_record`'s
+`json.loads(...)` call immediately. Fixed by returning
+`{"page_name": ..., "content": ...}` instead, matching every other tool's
+result shape.
+
+_Last updated: 2026-10-02._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
 verification detail if ever needed; kept brief here since it's done, not
 current.
@@ -754,10 +908,26 @@ layer failed.
 9. **The remaining tools, in descending criticality.** `search_docs` first,
    and with it **`vector-search-sa` + impersonation** — it's the only tool
    that reads `vector_db`, and this is what keeps `run_bigquery_sql` scoped
-   to `agent_safe` (`docs/data-pipeline.md`). Then `get_page_info`, then
-   `list_repo_files` / `read_repo_file` with the `github-read-token` secret
-   and the hand-written `FILE_DESCRIPTIONS` map (`docs/code-search.md`). The
-   code tools are genuinely least critical — build them last.
+   to `agent_safe` (`docs/data-pipeline.md`). **Built as a local tool in
+   `app/orchestrator/tools.py`, not MCP-hosted** — a deliberate deviation
+   from how this item was originally planned, decided once a real
+   implementation made the reusability gap concrete: achieving it would mean
+   externalizing the tool's entire schema (table, embedding column, model
+   path, output columns), not hiding connection info the way `run_dax_query`
+   does (`.claude/rules/tools.md`, 2026-10-01). **Then `get_page_info` —
+   also built local, not MCP-hosted, same reusability gap as `search_docs`,
+   and simplified past its original design** (2026-10-02): no `active_page`
+   injection at all. `page_name` is a required field; the model picks it
+   every time from the "Current dashboard page" text already in the
+   `HumanMessage`, confirmed live across both same-page and cross-page
+   questions. `context/page_info/*.txt` is sourced by a new section in
+   `scripts/build_model_context.py`, reading the two whole-page HTML
+   measures' DAX string literals directly (no live `EVALUATE` needed — the
+   expression *is* the HTML) and converting to plain text via
+   `unstructured.partition_html`. Then `list_repo_files` / `read_repo_file`
+   with the `github-read-token` secret and the hand-written
+   `FILE_DESCRIPTIONS` map (`docs/code-search.md`). The code tools are
+   genuinely least critical — build them last.
 10. **Firestore conversation state** (`.claude/rules/gateway.md`) — the
    `live_turns` document (status, cancel flag, pending approval) and the
    `sessions` document (last 5 turns with their queries and filter context,
@@ -778,6 +948,16 @@ layer failed.
    `finalize`. The per-tool cancellation mechanism already shipped with
    `run_bigquery_sql` in #5; this is the turn-level path on top of it. The
    Power Apps button lands in Phase 4.
+
+   **When this lands, also make `run_agent_turn`'s own turn-timeout path
+   (`app/gateway/gateway.py`) reuse it.** Today, `asyncio.wait_for`'s timeout
+   only cancels the `asyncio` task locally, which does *not* stop a BigQuery
+   query running inside `run_bigquery_sql`'s `asyncio.to_thread()` call --
+   `asyncio` cancellation can't reach a thread. On timeout, write
+   `cancel_requested: true` to `live_turns/{conversation_id}` (the same flag
+   `POST /ask/cancel` writes) before returning the fallback response, so the
+   real per-tool `cancel_job()` mechanism from #5 actually fires instead of
+   leaving an orphaned query running server-side with nothing watching it.
 
 ## Phase 4 — Multimodal grounding & response formatting
 
@@ -807,13 +987,49 @@ XMLA is a documented backup only. REST is the plan.
 
 ## Phase 6 — Evaluation & polish
 
-1. Judge Cloud Run Job + Cloud Scheduler (`docs/llm-judge.md`) — consumes
-   the `agent_telemetry` table already logging since Phase 1.
-2. Golden dataset regression suite (`docs/golden-dataset.md`) — a separate,
-   event-triggered mechanism, **not** a subset of #1. Mostly hand-curation;
+1. **Model swappability — prove it, don't just design for it.** Deliberately
+   placed *before* the judge (#2): the plan is to use the judge itself to
+   compare providers, so swapping has to actually work first, not just be
+   designed to work. Real gap found live (2026-10-01): `get_static_context`/
+   `build_static_context` already branch correctly per provider (Claude/
+   OpenAI/Gemini caching, `.claude/rules/orchestrator.md`), but `agent_node`
+   — the actual LLM call driving the tool loop — hardcodes
+   `ChatAnthropic(model=MODEL, thinking={...})` directly, not
+   `init_chat_model(MODEL)`, and `thinking` is Anthropic-only syntax.
+   Changing `MODEL` in `app/config.py` today would not swap the agent to
+   GPT or Gemini; it would just break. Scope:
+   - Switch `agent_node` to `init_chat_model(MODEL)`, with the `thinking`
+     param made conditional/provider-gated rather than unconditional.
+   - Confirm OpenAI's and Gemini's real `strict=True` equivalents **live**,
+     not assumed (`.claude/rules/orchestrator.md`'s "needs verifying, not
+     assuming" note) — this is also where the `submit_answer` malformed-call
+     fix from the 2026-10-01 live failure gets resolved, since whatever fix
+     is chosen there has to survive this test, not just work for Anthropic.
+     A fix tying `submit_answer` to Anthropic's own raw tool-dict shape
+     (considered, not applied) would fail this item outright.
+   - One real end-to-end turn run against each of the three providers,
+     confirming a correct, verified answer comes back from all three —
+     not just that the call doesn't error.
+   - **`append_thinking` (`app/gateway/gateway.py`) also needs a per-provider
+     answer, not just `agent_node`.** It reads `response.content` for a
+     `{"type": "thinking", ...}` block — Anthropic's own content-block
+     shape, produced by `agent_node`'s `thinking=` param. OpenAI's reasoning
+     models don't expose raw reasoning content the same way via API, and
+     Gemini's "thought" format differs too, so `thinking_log`/
+     `GET /ask/status` would silently go blank (not error) on a non-Anthropic
+     provider unless this is handled explicitly — confirm live per provider,
+     don't assume it degrades gracefully just because it doesn't crash.
+   - `gemini-api-key`/`openai-api-key` secrets already exist (Phase 0 item
+     9), provisioned for exactly this and unused until now.
+2. Judge Cloud Run Job + Cloud Scheduler (`docs/llm-judge.md`) — consumes
+   the `agent_telemetry` table already logging since Phase 1. Depends on #1:
+   comparing providers' faithfulness scores needs provider-swapping to
+   actually work.
+3. Golden dataset regression suite (`docs/golden-dataset.md`) — a separate,
+   event-triggered mechanism, **not** a subset of #2. Mostly hand-curation;
    Claude Code's part is `scripts/run_golden_tests.py`, the comparison
    runner.
-3. CI/CD workflow: `github-deployer`, WIF, and the repo variables are already
+4. CI/CD workflow: `github-deployer`, WIF, and the repo variables are already
    done (Phase 0 item 9) — this is just writing
    `.github/workflows/ci.yml` with a `test` job and a `deploy` job gated by
    `needs: test`. **The deploy job is two steps** — build a
@@ -821,8 +1037,8 @@ XMLA is a documented backup only. REST is the plan.
    (`docs/ci-cd.md`), not the `--source .` command used manually through
    Phases 1–5. Its `auth@v2` step uses `workload_identity_provider`/
    `service_account`, not `credentials_json` — no key exists to use.
-4. Share the Power Apps app — the one auth step that's neither code nor IAM.
-5. Demo video + business-first README.
+5. Share the Power Apps app — the one auth step that's neither code nor IAM.
+6. Demo video + business-first README.
 
 ## Phase 7 — Optional (no strong ordering)
 

@@ -64,6 +64,8 @@ def test_clean_label_and_format_value():
     (HorizontalBarChartSpec, "horizontal_bar", "orders", "department"),
 ])
 def test_bar_and_horizontal_bar(cls, chart_type, x_field, y_field):
+    """Render, max-categories cap, duplicate-grain cap, and (horizontal only)
+    the label-length cap."""
     data = [{"department": "produce", "orders": 5231}, {"department": "dairy", "orders": 4102}]
     spec = {"chart_type": chart_type, "x_field": x_field, "y_field": y_field, **LABELS}
     assert isinstance(validate_and_render(data, spec, cls), Figure)
@@ -86,6 +88,7 @@ def test_bar_and_horizontal_bar(cls, chart_type, x_field, y_field):
 
 
 def test_grouped_bar():
+    """Render, shared font hierarchy via _finish(), and the max-categories cap."""
     data = [{"model": "LightGBM", "recall": 0.367, "[Split]": "test"},
             {"model": "LightGBM", "recall": 0.412, "[Split]": "train"}]
     spec = {"chart_type": "grouped_bar", "x_field": "model", "y_field": "recall",
@@ -109,6 +112,8 @@ def test_grouped_bar():
 
 
 def test_stacked_horizontal_bar():
+    """Cumulative segment offsets, narrow-segment label suppression, and all
+    three guardrails."""
     data = [{"department": "produce", "[Driver]": "reordered", "orders": 3910},
             {"department": "produce", "[Driver]": "first-time", "orders": 1321}]
     spec = {"chart_type": "stacked_horizontal_bar", "category_field": "department",
@@ -146,6 +151,7 @@ def test_stacked_horizontal_bar():
 
 
 def test_line():
+    """Sorts by x before rendering; max-points and max-hue-groups caps."""
     # Unsorted input must not draw a zigzag -- render() sorts by x_field.
     data = [{"order_dow": 1, "orders": 5788, "[Split]": "test"},
             {"order_dow": 0, "orders": 6209, "[Split]": "test"}]
@@ -165,6 +171,7 @@ def test_line():
 
 
 def test_histogram():
+    """Bar width from real bucket spacing; max-buckets and duplicate-grain caps."""
     # Bars are sized from the real gap between bucket edges, not a fixed width.
     data = [{"bucket": 7, "n": 41203}, {"bucket": 14, "n": 38102}]
     spec = {"chart_type": "histogram", "bucket_field": "bucket", "count_field": "n", **LABELS}
@@ -181,6 +188,7 @@ def test_histogram():
 
 
 def test_box():
+    """Render from precomputed quantiles; max-categories cap."""
     data = [{"department": "produce", "q1": 0.40, "med": 0.61, "q3": 0.72,
              "whislo": 0.11, "whishi": 0.95}]
     spec = {"chart_type": "box", "category_field": "department", "q1_field": "q1",
@@ -195,6 +203,8 @@ def test_box():
 
 
 def test_heatmap():
+    """Duplicate-grain cap, max-categories cap, and annotation dropout at
+    high density."""
     # A duplicate (x, y) pair means the query returned the wrong grain --
     # that must fail, not silently pick one value.
     dupes = [{"order_dow": 0, "order_hour": 10, "orders": 812},
@@ -250,6 +260,8 @@ def test_concentration():
 
 
 def test_pareto():
+    """Correct sort order for labels/cumulative line; label thinning;
+    max-categories cap."""
     # Regression case: the labeled cumulative % at each position must match
     # the CORRECTLY sorted order, not the original input order.
     data = [{"department": "A", "orders": 10}, {"department": "B", "orders": 70},

@@ -1,6 +1,5 @@
-"""Builds context/schema/model_schema.json from live Power BI (executeQueries
-+ Scanner API), replacing the earlier .pbip/TMDL-parsing design
-(docs/data-pipeline.md Part 2).
+"""Builds context/schema/model_schema.json and context/page_info/ from live
+Power BI (executeQueries + Scanner API).
 
 Run manually after a semantic-model change, then commit the result:
     uv run python scripts/build_model_context.py
@@ -14,6 +13,7 @@ import time
 
 import msal
 import requests
+from unstructured.partition.html import partition_html
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))  # repo root, for app.*
 
@@ -21,18 +21,13 @@ from app.config import GCP_PROJECT_ID, POWER_BI_DATASET_ID, POWER_BI_WORKSPACE_I
 
 OUTPUT_PATH = pathlib.Path("context/schema/model_schema.json")
 
-# Power BI's own auto-generated date tables -- excluded by name, not
-# IsHidden, since legitimate tables (parameter tables) are also hidden.
+# Power BI's own auto-generated date tables.
 AUTO_DATE_TABLE_PREFIXES = ("LocalDateTable_", "DateTableTemplate_")
 
-# Power BI's own auto-generated row-index column -- appears on every table
-# with this exact name, confirmed against the real model (25/25 tables).
+# Power BI's own auto-generated row-index column.
 ROW_INDEX_COLUMN = "RowNumber-2662979B-1795-4F74-8F37-6A1BA8059B61"
 
-# Measures that render HTML/markdown for a visual, not an aggregation --
-# must never reach the measure registry. Manual list is the mechanism of
-# record; HTML_TAG_RE below is a build-time backstop that fails loudly if a
-# new one slips in unlisted, rather than silently letting it through.
+# Measures that render HTML/markdown for a visual, not an aggregation.
 HTML_DISPLAY_MEASURES = {
     "Financial_Assumptions_HTML",
     "HTML_Model_Evaluation_Info",
@@ -41,15 +36,23 @@ HTML_DISPLAY_MEASURES = {
 }
 HTML_TAG_RE = re.compile(r"<[a-z]+[ >]", re.I)
 
-# App-integration plumbing measures, added to feed PowerBIIntegration.Data
-# for the embedded chat app (docs/frontend.md) -- not real analytical
-# measures. Slicer-selection ones duplicate what filter_context already
-# sends every turn, so they add nothing; page-identifying ones are literal
-# constants with no analytical meaning. Field-parameter selections
-# (Selected_Evaluation_Metric, Selected_Ensemble_Weight) are NOT excluded --
-# field parameters can't reach filter_context (a capacity/license error on
-# that measure type in the visual's Data well), so these are the only way
-# the agent can see which one is currently displayed.
+# Page name -> its whole-page-info measure.
+PAGE_INFO_MEASURES = {
+    "Financial Impact": "HTML_Financial_Impact_Info",
+    "Model Performance": "HTML_Model_Evaluation_Info",
+}
+PAGE_INFO_DIR = pathlib.Path("context/page_info")
+
+
+def unescape_dax_string_literal(expr: str) -> str:
+    """Strips a DAX string literal's quotes and un-escapes "" to "."""
+    expr = expr.strip()
+    if not (expr.startswith('"') and expr.endswith('"')):
+        raise SystemExit(f"Expected a DAX string literal for a page-info measure, got: {expr[:80]!r}")
+    return expr[1:-1].replace('""', '"')
+
+# Measures feeding the embedded chat app's integration data, not real
+# analytical measures.
 APP_INTEGRATION_MEASURES = {
     "Selected_Dataset_Split",
     "Selected_Model",
@@ -60,9 +63,8 @@ APP_INTEGRATION_MEASURES = {
 
 SELECTEDVALUE_RE = re.compile(r"SELECTEDVALUE\(\s*'([^']+)'\[([^\]]+)\](?:\s*,\s*(.+?))?\s*\)")
 
-# Field parameters -- a second parameter kind, a 'Table'[Column] NAMEOF-style
-# reference column instead of a numeric range. Manual list, same reasoning
-# as HTML_DISPLAY_MEASURES: only a couple exist and they change rarely.
+# Field parameters -- a 'Table'[Column] reference column instead of a
+# numeric range.
 FIELD_PARAMETER_TABLES = {
     "Evaluation Metric Parameter": ("Parameter Fields", "Parameter Order"),
     "Ensemble Weight Parameter": ("Ensemble Weight Parameter Fields", "Ensemble Weight Parameter Order"),
@@ -201,16 +203,14 @@ def build_field_parameters(headers: dict) -> list[dict]:
 
 
 def compute_range(headers: dict, table: str, column: str) -> dict:
-    """min/max/step read directly from the parameter table's real values --
-    neither API exposes the GENERATESERIES(...) formula that produced them.
-    """
+    """min/max/step read directly from the parameter table's real values."""
     raw = run_dax(headers, f"EVALUATE VALUES('{table}'[{column}])")
     values = sorted(round(list(row.values())[0], 4) for row in raw)
     step = round(values[1] - values[0], 4) if len(values) > 1 else None
     return {"min": values[0], "max": values[-1], "step": step}
 
 
-def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict]]:
+def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict], dict[str, str]]:
     dataset = scan_workspace(headers)
     measures_full = [
         {
@@ -220,8 +220,8 @@ def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict]
         for tbl in dataset["tables"] for m in tbl.get("measures", [])
     ]
 
-    # Parameter detection -- strict form only: the measure's ENTIRE
-    # expression is one bare SELECTEDVALUE(...) call.
+    # A parameter: the measure's entire expression is one bare
+    # SELECTEDVALUE(...) call.
     parameters = []
     for m in measures_full:
         expr = (m["expression"] or "").strip()
@@ -247,9 +247,7 @@ def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict]
             "Add them to the exclusion list if confirmed HTML-display measures."
         )
 
-    # Numeric parameters' value measures are covered fully by PARAMETERS
-    # (name, default, range) -- listing them again here would just repeat
-    # that, under their own single-measure table header.
+    # Numeric parameters' value measures.
     value_measure_names = {p["value_measure"] for p in parameters if p["type"] == "numeric"}
 
     measures = [
@@ -259,7 +257,28 @@ def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict]
         and m["name"] not in APP_INTEGRATION_MEASURES
         and m["name"] not in value_measure_names
     ]
-    return measures, parameters
+
+    by_name = {m["name"]: m["expression"] for m in measures_full}
+    page_info_html = {
+        page_name: unescape_dax_string_literal(by_name[measure_name])
+        for page_name, measure_name in PAGE_INFO_MEASURES.items()
+    }
+    return measures, parameters, page_info_html
+
+
+# A fraction's numerator span -- its bar is a CSS border-bottom with no
+# distinguishing tag, which partition_html's text extraction otherwise drops.
+FRACTION_NUMERATOR_RE = re.compile(r"(<span[^>]*border-bottom:\s*1px solid[^>]*>.*?)(</span>)", re.S)
+
+
+def build_page_info(page_info_html: dict[str, str]) -> dict[str, str]:
+    """Converts each page's HTML measure content to plain text."""
+    return {
+        page_name: "\n\n".join(
+            str(el) for el in partition_html(text=FRACTION_NUMERATOR_RE.sub(r"\1 /\2", html))
+        )
+        for page_name, html in page_info_html.items()
+    }
 
 
 def main() -> None:
@@ -268,7 +287,8 @@ def main() -> None:
 
     tables, excluded_tables = build_tables(headers)
     relationships = build_relationships(headers, excluded_tables)
-    measures, parameters = build_measures_and_parameters(headers)
+    measures, parameters, page_info_html = build_measures_and_parameters(headers)
+    page_info = build_page_info(page_info_html)
 
     schema = {
         "tables": tables,
@@ -284,6 +304,11 @@ def main() -> None:
         f"{len(relationships)} relationships, {len(parameters)} parameters "
         f"to {OUTPUT_PATH}"
     )
+
+    PAGE_INFO_DIR.mkdir(parents=True, exist_ok=True)
+    for page_name, text in page_info.items():
+        (PAGE_INFO_DIR / f"{page_name}.txt").write_text(text, encoding="utf-8")
+    print(f"Wrote page info for {len(page_info)} pages to {PAGE_INFO_DIR}")
 
 
 if __name__ == "__main__":

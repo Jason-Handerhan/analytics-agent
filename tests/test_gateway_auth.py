@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.config import MAX_QUESTION_CHARS
 import app.gateway.gateway as gateway
 from app.gateway.gateway import app, validate_api_key, validate_entra_token
 
@@ -34,18 +35,21 @@ def _tamper(token: str, **overrides) -> str:
 # --- Auth failure modes, tested once against the shared functions -------
 
 def test_expired_token_rejected(make_token, patch_jwks):
+    """Token whose exp has already passed."""
     with pytest.raises(HTTPException) as exc:
         validate_entra_token(f"Bearer {make_token(expired=True)}")
     assert exc.value.status_code == 401
 
 
 def test_wrong_audience_rejected(make_token, patch_jwks):
+    """Token issued for a different application."""
     with pytest.raises(HTTPException) as exc:
         validate_entra_token(f"Bearer {make_token(audience='api://some-other-app')}")
     assert exc.value.status_code == 401
 
 
 def test_wrong_issuer_rejected(make_token, patch_jwks):
+    """Token issued by a different tenant."""
     with pytest.raises(HTTPException) as exc:
         validate_entra_token(
             f"Bearer {make_token(issuer='https://login.microsoftonline.com/wrong-tenant/v2.0')}"
@@ -70,6 +74,7 @@ def test_tampered_payload_rejected(make_token, patch_jwks):
 
 
 def test_wrong_api_key_rejected(monkeypatch):
+    """x-api-key header doesn't match the gateway's own key."""
     monkeypatch.setattr(gateway, "get_gateway_api_key", lambda: "expected-key")
     with pytest.raises(HTTPException) as exc:
         validate_api_key("wrong-key")
@@ -116,7 +121,26 @@ def _patch_gateway(monkeypatch, fake_db):
     monkeypatch.setattr(gateway, "get_db", lambda: fake_db)
 
 
+class _FakeGraph:
+    """Stands in for the real compiled graph -- yields one canned "values"
+    chunk, the same (kind, data) tuple shape graph.astream produces."""
+
+    async def astream(self, initial_state, stream_mode=None):
+        yield ("values", {
+            "answer_markdown": "There were 551,399 orders.",
+            "sources": ["Query warehouse"],
+            "needs_approval": False,
+            "chart_urls": [],
+            "suggested_follow_ups": [],
+            "iteration_cap_hit": False,
+            "pending_queries": [],
+            "estimated_cost": None,
+            "cost_cap_exceeded": False,
+        })
+
+
 def test_post_conversation_success(monkeypatch, patch_jwks, fake_db, auth_headers):
+    """Valid credentials -- mints a conversation_id and writes its sessions doc."""
     _patch_gateway(monkeypatch, fake_db)
     resp = client.post("/conversation", headers=auth_headers)
     assert resp.status_code == 200
@@ -126,12 +150,26 @@ def test_post_conversation_success(monkeypatch, patch_jwks, fake_db, auth_header
 
 
 def test_post_ask_success(monkeypatch, patch_jwks, fake_db, auth_headers):
+    """Valid credentials -- runs the (mocked) graph and returns its answer."""
     _patch_gateway(monkeypatch, fake_db)
+    monkeypatch.setattr(gateway, "init_orchestrator", AsyncMock())
+    monkeypatch.setattr(gateway, "graph", _FakeGraph())
+
     resp = client.post(
         "/ask", headers=auth_headers,
         json={"question": "How many orders last week?", "conversation_id": "some-id"},
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["answer_markdown"] == "Echo: How many orders last week?"
-    assert body["sources"] == []
+    assert body["answer_markdown"] == "There were 551,399 orders."
+    assert body["sources"] == ["Query warehouse"]
+
+
+def test_question_too_long_rejected(monkeypatch, patch_jwks, fake_db, auth_headers):
+    """Question over MAX_QUESTION_CHARS is rejected before a turn starts."""
+    _patch_gateway(monkeypatch, fake_db)
+    resp = client.post(
+        "/ask", headers=auth_headers,
+        json={"question": "x" * (MAX_QUESTION_CHARS + 1), "conversation_id": "some-id"},
+    )
+    assert resp.status_code == 400

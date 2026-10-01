@@ -377,7 +377,7 @@ tracked in `docs/build-order.md` Phase 7.
 
 ### Two identities: the dataset boundary is IAM, not application code
 
-`run_bigquery_sql` lets the model write arbitrary SQL. Search tools run a
+`run_bigquery_sql` lets the model write arbitrary SQL. `search_docs` runs a
 fixed `VECTOR_SEARCH` template against `vector_db`. **Those datasets are kept
 apart by separate service accounts**, so the agent cannot hand-write a query
 against the vector tables:
@@ -398,19 +398,32 @@ gcloud iam service-accounts add-iam-policy-binding \
   --role="roles/iam.serviceAccountTokenCreator"
 ```
 
+**Real implementation, live-proven (2026-10-01)** —
+`get_vector_search_client()` in `app/orchestrator/tools.py`, the first real
+use of `impersonated_credentials` in this codebase:
+
 ```python
-from google.auth import default, impersonated_credentials
+import google.auth
+import google.auth.impersonated_credentials
+from functools import lru_cache
 
-base_creds, _ = default()
-bq_warehouse = bigquery.Client()                    # agent-sa -> agent_safe
-
-vector_creds = impersonated_credentials.Credentials(
-    source_credentials=base_creds,
-    target_principal="vector-search-sa@YOUR_PROJECT.iam.gserviceaccount.com",
-    target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
-)
-bq_vector = bigquery.Client(credentials=vector_creds)   # -> vector_db
+@lru_cache
+def get_vector_search_client() -> bigquery.Client:
+    source_credentials, _ = google.auth.default()   # agent-sa on Cloud Run,
+                                                      # your identity locally
+    impersonated = google.auth.impersonated_credentials.Credentials(
+        source_credentials=source_credentials,
+        target_principal=VECTOR_SEARCH_SA_EMAIL,     # app/config.py
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        lifetime=300,   # seconds -- short-lived, re-minted per process restart
+    )
+    return bigquery.Client(project=GCP_PROJECT_ID, credentials=impersonated)
 ```
+
+`get_bq_client()` (plain `bigquery.Client()`, no impersonation) stays the
+warehouse-only client for `run_bigquery_sql` — the two are deliberately
+separate functions, not one parameterized by target dataset, so a caller
+can't accidentally pass the wrong one.
 
 **Why impersonation and not a "run as" parameter.** `bigquery.Client()`
 doesn't authenticate by naming an account — it presents a token, and on Cloud
@@ -420,6 +433,17 @@ account, and it works only because of the explicit `serviceAccountTokenCreator`
 binding above. The alternative — downloading a key file for
 `vector-search-sa` — means a long-lived credential to store and rotate, which
 this project avoids everywhere else.
+
+**One more grant the setup above doesn't cover, found live:**
+`vector-search-sa` also needs `roles/bigquery.connectionUser` on the
+`vertex_conn` *connection* itself (not a dataset-level grant) — `ML.GENERATE_EMBEDDING`
+runs through that connection, and holding `dataViewer` on `vector_db` says
+nothing about permission to use the connection a query against it depends
+on. Connections are a distinct resource type with their own IAM surface,
+reachable only through the BigQuery Connection API's own `getIamPolicy`/
+`setIamPolicy` (`bigqueryconnection.googleapis.com/v1/.../connections/{id}`)
+— confirmed live that `bq add-iam-policy-binding` and the Console's "Grant
+Access" UI both fail against it.
 
 **Why not a tool-layer allow-list instead.** It would mean correctly
 extracting table references from arbitrary SQL — CTEs, subqueries, aliases,
@@ -752,22 +776,36 @@ OPTIONS(index_type = 'IVF', distance_type = 'COSINE');
 
 ### What `search_docs` runs
 
-One parameterized query against the single table. **No `WHERE` clause** —
-there's one content type.
+**Not MCP-hosted — a plain function in `app/orchestrator/tools.py`**, same
+category as `run_bigquery_sql`/`get_measure_dax`
+(`.claude/rules/tools.md`). One parameterized query against the single
+table. **No `WHERE` clause** — there's one content type. `top_k` is
+LLM-provided (bounded by `SEARCH_DOCS_MAX_TOP_K`), not fixed — the model
+steers it the same way it already steers `run_dax_query`'s `TOPN`.
+
+**Real, live-proven query (2026-10-01)** — `SEARCH_DOCS_SQL` in
+`app/orchestrator/tools.py`:
 
 ```python
-SEARCH_SQL = """
+SEARCH_DOCS_SQL = f"""
 SELECT base.chunk_text, base.file_path, base.section, distance
 FROM VECTOR_SEARCH(
-  TABLE `{project}.vector_db.chunks_docs_embedded`, 'embedding',
+  TABLE `{GCP_PROJECT_ID}.{VECTOR_DB_DATASET}.{VECTOR_DB_TABLE}`, 'embedding',
   (SELECT ml_generate_embedding_result AS embedding
    FROM ML.GENERATE_EMBEDDING(
-     MODEL `{project}.staging.embedding_model`,
+     MODEL `{GCP_PROJECT_ID}.{EMBEDDING_MODEL}`,
      (SELECT @query AS content),
      STRUCT(TRUE AS flatten_json_output))),
   top_k => @top_k, distance_type => 'COSINE')
+ORDER BY distance
 """
 ```
+
+**`ORDER BY distance` matters** — `VECTOR_SEARCH` doesn't guarantee its
+`top_k` rows arrive in ascending-distance order on its own; without this,
+the closest match isn't reliably first. (Previously missing from this
+template — a real doc/implementation mismatch, caught and fixed when
+`search_docs` was actually built, not when this was first written.)
 
 **Must use the same model as the corpus embedding** — `staging.embedding_model`
 (`gemini-embedding-001`), not a different one. Query and corpus vectors from

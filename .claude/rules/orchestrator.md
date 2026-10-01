@@ -653,18 +653,26 @@ parameter surface through the LangChain wrapper — and how closely its
 guarantees match OpenAI's — needs verifying, not assuming. Same category as
 `query_job.result()`'s param name.
 
-**Currently dropped globally, not enabled (2026-09-28).** Confirmed live:
-Claude's `strict=True` rejects `oneOf`/`discriminator` and `ge=`/`le=`
-outright, both of which `generate_chart`'s schema needs
-(`docs/chart-tool.md`). A per-tool split exists (pre-convert just that tool
-to a raw Anthropic-format dict, which bypasses `strict` entirely, and hand
-it to the same `bind_tools()` call alongside the rest) and works, but ties
-the fix to Anthropic's own tool-dict shape — the opposite of this section's
-model-swappable intent. Dropped everywhere instead, accepting the weaker
-structural guarantee project-wide rather than a provider-specific mechanism;
-Pydantic validation still catches a malformed call before dispatch either
-way. **Circle back before `generate_chart` is done**: work out the OpenAI/
-Gemini equivalent, or confirm this trade-off stands.
+**Enabled globally, 2026-10-02 — one tool bound outside it.** Claude's
+`strict=True` rejects `oneOf`/`discriminator` and `ge=`/`le=` outright, both
+of which `generate_chart`'s schema needs (`docs/chart-tool.md`); confirmed
+`ge=`/`le=` also broke `SearchDocsArgs.top_k` (`.claude/rules/tools.md`),
+so the rejection isn't `generate_chart`-specific. The per-tool split this
+section once described as the alternative — pre-convert just one tool to a
+raw Anthropic-format dict, bypassing `strict` for that tool while every
+other tool binds with `strict=True` normally — is what shipped:
+`init_orchestrator()` pre-converts `generate_chart`'s stand-in via
+`convert_to_anthropic_tool()` (no `strict` kwarg), and `agent_node` binds
+with `bind_tools(BIND_TOOLS_LIST, strict=True)`. This does tie
+`generate_chart`'s binding to Anthropic's own tool-dict shape — the
+model-swappable cost this section originally flagged — tracked as something
+Phase 6 item 1 (`docs/build-order.md`) has to resolve or re-confirm when
+proving the graph against OpenAI/Gemini, not solved here. This also
+resolved a real live failure: `submit_answer` previously got no structural
+guarantee at all, and a live run produced a malformed call (a model-emitted
+XML-style fragment inside `answer_markdown`, missing `all_prose_numeric_claims`
+entirely) that Pydantic caught but only after the fact — `strict=True` makes
+that specific shape unsampleable instead.
 
 ## Shared exceptions
 
@@ -1151,15 +1159,24 @@ which is exactly the signal `verify_node`'s `model_validate` step needs to
 catch "never submitted" (above).
 
 ```python
-ALL_TOOLS = {**MCP_TOOLS, "run_bigquery_sql": run_bigquery_sql,
-             "submit_answer": submit_answer, "get_measure_dax": get_measure_dax}
-             # none of the three is MCP-based (`.claude/rules/tools.md`) --
-             # MCP_TOOLS alone would leave all three uncallable
+ALL_TOOLS = {
+    **MCP_TOOLS,
+    "run_bigquery_sql": run_bigquery_sql,
+    "submit_answer": submit_answer,
+    "get_measure_dax": get_measure_dax,
+    "search_docs": search_docs,
+    "get_page_info": get_page_info,
+}
+# None of these five is MCP-based (`.claude/rules/tools.md`) -- MCP_TOOLS
+# alone would leave all five uncallable.
 
 # generate_chart's entry is swapped for a stand-in schema (source_ref + spec,
 # `.claude/rules/tools.md`) in the list bound to the model -- dispatch still
-# uses ALL_TOOLS, which keeps the real MCP-loaded tool object.
-BIND_TOOLS_LIST = [chart_tool_call_standin if name == "generate_chart" else t
+# uses ALL_TOOLS, which keeps the real MCP-loaded tool object. Pre-converted
+# to a raw Anthropic tool dict (no strict kwarg) so bind_tools(strict=True)
+# below passes it through untouched, leaving it the one non-strict tool.
+generate_chart_tool = convert_to_anthropic_tool(chart_tool_call_standin)
+BIND_TOOLS_LIST = [generate_chart_tool if name == "generate_chart" else t
                    for name, t in ALL_TOOLS.items()]
 
 async def agent_node(state: AgentState) -> dict:
@@ -1172,7 +1189,7 @@ async def agent_node(state: AgentState) -> dict:
     model = ChatAnthropic(
         model=MODEL,
         thinking={"type": "adaptive", "display": "summarized"},
-    ).bind_tools(BIND_TOOLS_LIST)   # strict=True dropped -- see the note below
+    ).bind_tools(BIND_TOOLS_LIST, strict=True)
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 ```

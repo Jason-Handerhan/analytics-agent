@@ -1,10 +1,13 @@
-"""Non-MCP tools: run_bigquery_sql, submit_answer, get_measure_dax (.claude/rules/tools.md)."""
+"""Non-MCP tools: run_bigquery_sql, submit_answer, get_measure_dax, get_page_info, search_docs (.claude/rules/tools.md)."""
 import asyncio
 import concurrent.futures
 from datetime import date, time
 from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
+import google.auth
+import google.auth.impersonated_credentials
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 from langchain_core.tools import tool, ToolException
@@ -13,9 +16,16 @@ from pydantic import BaseModel, Field, create_model
 from app.config import (
     BIGQUERY_ROW_CAP,
     BIGQUERY_TIMEOUT_SECONDS,
+    EMBEDDING_MODEL,
     GCP_PROJECT_ID,
     MAX_ANSWER_TABLE_ROWS,
     MAX_BYTES_BILLED,
+    PAGE_INFO_DIR,
+    SEARCH_DOCS_MAX_TOP_K,
+    SEARCH_DOCS_TOP_K_DEFAULT,
+    VECTOR_DB_DATASET,
+    VECTOR_DB_TABLE,
+    VECTOR_SEARCH_SA_EMAIL,
 )
 from app.mcp_server.chart_tool import GenerateChartArgs
 from app.model_schema import MEASURE_DAX, MEASURE_NAMES
@@ -159,6 +169,82 @@ async def get_measure_dax(measure_names: list[MEASURE_NAMES]) -> dict[str, str]:
     return result
 
 get_measure_dax.handle_validation_error = lambda e: str(e)
+
+
+PAGES = tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
+if not PAGES:
+    raise RuntimeError(f"No page-info files found in {PAGE_INFO_DIR}.")
+
+
+class GetPageInfoArgs(BaseModel):
+    page_name: Literal[PAGES]
+
+
+@tool(args_schema=GetPageInfoArgs)
+async def get_page_info(page_name: Literal[PAGES]) -> dict[str, str]:
+    """Whole-page content for one of this dashboard's two pages. Use the
+    page named in "Current dashboard page" for what the user is currently
+    viewing, or the other one if the question is clearly about it instead.
+    """
+    content = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
+    return {"page_name": page_name, "content": content}
+
+get_page_info.handle_validation_error = lambda e: str(e)
+
+
+SEARCH_DOCS_SQL = f"""
+SELECT base.chunk_text, base.file_path, base.section, distance
+FROM VECTOR_SEARCH(
+  TABLE `{GCP_PROJECT_ID}.{VECTOR_DB_DATASET}.{VECTOR_DB_TABLE}`, 'embedding',
+  (SELECT ml_generate_embedding_result AS embedding
+   FROM ML.GENERATE_EMBEDDING(
+     MODEL `{GCP_PROJECT_ID}.{EMBEDDING_MODEL}`,
+     (SELECT @query AS content),
+     STRUCT(TRUE AS flatten_json_output))),
+  top_k => @top_k, distance_type => 'COSINE')
+ORDER BY distance
+"""
+
+
+@lru_cache
+def get_vector_search_client() -> bigquery.Client:
+    """BigQuery client impersonating vector-search-sa -- the only identity
+    with read access to vector_db."""
+    source_credentials, _ = google.auth.default()
+    impersonated = google.auth.impersonated_credentials.Credentials(
+        source_credentials=source_credentials,
+        target_principal=VECTOR_SEARCH_SA_EMAIL,
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        lifetime=300,
+    )
+    return bigquery.Client(project=GCP_PROJECT_ID, credentials=impersonated)
+
+
+class SearchDocsArgs(BaseModel):
+    query: str
+    top_k: int = Field(default=SEARCH_DOCS_TOP_K_DEFAULT)
+
+
+@tool(args_schema=SearchDocsArgs)
+async def search_docs(query: str, top_k: int = SEARCH_DOCS_TOP_K_DEFAULT) -> list[dict]:
+    """Semantic search over this project's own methodology docs -- README
+    content on approach, architecture, evaluation. Authoritative for project
+    intent and methodology, never for numbers -- use run_bigquery_sql or
+    run_dax_query for any numeric answer. top_k is clamped to
+    1..SEARCH_DOCS_MAX_TOP_K, never rejected.
+    """
+    top_k = max(1, min(top_k, SEARCH_DOCS_MAX_TOP_K))
+
+    def _run() -> list[dict]:
+        job_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("query", "STRING", query),
+            bigquery.ScalarQueryParameter("top_k", "INT64", top_k),
+        ])
+        rows = get_vector_search_client().query(SEARCH_DOCS_SQL, job_config=job_config).result()
+        return [dict(row) for row in rows]
+    return await asyncio.to_thread(_run)
+
+search_docs.handle_validation_error = lambda e: str(e)
 
 
 _chart_spec_field = GenerateChartArgs.model_fields["spec"]

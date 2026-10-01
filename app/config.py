@@ -10,6 +10,7 @@ CHART_URL_EXPIRATION_HOURS = 1.0
 
 # Repo-relative paths
 CONTEXT_DIR = pathlib.Path(__file__).resolve().parent.parent / "context"
+PAGE_INFO_DIR = CONTEXT_DIR / "page_info"
 
 # LLM
 MODEL = "claude-sonnet-5"
@@ -29,6 +30,15 @@ AGENT_SAFE_DATASET = "agent_safe"
 TELEMETRY_DATASET = "telemetry"
 TELEMETRY_TABLE = "agent_telemetry"
 
+# vector_db (search_docs, reached only via vector-search-sa impersonation --
+# agent-sa has no grant on this dataset)
+VECTOR_DB_DATASET = "vector_db"
+VECTOR_DB_TABLE = "chunks_docs_embedded"
+EMBEDDING_MODEL = "staging.embedding_model"  # wraps gemini-embedding-001
+VECTOR_SEARCH_SA_EMAIL = "vector-search-sa@instacart-ml-model.iam.gserviceaccount.com"
+SEARCH_DOCS_TOP_K_DEFAULT = 5
+SEARCH_DOCS_MAX_TOP_K = 20
+
 # Conversation history
 HISTORY_TURN_COUNT = 5    # sessions.recent_messages FIFO length
 HISTORY_ROW_CAP = 100     # rows kept per stored tool result
@@ -43,6 +53,10 @@ BIGQUERY_ROW_CAP = 1000  # cap on rows fetched -- LIMIT doesn't reduce bytes sca
 DAX_ROW_CAP = BIGQUERY_ROW_CAP  # same constraint as BigQuery's cap, not platform-specific
 DAX_TIMEOUT_SECONDS = BIGQUERY_TIMEOUT_SECONDS  # same turn-budget reasoning as BigQuery's timeout
 MAX_ITERATIONS = 10  # max tool-call rounds per turn before falling back to a partial answer
+
+# Gateway request/turn guardrails
+MAX_QUESTION_CHARS = 2000  # generous for a real question, not a paste -- rejected before a turn starts
+GATEWAY_TURN_TIMEOUT_SECONDS = 115  # whole-turn budget before returning a fallback AgentResponse
 
 # MCP server (app/main.py, app/orchestrator/orchestrator.py) -- co-located with the gateway for now
 MCP_HOST = "127.0.0.1"

@@ -4,6 +4,7 @@ call once before running graph.
 """
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import groupby
@@ -15,7 +16,7 @@ import google.auth.transport.requests
 import mistune
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langchain_anthropic import ChatAnthropic
+from langchain_anthropic import ChatAnthropic, convert_to_anthropic_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -28,6 +29,7 @@ from app.config import (
     CHART_URL_EXPIRATION_HOURS,
     DAX_ROW_CAP,
     DAX_TIMEOUT_SECONDS,
+    GCP_PROJECT_ID,
     GCS_CHART_BUCKET,
     MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
@@ -40,8 +42,10 @@ from app.config import (
     MODEL,
     POWER_BI_DATASET_ID,
     POWER_BI_WORKSPACE_ID,
+    get_secret,
 )
 from app.orchestrator.context import get_static_context
+from app.orchestrator.models import AgentResponse
 from app.orchestrator.power_bi_auth import get_power_bi_token
 from app.orchestrator.tools import (
     GenerateChartToolCallArgs,
@@ -50,7 +54,9 @@ from app.orchestrator.tools import (
     chart_tool_call_standin,
     dry_run,
     get_measure_dax,
+    get_page_info,
     run_bigquery_sql,
+    search_docs,
     submit_answer,
 )
 from app.telemetry.writer import build_telemetry_row, write_telemetry_row
@@ -66,6 +72,9 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
     global MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE
     if MCP_TOOLS and ALL_TOOLS and SYSTEM_MESSAGE:
         return
+    
+    # Get API Key
+    os.environ["ANTHROPIC_API_KEY"] = get_secret("anthropic-api-key", GCP_PROJECT_ID)
     client = MultiServerMCPClient({
         MCP_SERVER_NAME: {"transport": "streamable_http", "url": mcp_server_url,
                            "headers": MCP_SERVER_HEADERS},
@@ -77,10 +86,15 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "run_bigquery_sql": run_bigquery_sql,
         "submit_answer": submit_answer,
         "get_measure_dax": get_measure_dax,
+        "search_docs": search_docs,
+        "get_page_info": get_page_info,
     }
     # Model binds here, not ALL_TOOLS -- generate_chart's entry is swapped for
     # a stand-in schema (source_ref + spec). Dispatch still uses ALL_TOOLS.
-    BIND_TOOLS_LIST = [chart_tool_call_standin if name == "generate_chart" else t
+    # Pre-converted to a raw Anthropic tool dict (no strict kwarg) so
+    # bind_tools(strict=True) below passes it through untouched.
+    generate_chart_tool = convert_to_anthropic_tool(chart_tool_call_standin)
+    BIND_TOOLS_LIST = [generate_chart_tool if name == "generate_chart" else t
                        for name, t in ALL_TOOLS.items()]
     SYSTEM_MESSAGE = SystemMessage(content=get_static_context())
 
@@ -159,6 +173,74 @@ class AgentState(TypedDict):
     sources: list[str]
     all_prose_numeric_claims: list[float]  # llm provided numeric claims in prose
     suggested_follow_ups: list[str]
+
+
+# --- Entry/exit: called by the gateway, not the graph -------------
+
+def build_human_message(question: str, filter_context: list[dict], active_page: str | None) -> HumanMessage:
+    """The turn's initial HumanMessage -- question plus dashboard grounding."""
+    content = question
+    if active_page:
+        content += f"\n\nCurrent dashboard page: {active_page}"
+    if filter_context:
+        content += f"\n\nCurrent filter state: {filter_context}"
+    return HumanMessage(content=content)
+
+
+def build_initial_state(
+    question: str, conversation_id: str, user_id: str,
+    filter_context: list[dict], active_page: str | None, image_base64: str | None,
+) -> AgentState:
+    """Initializes every AgentState field for a fresh turn."""
+    return AgentState(
+        question=question,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        turn_started_at=datetime.now(timezone.utc),
+        filter_context=filter_context,
+        active_page=active_page,
+        image_base64=image_base64,
+        history_messages=[],
+        messages=[build_human_message(question, filter_context, active_page)],
+        tool_calls=[],
+        iteration_count=0,
+        verification_retry_count=0,
+        length_retry_count=0,
+        verified=False,
+        bytes_consumed=0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        llm_calls=0,
+        errors=[],
+        cancelled=False,
+        needs_approval=False,
+        pending_queries=[],
+        deferred_dax=[],
+        estimated_cost=None,
+        cost_cap_exceeded=False,
+        iteration_cap_hit=False,
+        answer_submitted=False,
+        answer_markdown="",
+        chart_urls=[],
+        sources=[],
+        all_prose_numeric_claims=[],
+        suggested_follow_ups=[],
+    )
+
+
+def build_agent_response(state: AgentState) -> AgentResponse:
+    """Converts the graph's final state into the gateway's wire format."""
+    return AgentResponse(
+        answer_markdown=state["answer_markdown"],
+        sources=state["sources"],
+        needs_approval=state["needs_approval"],
+        chart_urls=state["chart_urls"],
+        suggested_follow_ups=state["suggested_follow_ups"],
+        iteration_cap_hit=state["iteration_cap_hit"],
+        pending_query=state["pending_queries"][-1]["query"] if state["pending_queries"] else None,
+        estimated_cost=state["estimated_cost"],
+        cost_cap_exceeded=state["cost_cap_exceeded"],
+    )
 
 
 # --- Helper functions ----------------------------------------------------
@@ -540,7 +622,7 @@ async def agent_node(state: AgentState) -> dict:
     model = ChatAnthropic(
         model=MODEL,
         thinking={"type": "adaptive", "display": "summarized"},
-    ).bind_tools(BIND_TOOLS_LIST)
+    ).bind_tools(BIND_TOOLS_LIST, strict=True)
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 
@@ -770,7 +852,6 @@ def route_after_verify(state: AgentState) -> str:
 
 
 # --- Graph -------------------------------------------------------------
-# route_entry/execute_approved land in item 11 -- graph starts at agent.
 
 g = StateGraph(AgentState)
 g.add_node("agent",        agent_node)
@@ -779,18 +860,23 @@ g.add_node("check_length", check_length_node)
 g.add_node("verify",       verify_node)
 g.add_node("finalize",     finalize_node)
 
+#Start
 g.add_edge(START, "agent")
 
-# A plain list of names is sugar for the identity path_map ({name: name for
-# name in [...]}) -- still needed for get_graph() to draw the real edges.
+#Tool Loop
 g.add_conditional_edges("agent", route_after_agent,
     ["call_tool", "check_length"])
 g.add_conditional_edges("call_tool", route_after_call_tool,
     ["finalize", "agent", "check_length"])
+
+#Verification
 g.add_conditional_edges("check_length", route_after_check_length,
     ["verify", "agent", "finalize"])
 g.add_conditional_edges("verify", route_after_verify,
     ["finalize", "agent"])
 
+#Finalize
 g.add_edge("finalize", END)
+
+#Compile Graph
 graph = g.compile()

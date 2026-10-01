@@ -13,6 +13,7 @@ from app.main import _propagate_shutdown
 
 @pytest.mark.asyncio
 async def test_propagate_shutdown_mirrors_should_exit():
+    """One server's should_exit flipping propagates to every other server."""
     servers = [SimpleNamespace(should_exit=False) for _ in range(3)]
 
     async def trigger_one():

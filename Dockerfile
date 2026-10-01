@@ -10,6 +10,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+# context.py/model_schema.py read from here at import time, not lazily
+COPY context ./context
 
 # exec + shell form: real $PORT expansion, proper SIGTERM handling
 CMD exec uv run --no-sync python -m app.main

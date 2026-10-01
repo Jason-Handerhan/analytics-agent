@@ -8,7 +8,6 @@ __pycache__/
 notebooks/
 tests/
 docs/
-context/
 scripts/
 definitions/
 src/
