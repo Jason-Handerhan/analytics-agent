@@ -1,0 +1,30 @@
+{
+  "sha": "abc123",
+  "url": "https://api.github.com/repos/owner/repo/git/trees/abc123",
+  "tree": [
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "x1",
+      "size": 120,
+      "url": "https://api.github.com/repos/owner/repo/git/blobs/x1"
+    },
+    {
+      "path": "src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "x2",
+      "url": "https://api.github.com/repos/owner/repo/git/trees/x2"
+    },
+    {
+      "path": "src/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "x3",
+      "size": 340,
+      "url": "https://api.github.com/repos/owner/repo/git/blobs/x3"
+    }
+  ],
+  "truncated": false
+}

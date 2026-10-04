@@ -718,21 +718,33 @@ class ConcentrationChartSpec(ChartSpecBase):
     y_label describes the BARS (each bucket's own share) -- the cumulative
     line's own axis is conventionally unlabeled, matching pareto.
 
-        [{"pct": 5, "cum_pct": 12.4},
-         {"pct": 10, "cum_pct": 19.8}]
+        [{"pct_of_products": 5, "cum_pct": 12.4},
+         {"pct_of_products": 10, "cum_pct": 19.8}]
 
     Exactly 20 rows, one per 5% bucket, with the cumulative math done IN SQL —
     computing it here would make percentages relative to whatever survived the
     row cap, putting the crossing in the wrong place while the chart still
-    looks fine:
-        SELECT NTILE(20) OVER (ORDER BY orders DESC) AS pct,
-               SUM(SUM(orders)) OVER (ORDER BY NTILE(...)) * 100.0
-                 / SUM(SUM(orders)) OVER () AS cum_pct
-        FROM ... GROUP BY product_id
+    looks fine. percentile_field must be the actual percent of the ranked
+    population (5, 10, ..., 100), not the raw bucket index -- it's plotted
+    directly as the x-axis:
+        WITH ranked AS (
+          SELECT product_id, orders,
+                 NTILE(20) OVER (ORDER BY orders DESC) AS bucket
+          FROM ...
+        ),
+        bucketed AS (
+          SELECT bucket, SUM(orders) AS bucket_orders FROM ranked GROUP BY bucket
+        )
+        SELECT bucket * 5 AS pct_of_products,
+               SUM(bucket_orders) OVER (ORDER BY bucket) * 100.0
+                 / SUM(bucket_orders) OVER () AS cum_pct
+        FROM bucketed
+        ORDER BY bucket
     """
 
     chart_type: Literal["concentration"] = Field(description='Always "concentration".')
-    percentile_field: str = Field(description="Column with the rank percentile bucket, 1-20 (one per 5%).")
+    percentile_field: str = Field(description="Column with the percent of the ranked population "
+                                   "covered so far -- 5, 10, 15, ..., 100. Not the raw bucket index.")
     cumulative_pct_field: str = Field(description="Column with the cumulative percent of total.")
     highlight_at_cum_pct: float | None = Field(default=None, ge=0.1, le=99.9,
         description="Find and label the rank percent where the curve reaches this percent "
@@ -781,7 +793,8 @@ class ConcentrationChartSpec(ChartSpecBase):
             raise ToolError(
                 f"Concentration chart requires exactly {CONCENTRATION_BUCKETS} rows, one per "
                 f"5% bucket. Got {len(df)}. Query with NTILE({CONCENTRATION_BUCKETS}) OVER "
-                f"(ORDER BY <value> DESC) AS {self.percentile_field} to produce the right grain.")
+                f"(ORDER BY <value> DESC), then multiply the bucket by 5 to get {self.percentile_field} "
+                "-- the real percent of the ranked population, not the raw bucket index.")
         s = df.sort_values(self.percentile_field).reset_index(drop=True)
         rank_pct = s[self.percentile_field].to_numpy()
         cum_pct = s[self.cumulative_pct_field].to_numpy()
@@ -827,6 +840,7 @@ class ParetoChartSpec(ChartSpecBase):
 
         fig, ax1 = self._setup()
         ax1.bar(s[self.category_field], s[self.value_field])
+        self._apply_value_format(ax1, "y")
         ax2 = ax1.twinx()
         ax2.plot(s[self.category_field], cum_pct,
                  color=self.cumulative_color, marker="o")

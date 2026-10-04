@@ -11,7 +11,8 @@ import google.auth.impersonated_credentials
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 from langchain_core.tools import tool, ToolException
-from pydantic import BaseModel, Field, create_model
+import mistune
+from pydantic import BaseModel, Field, create_model, field_validator
 
 from app.config import (
     BIGQUERY_ROW_CAP,
@@ -20,6 +21,7 @@ from app.config import (
     GCP_PROJECT_ID,
     MAX_ANSWER_TABLE_ROWS,
     MAX_BYTES_BILLED,
+    MAX_CLAIM_PRECISION,
     PAGE_INFO_DIR,
     SEARCH_DOCS_MAX_TOP_K,
     SEARCH_DOCS_TOP_K_DEFAULT,
@@ -31,17 +33,23 @@ from app.mcp_server.chart_tool import GenerateChartArgs
 from app.model_schema import MEASURE_DAX, MEASURE_NAMES
 
 
-@lru_cache
-def get_bq_client() -> bigquery.Client:
-    return bigquery.Client(project=GCP_PROJECT_ID)
-
+# --- ToolError (shared -- raised here, also used by orchestrator.py's chart dispatch) ---
 
 class ToolError(ToolException):
     """ToolException subclass -- handle_tool_error=True converts it to a ToolMessage."""
 
 
+# --- run_bigquery_sql -----------------------------------------------------
+
+@lru_cache
+def get_bq_client() -> bigquery.Client:
+    return bigquery.Client(project=GCP_PROJECT_ID)
+
+
 class BigQuerySqlArgs(BaseModel):
-    query: str
+    query: str = Field(description="A SQL query to run against agent_safe -- the only dataset "
+                                    "this can reach. Filter or aggregate rather than relying on "
+                                    "LIMIT, which doesn't reduce bytes scanned.")
 
 
 @tool(args_schema=BigQuerySqlArgs)
@@ -110,19 +118,98 @@ run_bigquery_sql.handle_tool_error = True
 run_bigquery_sql.handle_validation_error = lambda e: str(e)
 
 
+async def dry_run(query: str) -> int:
+    """Prices a query without running it."""
+    def _run() -> int:
+        try:
+            job = get_bq_client().query(query, job_config=bigquery.QueryJobConfig(dry_run=True))
+            return job.total_bytes_processed
+        except GoogleAPICallError as e:
+            raise ToolError(f"BigQuery error: {e}")
+    return await asyncio.to_thread(_run)
+
+
+# --- submit_answer ---------------------------------------------------------
+
+_markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
+
+
+def _looks_like_table_separator(line: str) -> bool:
+    trimmed_line = line.strip()
+    # True only if the line has a pipe and is otherwise just dashes/colons/whitespace
+    return "|" in trimmed_line and len(trimmed_line.strip("|-: \t")) == 0
+
+
+def _check_ragged_table(markdown: str) -> bool:
+    """True if the text looks like it has a table but mistune didn't parse one out."""
+    has_separator_line = any(_looks_like_table_separator(l) for l in markdown.split("\n"))
+    has_real_table = any(block.get("type") == "table" for block in _markdown_ast(markdown))
+    return has_separator_line and not has_real_table
+
+
+def _check_unclosed_fence(markdown: str) -> bool:
+    """True if a ``` code fence was opened but never closed."""
+    fence_count = sum(1 for line in markdown.split("\n") if line.strip().startswith("```"))
+    return bool(fence_count % 2)
+
+
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
         min_length=1,
         description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
                     "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
-                    "or use generate_chart instead. Include the chart_url from generate_chart here as an "
-                    "image -- the user sees no chart otherwise. Escape a literal | inside a table cell as "
-                    "\\| or it's read as an extra column and breaks the table.")
+                    "or use generate_chart instead. Escape a literal | inside a table cell as \\| or "
+                    "it's read as an extra column and breaks the table. Never state a hand-rolled "
+                    "approximation, range, or derived value (a rank, percent change, difference, ratio, "
+                    "average) anywhere, in prose or a table -- add it to the query and re-run, or "
+                    "describe the pattern in words with no number. Only run_bigquery_sql/run_dax_query "
+                    "numbers belong in a table at all. A number from any other tool may be stated in "
+                    "prose, except search_docs -- never state a search_docs number anywhere, in prose "
+                    "or a table. Table cell values are checked automatically against this turn's "
+                    "run_bigquery_sql/run_dax_query results, at up to "
+                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers for readability -- "
+                    "thousands separators (977,542) and 1-2 decimal places by default, since "
+                    "verification matches each number at its own precision and rounding never "
+                    "causes a mismatch. Use more decimals only when the figure itself needs it, "
+                    "e.g. a Recall@5 score (0.6688, not 0.67). Include the chart_url from "
+                    "generate_chart here as an image -- the user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
-        description="Every number stated in prose as fact. Never include a number that already appears in a markdown table -- table cells are checked separately, automatically, not exempt from verification.")
+        description="Every number stated in prose as fact from a run_bigquery_sql or run_dax_query "
+                    "result this turn -- the only two tools checked against. Never include a number "
+                    "already in a markdown table -- checked separately. Never include a number from "
+                    "any other tool -- it will fail verification.")
     suggested_follow_ups: list[str] = Field(
         default=[],
         description="1-3 short, natural follow-up questions -- include these by default, since they help the user continue the conversation. Leave empty only when nothing natural genuinely fits.")
+
+    @field_validator("answer_markdown")
+    def _unescape_newlines(cls, value: str) -> str:
+        """Replaces a literal backslash-n with a real newline."""
+        return value.replace("\\n", "\n")
+
+    @field_validator("answer_markdown")
+    def _strip_leaked_tool_call_tail(cls, value: str) -> str:
+        """Drops a leaked </answer_markdown> tag and everything after it."""
+        return value.split("</answer_markdown>")[0].rstrip()
+
+    @field_validator("answer_markdown")
+    def _check_markdown_structure(cls, value: str) -> str:
+        """Rejects a ragged table or an unclosed code fence instead of
+        letting either reach the user broken."""
+        ragged_table = _check_ragged_table(value)
+        unclosed_fence = _check_unclosed_fence(value)
+        if ragged_table and unclosed_fence:
+            raise ValueError(
+                "A markdown table looks malformed, and a ``` code fence was opened but never "
+                "closed. Every table row needs the same number of '|'-separated cells as the "
+                "header, and every fence needs a matching close.")
+        elif ragged_table:
+            raise ValueError(
+                "A markdown table looks malformed -- every row needs the same number of "
+                "'|'-separated cells as the header.")
+        elif unclosed_fence:
+            raise ValueError("A ``` code fence was opened but never closed.")
+        return value
 
 
 @tool(args_schema=SubmitAnswerArgs)
@@ -135,6 +222,11 @@ async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[flo
     answer available and say plainly it's partial, rather than presenting
     it as complete. Do not batch this with other tool calls -- if you do,
     the submission is ignored and the loop continues.
+
+    Don't omit a number from all_prose_numeric_claims to dodge verification
+    -- it still needs a real run_bigquery_sql or run_dax_query source.
+    Verification exists to catch hallucinated or hand-computed numbers, not
+    to be routed around.
     """
     return "Answer recorded."
 
@@ -142,16 +234,11 @@ async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[flo
 submit_answer.handle_validation_error = lambda e: str(e)
 
 
-async def dry_run(query: str) -> int:
-    """Prices a query without running it."""
-    def _run() -> int:
-        job = get_bq_client().query(query, job_config=bigquery.QueryJobConfig(dry_run=True))
-        return job.total_bytes_processed
-    return await asyncio.to_thread(_run)
-
+# --- get_measure_dax --------------------------------------------------------
 
 class GetMeasureDaxArgs(BaseModel):
-    measure_names: list[MEASURE_NAMES]
+    measure_names: list[MEASURE_NAMES] = Field(
+        description="One or more exact measure names, from the measure registry already in context.")
 
 
 @tool(args_schema=GetMeasureDaxArgs)
@@ -171,13 +258,15 @@ async def get_measure_dax(measure_names: list[MEASURE_NAMES]) -> dict[str, str]:
 get_measure_dax.handle_validation_error = lambda e: str(e)
 
 
+# --- get_page_info -----------------------------------------------------------
+
 PAGES = tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
 if not PAGES:
     raise RuntimeError(f"No page-info files found in {PAGE_INFO_DIR}.")
 
 
 class GetPageInfoArgs(BaseModel):
-    page_name: Literal[PAGES]
+    page_name: Literal[PAGES] = Field(description="Which dashboard page to return the content for.")
 
 
 @tool(args_schema=GetPageInfoArgs)
@@ -191,6 +280,8 @@ async def get_page_info(page_name: Literal[PAGES]) -> dict[str, str]:
 
 get_page_info.handle_validation_error = lambda e: str(e)
 
+
+# --- search_docs --------------------------------------------------------------
 
 SEARCH_DOCS_SQL = f"""
 SELECT base.chunk_text, base.file_path, base.section, distance
@@ -221,17 +312,23 @@ def get_vector_search_client() -> bigquery.Client:
 
 
 class SearchDocsArgs(BaseModel):
-    query: str
-    top_k: int = Field(default=SEARCH_DOCS_TOP_K_DEFAULT)
+    query: str = Field(description="A natural-language description of what you're looking for in "
+                                    "this project's own methodology documentation.")
+    top_k: int = Field(default=SEARCH_DOCS_TOP_K_DEFAULT,
+                        description="How many matching chunks to retrieve. Clamped to "
+                                    f"1..{SEARCH_DOCS_MAX_TOP_K}, never rejected.")
 
 
 @tool(args_schema=SearchDocsArgs)
 async def search_docs(query: str, top_k: int = SEARCH_DOCS_TOP_K_DEFAULT) -> list[dict]:
     """Semantic search over this project's own methodology docs -- README
     content on approach, architecture, evaluation. Authoritative for project
-    intent and methodology, never for numbers -- use run_bigquery_sql or
-    run_dax_query for any numeric answer. top_k is clamped to
-    1..SEARCH_DOCS_MAX_TOP_K, never rejected.
+    intent and methodology, never for numbers. Never state a number returned
+    here in your answer, even in passing -- doc chunks aren't authoritative
+    for numbers; use run_bigquery_sql or run_dax_query for any numeric
+    answer. Never include code snippets from this tool in your answer --
+    use get_repo_contents instead. top_k is clamped to 1..SEARCH_DOCS_MAX_TOP_K,
+    never rejected.
     """
     top_k = max(1, min(top_k, SEARCH_DOCS_MAX_TOP_K))
 
@@ -246,6 +343,8 @@ async def search_docs(query: str, top_k: int = SEARCH_DOCS_TOP_K_DEFAULT) -> lis
 
 search_docs.handle_validation_error = lambda e: str(e)
 
+
+# --- generate_chart (model-facing stand-in) -----------------------------------
 
 _chart_spec_field = GenerateChartArgs.model_fields["spec"]
 

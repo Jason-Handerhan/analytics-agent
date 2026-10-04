@@ -96,7 +96,12 @@ for p, txt in corpus.items():
         else:
             in_table = False
 
-    for block in re.findall(r'```python\n(.*?)```', txt, re.S):
+    # Closing fence must be the only non-whitespace content on its line --
+    # a plain '```' non-greedy match instead stops at the FIRST occurrence
+    # of that substring anywhere, including one embedded mid-line inside a
+    # string/docstring (e.g. code that itself checks for ``` fences), which
+    # truncates the extracted block and produces a bogus SyntaxError.
+    for block in re.findall(r'```python\n(.*?)\n[ \t]*```[ \t]*$', txt, re.S | re.M):
         code = textwrap.dedent(block)
         if '...' in code or code.strip().startswith(('@', '#')):
             continue  # fragment/decorator-only snippet, not meant to parse alone
@@ -105,7 +110,7 @@ for p, txt in corpus.items():
         except SyntaxError as e:
             allok = False; print(f"PYTHON SYNTAX: {p} — {e.msg}")
 
-for b in re.findall(r'```bash\n(.*?)```', setup, re.S):
+for b in re.findall(r'```bash\n(.*?)\n[ \t]*```[ \t]*$', setup, re.S | re.M):
     # placeholder substitution so real values don't break the syntax check
     probe = re.sub(r'YOUR_[A-Z_]+', 'placeholder', b)
     r = subprocess.run(['bash', '-n'], input=probe, capture_output=True, text=True)

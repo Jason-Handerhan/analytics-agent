@@ -1205,31 +1205,25 @@ set it up in Phase 3, when it starts being useful.
 1. Sign up at smith.langchain.com, create an API key.
 2. Secret created + granted to `agent-sa` and your account — Step 15.
 
-**Deferred to Phase 1/3 code — nothing to run now:**
-- `LANGSMITH_API_KEY` — fetch via `get_secret("langsmith-api-key",
+**Implemented in `app/orchestrator/orchestrator.py`'s `init_orchestrator()`
+(2026-10-02), not deferred anymore — full design in `.claude/rules/orchestrator.md`'s
+"LangSmith tracing" section:**
+- `LANGSMITH_API_KEY` — fetched via `get_secret("langsmith-api-key",
   GCP_PROJECT_ID)`, same as every other secret.
-- `LANGSMITH_TRACING` / `LANGCHAIN_CALLBACKS_BACKGROUND` — literals in
-  `app/config.py` (already added), since both are identical in every
-  environment. `CALLBACKS_BACKGROUND` must be `"false"`: Cloud Run freezes
-  CPU right after the response is sent, dropping a background trace upload
-  otherwise.
-- At startup, **before any LangChain/LangGraph import**, push all three into
-  `os.environ` — the SDK reads its config from there directly, not from
-  arguments:
-  ```python
-  import os
-  from app.config import GCP_PROJECT_ID, LANGSMITH_TRACING, LANGCHAIN_CALLBACKS_BACKGROUND
-  from app.secrets import get_secret   # or wherever Phase 1 puts it
-
-  os.environ["LANGSMITH_TRACING"] = LANGSMITH_TRACING
-  os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = LANGCHAIN_CALLBACKS_BACKGROUND
-  os.environ["LANGSMITH_API_KEY"] = get_secret("langsmith-api-key", GCP_PROJECT_ID)
-  ```
-  (Rejected alternative: an explicit `langsmith.Client`/`LangChainTracer`
-  passed as a callback per call — avoids `os.environ`, but must be wired
-  into every call site individually and silently misses any that forget it.)
+- `LANGSMITH_TRACING` / `LANGCHAIN_PROJECT` — literals in `app/config.py`,
+  identical in every environment.
+- Pushed into `os.environ` inside `init_orchestrator()`, the same place
+  `ANTHROPIC_API_KEY` is set — confirmed sufficient: nothing calls a LangChain
+  tracing check before the first real LLM call, so it doesn't need to happen
+  before `langchain_anthropic`/`langgraph` are *imported*, only before that
+  first call.
 - No deploy flags needed for any of the three — same `config.py` code runs
   locally and deployed.
+- **No `wait_for_all_tracers()` flush, deliberately** — Cloud Run throttles
+  CPU right after the response is sent, which can drop a queued background
+  trace upload, same risk already solved for telemetry writes. Decided not
+  to close this gap: traces are a debugging aid, not the record of truth
+  (`agent_telemetry` is), so an occasional dropped trace is an accepted risk.
 
 **Note for later:** once live, tool inputs/outputs (real `agent_safe`
 results) go to LangChain's cloud — accepted trade-off for this build

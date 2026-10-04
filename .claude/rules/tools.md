@@ -335,26 +335,90 @@ just a pointer to this contract, not a restatement of it — don't duplicate
 detail back into the system prompt when tuning this further.
 
 ```python
+_markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
+
+
+def _looks_like_table_separator(line: str) -> bool:
+    trimmed_line = line.strip()
+    # True only if the line has a pipe and is otherwise just dashes/colons/whitespace
+    return "|" in trimmed_line and len(trimmed_line.strip("|-: \t")) == 0
+
+
+def _check_ragged_table(markdown: str) -> bool:
+    """True if the text looks like it has a table but mistune didn't parse one out."""
+    has_separator_line = any(_looks_like_table_separator(l) for l in markdown.split("\n"))
+    has_real_table = any(block.get("type") == "table" for block in _markdown_ast(markdown))
+    return has_separator_line and not has_real_table
+
+
+def _check_unclosed_fence(markdown: str) -> bool:
+    """True if a ``` code fence was opened but never closed."""
+    fence_count = sum(1 for line in markdown.split("\n") if line.strip().startswith("```"))
+    return bool(fence_count % 2)
+
+
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
         min_length=1,  # non-empty is what flags a never-submitted answer --
                        # verify_node's model_validate
         description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
                     "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
-                    "or use generate_chart instead. Include the chart_url from generate_chart here as an "
-                    "image -- the user sees no chart otherwise. Escape a literal | inside a table cell as "
-                    "\\| or it's read as an extra column and breaks the table.")
+                    "or use generate_chart instead. Escape a literal | inside a table cell as \\| or "
+                    "it's read as an extra column and breaks the table. Never state a hand-rolled "
+                    "approximation, range, or derived value (a rank, percent change, difference, ratio, "
+                    "average) anywhere, in prose or a table -- add it to the query and re-run, or "
+                    "describe the pattern in words with no number. Only run_bigquery_sql/run_dax_query "
+                    "numbers belong in a table at all. A number from any other tool may be stated in "
+                    "prose, except search_docs -- never state a search_docs number anywhere, in prose "
+                    "or a table. Table cell values are checked automatically against this turn's "
+                    "run_bigquery_sql/run_dax_query results, at up to "
+                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers for readability -- "
+                    "thousands separators (977,542) and 1-2 decimal places by default, since "
+                    "verification matches each number at its own precision and rounding never "
+                    "causes a mismatch. Use more decimals only when the figure itself needs it, "
+                    "e.g. a Recall@5 score (0.6688, not 0.67). Include the chart_url from "
+                    "generate_chart here as an image -- the user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
         # prose numbers only -- table cells are checked separately by
         # extract_table_values, not re-declared here
-        description="Every number stated in prose as fact. Never include a number that already "
-                    "appears in a markdown table -- table cells are checked separately, "
-                    "automatically, not exempt from verification.")
+        description="Every number stated in prose as fact from a run_bigquery_sql or run_dax_query "
+                    "result this turn -- the only two tools checked against. Never include a number "
+                    "already in a markdown table -- checked separately. Never include a number from "
+                    "any other tool -- it will fail verification.")
     suggested_follow_ups: list[str] = Field(
         default=[],
         description="1-3 short, natural follow-up questions -- include these by default, since "
                     "they help the user continue the conversation. Leave empty only when nothing "
                     "natural genuinely fits.")
+
+    @field_validator("answer_markdown")
+    def _unescape_newlines(cls, value: str) -> str:
+        """Replaces a literal backslash-n with a real newline."""
+        return value.replace("\\n", "\n")
+
+    @field_validator("answer_markdown")
+    def _strip_leaked_tool_call_tail(cls, value: str) -> str:
+        """Drops a leaked </answer_markdown> tag and everything after it."""
+        return value.split("</answer_markdown>")[0].rstrip()
+
+    @field_validator("answer_markdown")
+    def _check_markdown_structure(cls, value: str) -> str:
+        """Rejects a ragged table or an unclosed code fence instead of
+        letting either reach the user silently broken."""
+        ragged_table = _check_ragged_table(value)
+        unclosed_fence = _check_unclosed_fence(value)
+        if ragged_table and unclosed_fence:
+            raise ValueError(
+                "A markdown table looks malformed, and a ``` code fence was opened but never "
+                "closed. Every table row needs the same number of '|'-separated cells as the "
+                "header, and every fence needs a matching close.")
+        elif ragged_table:
+            raise ValueError(
+                "A markdown table looks malformed -- every row needs the same number of "
+                "'|'-separated cells as the header.")
+        elif unclosed_fence:
+            raise ValueError("A ``` code fence was opened but never closed.")
+        return value
 
 @tool(args_schema=SubmitAnswerArgs)
 async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
@@ -366,6 +430,11 @@ async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[flo
     answer available and say plainly it's partial, rather than presenting
     it as complete. Do not batch this with other tool calls -- if you do,
     the submission is ignored and the loop continues.
+
+    Don't omit a number from all_prose_numeric_claims to dodge verification
+    -- it still needs a real run_bigquery_sql or run_dax_query source.
+    Verification exists to catch hallucinated or hand-computed numbers, not
+    to be routed around.
     """
     return "Answer recorded."
 ```

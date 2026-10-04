@@ -1,0 +1,24 @@
+[
+  {
+    "name": "utils.py",
+    "path": "src/utils.py",
+    "sha": "x3",
+    "size": 340,
+    "url": "https://api.github.com/repos/owner/repo/contents/src/utils.py",
+    "html_url": "https://github.com/owner/repo/blob/main/src/utils.py",
+    "git_url": "https://api.github.com/repos/owner/repo/git/blobs/x3",
+    "download_url": "https://raw.githubusercontent.com/owner/repo/main/src/utils.py",
+    "type": "file"
+  },
+  {
+    "name": "models",
+    "path": "src/models",
+    "sha": "x4",
+    "size": 0,
+    "url": "https://api.github.com/repos/owner/repo/contents/src/models",
+    "html_url": "https://github.com/owner/repo/tree/main/src/models",
+    "git_url": "https://api.github.com/repos/owner/repo/git/trees/x4",
+    "download_url": null,
+    "type": "dir"
+  }
+]

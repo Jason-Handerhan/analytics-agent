@@ -3,8 +3,16 @@
 ## Current status — update this as we go
 
 **Phase: 3 in progress — items 1-8 complete, `POST /ask` wired to the
-real graph and verified live, and item 9's first two tools (`search_docs`,
-`get_page_info`) done (see the entries below item 8).** All of items 1-6 promoted
+real graph and verified live, and item 9 fully complete** — all three
+remaining tools (`search_docs`, `get_page_info`, `get_repo_contents`) built,
+live-verified, and now Layer 1 tested too (see the entries below item 8).
+**Items 10-15 (Firestore chat history, `combine_results`, `ask_user`,
+`live_turns`/status polling, the approval workflow, cancellation) not
+started** — item 10's chat-history half is already proven live in
+`notebooks/phase3_orchestrator_e2e.ipynb`, just not yet ported into
+`app/gateway/gateway.py`; the rest is substantial remaining Phase 3 scope,
+not small wrap-up items, despite every *tool* from the original lineup now
+being done. All of items 1-6 promoted
 out of
 the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
 nodes, routing, graph) and `app/orchestrator/tools.py`
@@ -85,7 +93,7 @@ table answer. Real deviations from the doc's original sketch:
   instead (unwrapping LangChain's content-blocks list when present). Never
   surfaced before this, since `ping` (the only prior MCP tool) returns a
   plain string.
-- **Best-effort DAX cancellation, explicitly deferred to item 12** — no cost
+- **Best-effort DAX cancellation, explicitly deferred to item 15** — no cost
   exposure like BigQuery's, so no urgency; not built as part of this item.
 - **A real smoke-test finding, fixed via the system prompt, not code:** the
   model wrote literal `|` characters in a table header for absolute-value
@@ -294,7 +302,143 @@ every other tool's `dict`/`list` return is — broke `build_tool_call_record`'s
 `{"page_name": ..., "content": ...}` instead, matching every other tool's
 result shape.
 
-_Last updated: 2026-10-02._ **Phase 0 (2026-09-13): all nine items verified
+**`get_repo_contents` done, 2026-10-02/03 — item 9's third tool, replacing
+the originally-planned `list_repo_files`/`read_repo_file` pair with one
+merged, MCP-hosted tool** (`app/mcp_server/code_search.py`) — unlike
+`search_docs`/`get_page_info`, this one *does* clear the reusability bar:
+the hidden args (`owner`, `repo`, `branch`, `access_token`) are pure
+identity/connection info, and GitHub's own Contents API already returns a
+list or a file from the same endpoint, so one tool covers both without a
+discriminated union. `FILE_DESCRIPTIONS` (`context/file_descriptions/
+github_file_descriptions.json`) is a hand-written path→description map,
+surfaced on every listing so the model doesn't have to guess a path blind.
+
+Three real bugs found live, in order, each only surfacing once the
+previous one was fixed:
+- **GitHub silently returns no content for files over its 1MB inline
+  limit** (`encoding: "none"`, `content: ""`) — `base64.b64decode("")`
+  decodes to `""` with no error, so the tool looked like it fetched an
+  empty file. Fixed by retrying via the response's own `download_url`
+  (confirmed present on every file, not just the >1MB case) — but only for
+  `.ipynb` paths specifically, since nothing else has a cleanup path and
+  would just fail the length check below anyway.
+- **A real notebook (3.6MB, mostly embedded chart PNGs as base64) blew the
+  model's context window** (3,388,259 tokens > 1,000,000 max) once the fix
+  above actually returned it. Fixed by stripping every cell's
+  `outputs`/`execution_count`/`attachments` via `nbformat` before
+  returning — confirmed live: 3.6MB → 63KB (98.4% reduction), still valid
+  notebook JSON, same cell count. `nbformat` promoted from dev-only to a
+  real `pyproject.toml` dependency (not `nbconvert` — checked its actual
+  `uv.lock` dependency tree, 11+ packages including an HTML-export stack
+  this tool never uses, vs. `nbformat` alone at 4 light deps) since this
+  tool runs in production. A regex-based "strip long base64 runs" safety
+  net was tried as a second layer, then dropped in favor of one
+  deterministic `MAX_REPO_FILE_CONTENT_CHARS` (300,000) final-length cap —
+  a hard size boundary, not a content-pattern heuristic, matching every
+  other guardrail in this project.
+- **A follow-on bug in the fix above**: stripping only ran on the
+  >1MB-fallback branch, so a notebook *under* 1MB skipped it entirely.
+  Fixed by checking `.ipynb` first and always routing through
+  download-then-strip regardless of size, rather than branching on
+  content-presence first.
+Binary (non-text) files are now caught via `UnicodeDecodeError` rather than
+a hardcoded extension list, failing with an actionable `ToolError` instead
+of crashing.
+
+**`SubmitAnswerArgs`' fields gained the same claimable/non-claimable split
+`get_repo_contents` needed** — `answer_markdown`/`all_prose_numeric_claims`
+now state plainly that only `run_bigquery_sql`/`run_dax_query` numbers are
+checked at all (an inclusive "any other tool" framing, not an enumerated
+list that goes stale when a tool is added), `search_docs` numbers are
+banned everywhere (prose or table, including a code snippet quoted from a
+doc chunk — `get_repo_contents` is the authoritative source for code), and
+hand-rolled approximations/derived values are banned everywhere regardless
+of source. `SYSTEM_INSTRUCTIONS`' `GROUNDING` section was trimmed to match
+— the detailed version now lives only in `submit_answer`'s own fields,
+read at the moment that matters, not duplicated in the static block.
+
+Live-verified repeatedly, including a complex 3-part question (DAX query +
+chart + a `search_docs`→`get_repo_contents` code citation) completing
+cleanly in 42s with zero retries.
+
+**Layer 1 test added, 2026-10-03, `tests/test_code_search.py` — 4 tests,
+each asserting multiple paths, matching `test_chart_tool.py`'s "pack
+several concerns per test" style.** Needed one small, behavior-preserving
+refactor first: all the real logic lived in a closure (`_run()`) nested
+inside the `@mcp.tool()`-decorated function, which FastMCP replaces with a
+`FunctionTool` object in the module namespace (confirmed by
+`get_repo_contents.handle_validation_error = ...` already relying on that),
+so calling it directly would mean going through real MCP dispatch — Layer
+2, not Layer 1. Pulled the closure out to a standalone `_fetch_repo_contents`
+function instead; `get_repo_contents` is now a thin `asyncio.to_thread(...)`
+wrapper around it. `requests.get` is mocked (`monkeypatch`); fixtures under
+`tests/fixtures/code_search/` are real, trimmed GitHub API response shapes
+plus a real tiny notebook (`nbformat`-built, with a fake chart output,
+non-null `execution_count`, and a markdown attachment, to prove stripping
+actually clears all three) and a real 67-byte PNG (confirmed to fail UTF-8
+decoding on its very first byte, `\x89` — not a hand-picked byte sequence)
+for the binary-file case. One real test bug found and fixed along the way:
+`nbformat.writes()` can serialize a cell's `source` as a list of lines, not
+always a joined string — the assertion needed to handle both.
+
+**Orchestrator split into three modules, 2026-10-04 — file cohesion, not
+item 10/14/15 progress.** `AgentState`/`ToolCallRecord`/`TurnError`/`append_list`
+moved to new `app/orchestrator/state.py`; `build_human_message`/
+`build_initial_state`/`build_agent_response`/`build_updated_history`/
+`build_history_messages` (the gateway-facing entry/exit helpers, none of
+them called by the graph) moved to new `app/gateway/entry_exit.py`;
+`AgentResponse` moved from `app/orchestrator/models.py` (now deleted,
+empty) to `app/gateway/models.py`, alongside `AskRequest`/
+`ConversationResponse` — it's the gateway's own wire format, nothing in
+the graph ever touches it. `entry_exit.py` itself landed under
+`app/gateway/`, not `app/orchestrator/`, after the `AgentResponse` move --
+keeping it under orchestrator would have meant it reaching backward into
+`app.gateway.models` for that import; under `app/gateway/` its `AgentState`
+import instead matches the project's existing gateway-depends-on-
+orchestrator direction. Confirmed live, not assumed: `entry_exit.py`
+alone avoids `langchain_anthropic`/`langchain_mcp_adapters`/`fastapi` (the
+real heavy deps) — though `langgraph.graph.StateGraph` unavoidably loads
+too, since it lives in the same package as `add_messages`, which
+`AgentState` needs; Python always runs a package's `__init__.py` on any
+submodule import, no way around it. `build_initial_state` also gained a
+`history_messages` parameter, not yet wired to a real Firestore fetch in
+`gateway.py` — still a `TODO` there, tracked under item 10.
+
+**Plan added, 2026-10-04 — item 10 split in two, two new tool items added,
+five items total now sequenced 10-15.** `combine_results` (item 11,
+`docs/combine-tool.md`) lets the model stack or join multiple same-turn
+tool results into one new `ref_id` — motivated by a live BigQuery cost-cap
+investigation that surfaced a real architectural gap: a wide analysis split
+across several cost-capped queries had no way to reach `generate_chart` as
+one dataset. `ask_user` (item 12) is relocated here from Phase 7's
+deferred-ideas list, design unchanged — building it right after item 10
+while `sessions.history_messages`/`build_history_messages()` is fresh,
+rather than picking it up cold later, per the user's call. **Neither tool
+is built yet — this entry is planning only.**
+
+**Item 10 itself narrowed to chat history only, 2026-10-04 — `live_turns`
+split out into its own item 13.** The original item 10 bundled two
+Firestore documents with two different lifecycles and two very different
+build states: `sessions.history_messages` (read/write, FIFO-trimmed chat
+history) is already proven live end to end in
+`notebooks/phase3_orchestrator_e2e.ipynb` — real Claude calls, real history
+read-back and write-back — and only needs porting into
+`app/gateway/gateway.py`'s `run_agent_turn` (still `history_messages=[]
+# TODO` there today). `live_turns` (`status`/`thinking_log`, the
+`GET /ask/status` polling endpoint) has no notebook prototype at all and
+hasn't been started. Bundling them under one item obscured that gap;
+splitting them makes it visible. Sequenced after the two new tool items
+(11-12), so the full Phase 3 order is now: 10 (chat history) → 11
+(`combine_results`) → 12 (`ask_user`) → 13 (`live_turns`/status polling) →
+14 (approval workflow) → 15 (cancellation).
+
+**Doc correction made in passing:** `.claude/rules/gateway.md`'s `sessions`
+schema names this field `recent_messages`; the actual, notebook-proven
+implementation calls it `history_messages` (matching `app/config.py`'s own
+`HISTORY_TURN_COUNT` comment). Code is authoritative — the doc's wording is
+stale here and still needs correcting, not yet done as part of this entry.
+
+_Last updated: 2026-10-04._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
 verification detail if ever needed; kept brief here since it's done, not
 current.
@@ -928,22 +1072,89 @@ layer failed.
    with the `github-read-token` secret and the hand-written
    `FILE_DESCRIPTIONS` map (`docs/code-search.md`). The code tools are
    genuinely least critical — build them last.
-10. **Firestore conversation state** (`.claude/rules/gateway.md`) — the
-   `live_turns` document (status, cancel flag, pending approval) and the
-   `sessions` document (last 5 turns with their queries and filter context,
-   `user_id`, `last_activity_at`).
+10. **Firestore chat history** (`.claude/rules/gateway.md`) — the `sessions`
+   document's `history_messages` field: last `HISTORY_TURN_COUNT` turns with
+   their queries and filter context, `user_id`, `last_activity_at`. Wires
+   short-term chat history into the prompt — read back at turn start
+   (`build_history_messages`), written back at turn end
+   (`build_updated_history`), both in `app/gateway/entry_exit.py`.
    **Not an optimization — an in-memory dict breaks under Cloud Run's
-   ordinary multi-instance scaling.** Also wire short-term chat history into
-   the prompt here.
-11. **The approval workflow** (`docs/approval-workflow.md`) — the pause,
+   ordinary multi-instance scaling.**
+11. **`combine_results` tool** (`docs/combine-tool.md`) — lets the model
+   stack or join several same-turn `run_bigquery_sql`/`run_dax_query` (or
+   another `combine_results`) results into one new `ref_id`, so a wide
+   question that had to be split across several cost-capped queries can
+   still reach `generate_chart` as one dataset. MCP-hosted, with no hidden
+   args at all — purely a data reshape, the most portable tool in the
+   inventory. Model picks `stack` vs. `join`; guardrails in the real tool
+   catch a mismatched choice rather than silently returning garbage. Stays
+   out of `NUMERIC_SOURCE_TOOLS` — it only recombines numbers already
+   verified via their original tool call, never computes a new one, so the
+   verification contract needs no change. Full design, including the
+   motivating cost-cap investigation: `docs/combine-tool.md`.
+12. **`ask_user` tool — a second way to end the turn, alongside
+   `submit_answer`.** Needs none of `pending_approval`'s persistence trick.
+   That trick exists only because `pending_queries`/`deferred_dax` are real
+   unexecuted work that must survive the request boundary intact — even
+   `pending_approval` doesn't literally pause a running process across an
+   HTTP round-trip, it genuinely ends the turn and starts a new
+   `graph.astream()` on resume, just fed the cached state so it *feels*
+   continuous. `ask_user` has no equivalent unexecuted work: once called,
+   there's nothing left pending, so the turn can just genuinely end —
+   `sessions.history_messages`/`agent_telemetry` written normally, `live_turns`
+   cleared normally, no new Firestore field, no resume endpoint. Mechanically:
+   recognized in `call_tool_node` before the normal batch-dispatch path (sets
+   `question_asked=True` + `clarifying_question` from args), routes straight
+   to `finalize` from `route_after_call_tool` (bypassing `check_length`/
+   `verify` — nothing to verify, same reasoning as `needs_approval`/
+   `cancelled` already skipping them), and rides a normal telemetry row like
+   `iteration_cap_hit` does today rather than `needs_approval`'s special
+   pause row. The user's reply is just the next ordinary `POST /ask` —
+   same `route_entry` → `agent` path any follow-up takes, with the
+   clarifying exchange already in `history_messages` via the normal
+   `sessions.history_messages` read-back. One honest trade-off: the tool
+   calls made before the question demote from this turn's live messages to
+   history one turn earlier than they otherwise would, so `HISTORY_ROW_CAP`
+   (tighter than the live per-tool cap) applies to them a turn sooner —
+   minor, already an accepted property of history elsewhere. Real
+   motivating case (2026-09-30 transcript): asked for "training vs. test,"
+   the model discovered no training split exists, silently substituted
+   validation vs. test, and explained the substitution only after already
+   computing and charting it — a clarifying question up front would have
+   been the better UX. Open question: whether it counts against
+   `MAX_ITERATIONS` (leaning no, same exemption as `submit_answer`).
+   **A `generate_chart` `ref_id` from before the question won't resolve
+   after it** — `state["tool_calls"]` resets fresh next turn like any other
+   turn boundary, so a chart referencing data fetched pre-question fails the
+   same way a stale `source_tool_call_id` replayed from history already does
+   (`.claude/rules/gateway.md`) — an existing, already-actionable `ToolError`,
+   not a new failure mode, just a re-fetch. Likely rare in practice (the
+   model usually asks *because* it doesn't have the data yet), but verify
+   live once built, not just assumed from this reasoning.
+   **Built right after item 10, not deferred to Phase 7** (2026-10-04) —
+   its reply path depends on the exact same
+   `sessions.history_messages`/`build_history_messages()` plumbing item 10
+   builds, so implementing it immediately after, while that machinery is
+   fresh, costs less than picking it up cold later as a standalone item.
+13. **`live_turns` — live status polling** (`.claude/rules/gateway.md`) —
+   the `live_turns` document's `status` and `thinking_log` fields only;
+   `cancel_requested` and `pending_approval` are items 14 and 15's own
+   concern, written there, not here. `set_status`/`append_thinking` calls
+   threaded through `run_agent_turn`'s `astream` loop, the
+   `GET /ask/status/{conversation_id}` polling endpoint, and clearing
+   `live_turns` on every exit path (success, timeout, error — not just the
+   happy path). **Split out of the original item 10, 2026-10-04** — no
+   notebook prototype exists for any of this yet, unlike item 10's chat
+   history half.
+14. **The approval workflow** (`docs/approval-workflow.md`) — the pause,
    `PendingApproval` caching, `POST /ask/respond`, `route_entry` and
    `execute_approved`, and the hard-decline tier. Depends on #5's cost tiers
-   and #10's Firestore state. The UI half (approve/reject buttons) lands in
-   Phase 4. **Verify it here anyway, via curl/script against
+   and #10's/#13's Firestore state. The UI half (approve/reject buttons)
+   lands in Phase 4. **Verify it here anyway, via curl/script against
    `/ask/respond`** — same pattern as Phase 0's `executeQueries` smoke test.
    The resume logic shouldn't sit a whole phase untested just because its
    buttons don't exist yet.
-12. **User cancellation** — `POST /ask/cancel/{conversation_id}` writing the
+15. **User cancellation** — `POST /ask/cancel/{conversation_id}` writing the
    `cancel_requested` flag, and the node-level checks that route to
    `finalize`. The per-tool cancellation mechanism already shipped with
    `run_bigquery_sql` in #5; this is the turn-level path on top of it. The
@@ -1091,48 +1302,7 @@ XMLA is a documented backup only. REST is the plan.
   choosing a value rather than mirroring dashboard state, so it needs its
   own design pass (how the value is validated, how the answer signals it
   diverges from what's displayed).
-- **`ask_user` tool — a second way to end the turn, alongside
-  `submit_answer`.** Needs none of `pending_approval`'s persistence trick.
-  That trick exists only because `pending_queries`/`deferred_dax` are real
-  unexecuted work that must survive the request boundary intact — even
-  `pending_approval` doesn't literally pause a running process across an
-  HTTP round-trip, it genuinely ends the turn and starts a new
-  `graph.astream()` on resume, just fed the cached state so it *feels*
-  continuous. `ask_user` has no equivalent unexecuted work: once called,
-  there's nothing left pending, so the turn can just genuinely end —
-  `sessions.recent_messages`/`agent_telemetry` written normally, `live_turns`
-  cleared normally, no new Firestore field, no resume endpoint. Mechanically:
-  recognized in `call_tool_node` before the normal batch-dispatch path (sets
-  `question_asked=True` + `clarifying_question` from args), routes straight
-  to `finalize` from `route_after_call_tool` (bypassing `check_length`/
-  `verify` — nothing to verify, same reasoning as `needs_approval`/
-  `cancelled` already skipping them), and rides a normal telemetry row like
-  `iteration_cap_hit` does today rather than `needs_approval`'s special
-  pause row. The user's reply is just the next ordinary `POST /ask` —
-  same `route_entry` → `agent` path any follow-up takes, with the
-  clarifying exchange already in `history_messages` via the normal
-  `sessions.recent_messages` read-back. One honest trade-off: the tool
-  calls made before the question demote from this turn's live messages to
-  history one turn earlier than they otherwise would, so `HISTORY_ROW_CAP`
-  (tighter than the live per-tool cap) applies to them a turn sooner —
-  minor, already an accepted property of history elsewhere. Real
-  motivating case (2026-09-30 transcript): asked for "training vs. test,"
-  the model discovered no training split exists, silently substituted
-  validation vs. test, and explained the substitution only after already
-  computing and charting it — a clarifying question up front would have
-  been the better UX. Open question: whether it counts against
-  `MAX_ITERATIONS` (leaning no, same exemption as `submit_answer`).
-  **A `generate_chart` `ref_id` from before the question won't resolve
-  after it** — `state["tool_calls"]` resets fresh next turn like any other
-  turn boundary, so a chart referencing data fetched pre-question fails the
-  same way a stale `source_tool_call_id` replayed from history already does
-  (`.claude/rules/gateway.md`) — an existing, already-actionable `ToolError`,
-  not a new failure mode, just a re-fetch. Likely rare in practice (the
-  model usually asks *because* it doesn't have the data yet), but verify
-  live once built, not just assumed from this reasoning.
-  **Good time to reconsider building this: when item 10 (Firestore
-  conversation state) lands.** `ask_user`'s reply path depends on the exact
-  same `sessions.recent_messages`/`build_history_messages()` plumbing that
-  item 10 builds — implementing it right after, while that machinery is
-  fresh, likely costs less than picking it up cold later as a standalone
-  Phase 7 item.
+**`ask_user` relocated to Phase 3 item 12, 2026-10-04** — it depends on the
+same `sessions.history_messages`/`build_history_messages()` plumbing item 10
+builds, so it's sequenced right after that instead of sitting here as a
+deferred idea. See item 12 above, not here.

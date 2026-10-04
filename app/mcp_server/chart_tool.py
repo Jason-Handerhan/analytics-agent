@@ -169,8 +169,9 @@ class ChartSpecBase(BaseModel, ABC):
 
 
 class FormattedValueSpec(BaseModel):
-    """Mixin for chart types with a value axis that isn't self-evidently a
-    plain number -- adds the field _format_value/_apply_value_format need."""
+    """Mixin to allow the llm to provide formatting for chart types
+    where numeric format isn't evident (used by _format_value &
+    _apply_value_format ."""
     value_format: Literal["auto", "percent", "currency"] = Field(
         default="auto",
         description="How to format axis labels and value annotations. 'auto' "
@@ -187,10 +188,18 @@ class BarChartSpec(ChartSpecBase, FormattedValueSpec):
 
     Keep categories readable: departments (~21) or aisles (~134), not products
     (~50k). An un-aggregated query hits the 1,000-row cap and fails.
+
+    By default, bars plot in the order rows arrive from the query. Set
+    sort_order to sort by y_field instead.
     """
     chart_type: Literal["bar"] = Field(description='Always "bar".')
     x_field: str = Field(description="Column with category names.")
     y_field: str = Field(description="Column with the numeric value per category.")
+    sort_order: Literal["asc", "desc"] | None = Field(
+        default=None,
+        description="Sort bars by y_field -- 'asc' (smallest first) or "
+                    "'desc' (largest first). Omit to plot categories in "
+                    "the order the query returns them.")
 
     def required_fields(self) -> list[str]:
         return [self.x_field, self.y_field]
@@ -198,6 +207,11 @@ class BarChartSpec(ChartSpecBase, FormattedValueSpec):
     def render(self, df: pd.DataFrame) -> plt.Figure:
         self._check_no_duplicate_grain(df, [self.x_field])
         self._check_max_categories(df[self.x_field].nunique(), MAX_BAR_CATEGORIES, "categories")
+        if self.sort_order is not None:
+            if self.sort_order == "asc":
+                df = df.sort_values(self.y_field, ascending=True)
+            else:
+                df = df.sort_values(self.y_field, ascending=False)
         fig, ax = self._setup()
         sns.barplot(data=df, x=self.x_field, y=self.y_field, ax=ax)
         self._annotate_values(ax)
@@ -211,10 +225,18 @@ class HorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
 
         [{"orders": 5231, "aisle": "fresh vegetables"},
          {"orders": 4102, "aisle": "packaged cheese"}]
+
+    By default, bars plot in the order rows arrive from the query. Set
+    sort_order to sort by x_field instead.
     """
     chart_type: Literal["horizontal_bar"] = Field(description='Always "horizontal_bar".')
     x_field: str = Field(description="Column with the numeric value.")
     y_field: str = Field(description="Column with category names.")
+    sort_order: Literal["asc", "desc"] | None = Field(
+        default=None,
+        description="Sort bars by x_field -- 'asc' (smallest first) or "
+                    "'desc' (largest first). Omit to plot categories in "
+                    "the order the query returns them.")
 
     def required_fields(self) -> list[str]:
         return [self.x_field, self.y_field]
@@ -223,6 +245,11 @@ class HorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
         self._check_no_duplicate_grain(df, [self.y_field])
         self._check_max_categories(df[self.y_field].nunique(), MAX_BAR_CATEGORIES, "categories")
         self._check_max_label_length(df[self.y_field], self.y_field)
+        if self.sort_order is not None:
+            if self.sort_order == "asc":
+                df = df.sort_values(self.x_field, ascending=True)
+            else:
+                df = df.sort_values(self.x_field, ascending=False)
         fig, ax = self._setup()
         sns.barplot(data=df, x=self.x_field, y=self.y_field, ax=ax)
         self._annotate_values(ax)
@@ -236,6 +263,11 @@ class GroupedBarChartSpec(ChartSpecBase, FormattedValueSpec):
 
         [{"model": "LightGBM", "recall": 0.367, "split": "test"},
          {"model": "LightGBM", "recall": 0.412, "split": "train"}]
+
+    This chart does not sort for you -- x-axis categories plot in whatever
+    order the query returns rows in. If you want them in a particular
+    order (e.g. by value), order the query itself -- the order you pick
+    directly determines how the chart reads.
     """
     chart_type: Literal["grouped_bar"] = Field(description='Always "grouped_bar".')
     x_field: str = Field(description="Column with category names.")
@@ -271,6 +303,12 @@ class StackedHorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
 
     Keep segments few — 3-5 reads well, 10 is a muddle. High-cardinality
     segments belong in a different chart entirely.
+
+    This chart does not sort for you -- categories (down the y-axis) plot
+    in whatever order the query returns rows in, and segments within each
+    bar stack in the order segment values first appear. If you want a
+    particular order (e.g. categories by total value), order the query
+    itself -- the order you pick directly determines how the chart reads.
     """
     chart_type: Literal["stacked_horizontal_bar"] = Field(description='Always "stacked_horizontal_bar".')
     category_field: str = Field(description="Column with each bar's category.")
@@ -319,15 +357,23 @@ class LineChartSpec(ChartSpecBase, FormattedValueSpec):
     """Trends over an ordinal axis.
     Fields: x_field (ordinal), y_field (num), hue_field (optional).
 
-    One row per x value, sorted — the renderer sorts, but gaps stay gaps:
+    One row per x value, sorted along the x-axis before plotting — gaps
+    stay gaps:
         [{"order_dow": 0, "orders": 6209},
          {"order_dow": 1, "orders": 5788}]
+
+    Points are plotted ascending by x_field by default. Set sort_order to
+    'desc' to reverse the axis.
     """
     chart_type: Literal["line"] = Field(description='Always "line".')
     x_field: str = Field(description="Column with the ordinal x-axis value.")
     y_field: str = Field(description="Column with the numeric value.")
     hue_field: str | None = Field(default=None,
         description="Optional column to draw a separate line per value.")
+    sort_order: Literal["asc", "desc"] | None = Field(
+        default=None,
+        description="Order points along the x-axis by x_field -- 'asc' "
+                    "(default) or 'desc' to reverse it.")
 
     def required_fields(self) -> list[str]:
         return [f for f in (self.x_field, self.y_field, self.hue_field) if f]
@@ -338,7 +384,10 @@ class LineChartSpec(ChartSpecBase, FormattedValueSpec):
         self._check_max_categories(df[self.x_field].nunique(), MAX_LINE_POINTS, "x-axis points")
         if self.hue_field is not None:
             self._check_max_categories(df[self.hue_field].nunique(), MAX_LINE_HUE_GROUPS, "hue groups")
-        s = df.sort_values(self.x_field)
+        if self.sort_order == "desc":
+            s = df.sort_values(self.x_field, ascending=False)
+        else:
+            s = df.sort_values(self.x_field, ascending=True)
         fig, ax = self._setup()
         sns.lineplot(data=s, x=self.x_field, y=self.y_field,
                      hue=self.hue_field, marker="o", ax=ax)
@@ -358,6 +407,9 @@ class HistogramChartSpec(ChartSpecBase):
     an arbitrary slice and produce a confidently wrong chart. Bin first:
         SELECT FLOOR(days_since_prior_order / 7) * 7 AS bucket, COUNT(*) AS n
         FROM ... GROUP BY bucket ORDER BY bucket
+
+    Always plotted ascending by bucket_field -- not configurable, since a
+    histogram out of bucket order doesn't mean anything.
     """
     chart_type: Literal["histogram"] = Field(description='Always "histogram".')
     bucket_field: str = Field(description="Column with each bucket's lower edge.")
@@ -395,6 +447,9 @@ class BoxChartSpec(ChartSpecBase, FormattedValueSpec):
                APPROX_QUANTILES(reorder_rate, 4)[OFFSET(3)] AS q3,
                MIN(reorder_rate) AS whislo, MAX(reorder_rate) AS whishi
         FROM ... GROUP BY department
+
+    By default, boxes plot in the order rows arrive from the query. Set
+    sort_order to sort by median (med_field) instead.
     """
     chart_type: Literal["box"] = Field(description='Always "box".')
     category_field: str = Field(description="Column with each box's category.")
@@ -403,6 +458,11 @@ class BoxChartSpec(ChartSpecBase, FormattedValueSpec):
     q3_field: str = Field(description="Column with the third quartile.")
     whislo_field: str = Field(description="Column with the lower whisker value.")
     whishi_field: str = Field(description="Column with the upper whisker value.")
+    sort_order: Literal["asc", "desc"] | None = Field(
+        default=None,
+        description="Sort categories by their median (med_field) -- 'asc' "
+                    "(lowest first) or 'desc' (highest first). Omit to "
+                    "plot categories in the order the query returns them.")
 
     def required_fields(self) -> list[str]:
         return [self.category_field, self.q1_field, self.med_field,
@@ -411,6 +471,11 @@ class BoxChartSpec(ChartSpecBase, FormattedValueSpec):
     def render(self, df: pd.DataFrame) -> plt.Figure:
         self._check_no_duplicate_grain(df, [self.category_field])
         self._check_max_categories(df[self.category_field].nunique(), MAX_BOX_CATEGORIES, "categories")
+        if self.sort_order is not None:
+            if self.sort_order == "asc":
+                df = df.sort_values(self.med_field, ascending=True)
+            else:
+                df = df.sort_values(self.med_field, ascending=False)
         # ax.bxp's required stat keys, one dict per box.
         stats = [{"label": r[self.category_field],
                   "q1":     r[self.q1_field],
@@ -470,21 +535,37 @@ class ConcentrationChartSpec(ChartSpecBase):
     y_label describes the BARS (each bucket's own share) -- the cumulative
     line's own axis is conventionally unlabeled, matching pareto.
 
-        [{"pct": 5, "cum_pct": 12.4},
-         {"pct": 10, "cum_pct": 19.8}]
+        [{"pct_of_products": 5, "cum_pct": 12.4},
+         {"pct_of_products": 10, "cum_pct": 19.8}]
 
     Exactly 20 rows, one per 5% bucket, with the cumulative math done IN SQL —
     computing it here would make percentages relative to whatever survived the
     row cap, putting the crossing in the wrong place while the chart still
-    looks fine:
-        SELECT NTILE(20) OVER (ORDER BY orders DESC) AS pct,
-               SUM(SUM(orders)) OVER (ORDER BY NTILE(...)) * 100.0
-                 / SUM(SUM(orders)) OVER () AS cum_pct
-        FROM ... GROUP BY product_id
+    looks fine. percentile_field must be the actual percent of the ranked
+    population (5, 10, ..., 100), not the raw bucket index -- it's plotted
+    directly as the x-axis:
+        WITH ranked AS (
+          SELECT product_id, orders,
+                 NTILE(20) OVER (ORDER BY orders DESC) AS bucket
+          FROM ...
+        ),
+        bucketed AS (
+          SELECT bucket, SUM(orders) AS bucket_orders FROM ranked GROUP BY bucket
+        )
+        SELECT bucket * 5 AS pct_of_products,
+               SUM(bucket_orders) OVER (ORDER BY bucket) * 100.0
+                 / SUM(bucket_orders) OVER () AS cum_pct
+        FROM bucketed
+        ORDER BY bucket
+
+    Always plotted ascending by percentile_field -- not configurable; the
+    cumulative curve and crossing-point interpolation both require rank
+    order.
     """
 
     chart_type: Literal["concentration"] = Field(description='Always "concentration".')
-    percentile_field: str = Field(description="Column with the rank percentile bucket, 1-20 (one per 5%).")
+    percentile_field: str = Field(description="Column with the percent of the ranked population "
+                                   "covered so far -- 5, 10, 15, ..., 100. Not the raw bucket index.")
     cumulative_pct_field: str = Field(description="Column with the cumulative percent of total.")
     highlight_at_cum_pct: float | None = Field(default=None, ge=0.1, le=99.9,
         description="Find and label the rank percent where the curve reaches this percent "
@@ -533,7 +614,8 @@ class ConcentrationChartSpec(ChartSpecBase):
             raise ToolError(
                 f"Concentration chart requires exactly {CONCENTRATION_BUCKETS} rows, one per "
                 f"5% bucket. Got {len(df)}. Query with NTILE({CONCENTRATION_BUCKETS}) OVER "
-                f"(ORDER BY <value> DESC) AS {self.percentile_field} to produce the right grain.")
+                f"(ORDER BY <value> DESC), then multiply the bucket by 5 to get {self.percentile_field} "
+                "-- the real percent of the ranked population, not the raw bucket index.")
         s = df.sort_values(self.percentile_field).reset_index(drop=True)
         rank_pct = s[self.percentile_field].to_numpy()
         cum_pct = s[self.cumulative_pct_field].to_numpy()
@@ -563,6 +645,10 @@ class ParetoChartSpec(ChartSpecBase):
     LOW-CARDINALITY ONLY — departments (~21) or aisles (~134), never products
     (~50k): every bar needs a readable label. For products use `concentration`.
     Sorting and the cumulative line are computed here; aggregation is not.
+
+    Always plotted descending by value_field -- not configurable, since
+    that's what makes it a Pareto chart (largest-to-smallest, with the
+    cumulative line reflecting that same order).
     """
     chart_type: Literal["pareto"] = Field(description='Always "pareto".')
     category_field: str = Field(description="Column with each bar's category.")
@@ -580,6 +666,7 @@ class ParetoChartSpec(ChartSpecBase):
 
         fig, ax1 = self._setup()
         ax1.bar(s[self.category_field], s[self.value_field])
+        self._apply_value_format(ax1, "y")
         ax2 = ax1.twinx()
         ax2.plot(s[self.category_field], cum_pct,
                  color=self.cumulative_color, marker="o")

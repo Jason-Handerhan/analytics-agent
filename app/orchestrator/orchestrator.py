@@ -1,15 +1,18 @@
 """LangGraph tool-calling loop: state, nodes, routing, graph.
 init_orchestrator() populates MCP_TOOLS/ALL_TOOLS/SYSTEM_MESSAGE lazily --
-call once before running graph.
+call once before running graph. AgentState and its TypedDicts live in
+app/orchestrator/state.py; entry/exit helpers (called by the gateway, never
+the graph) live in app/gateway/entry_exit.py -- kept out of this file so
+neither needs this module's heavier LangGraph/LangChain-model imports.
 """
 import asyncio
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import groupby
 from operator import itemgetter
-from typing import Annotated, Any, TypedDict
 
 import google.auth
 import google.auth.transport.requests
@@ -19,7 +22,6 @@ from langchain_core.tools import BaseTool
 from langchain_anthropic import ChatAnthropic, convert_to_anthropic_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
 from pydantic import ValidationError
 
 from app.config import (
@@ -27,12 +29,19 @@ from app.config import (
     AGENT_SA_EMAIL,
     BIGQUERY_PRICE_PER_TIB,
     CHART_URL_EXPIRATION_HOURS,
+    CONTEXT_DIR,
     DAX_ROW_CAP,
     DAX_TIMEOUT_SECONDS,
     GCP_PROJECT_ID,
     GCS_CHART_BUCKET,
+    GITHUB_REPO_BRANCH,
+    GITHUB_REPO_NAME,
+    GITHUB_REPO_OWNER,
+    LANGCHAIN_PROJECT,
+    LANGSMITH_TRACING,
     MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
+    MAX_CLAIM_PRECISION,
     MAX_ITERATIONS,
     MAX_LENGTH_RETRIES,
     MAX_VERIFY_RETRIES,
@@ -45,8 +54,8 @@ from app.config import (
     get_secret,
 )
 from app.orchestrator.context import get_static_context
-from app.orchestrator.models import AgentResponse
 from app.orchestrator.power_bi_auth import get_power_bi_token
+from app.orchestrator.state import AgentState, ToolCallRecord, TurnError
 from app.orchestrator.tools import (
     GenerateChartToolCallArgs,
     SubmitAnswerArgs,
@@ -65,16 +74,29 @@ MCP_TOOLS: dict[str, BaseTool] = {}
 ALL_TOOLS: dict[str, BaseTool] = {}
 BIND_TOOLS_LIST: list[BaseTool] = []
 SYSTEM_MESSAGE: SystemMessage | None = None
+FILE_DESCRIPTIONS: dict[str, str] = {}
+
+# The only two tools whose results are ever real queried data, not incidental
+# numbers in code, doc chunks, or metadata -- used by verify_node's
+# build_numeric_pool. Kept at the top, not buried near its one call site, so
+# adding a future numeric-returning tool is a one-line, easy-to-find update.
+NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
 
 
 async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
-    """Populates MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE. Idempotent."""
-    global MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE
+    """Populates MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE,
+    FILE_DESCRIPTIONS. Idempotent."""
+    global MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE, FILE_DESCRIPTIONS
     if MCP_TOOLS and ALL_TOOLS and SYSTEM_MESSAGE:
         return
-    
-    # Get API Key
+
+    # Set API Key and Tracing Environment Variables
     os.environ["ANTHROPIC_API_KEY"] = get_secret("anthropic-api-key", GCP_PROJECT_ID)
+    os.environ["LANGSMITH_TRACING"] = LANGSMITH_TRACING
+    os.environ["LANGSMITH_API_KEY"] = get_secret("langsmith-api-key", GCP_PROJECT_ID)
+    os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
+    FILE_DESCRIPTIONS = json.loads(
+        (CONTEXT_DIR / "file_descriptions" / "github_file_descriptions.json").read_text())
     client = MultiServerMCPClient({
         MCP_SERVER_NAME: {"transport": "streamable_http", "url": mcp_server_url,
                            "headers": MCP_SERVER_HEADERS},
@@ -97,150 +119,6 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
     BIND_TOOLS_LIST = [generate_chart_tool if name == "generate_chart" else t
                        for name, t in ALL_TOOLS.items()]
     SYSTEM_MESSAGE = SystemMessage(content=get_static_context())
-
-
-# --- State & reducers --------------------------------------------------
-
-class ToolCallRecord(TypedDict):
-    id: str
-    name: str
-    args: dict
-    query_text: str | None  # args["query"] or args["dax"] -- SQL/DAX only, else None
-    result: Any  # shape depends on the tool
-    success: bool
-    error: str | None
-    ref_id: str | None  # set only for a chartable tool's successful result
-    started_at: datetime
-    completed_at: datetime
-
-
-class TurnError(TypedDict):
-    stage: str
-    error_type: str
-    message: str
-    occurred_at: datetime
-    tool_call_id: str | None  # matches ToolCallRecord.id
-
-
-def append_list(existing: list, new: list) -> list:
-    """Accumulates a list across graph supersteps."""
-    return existing + new
-
-
-class AgentState(TypedDict):
-    # Set once, at invocation
-    question: str
-    conversation_id: str
-    user_id: str
-    turn_started_at: datetime
-    filter_context: list[dict]
-    active_page: str | None
-    image_base64: str | None
-    history_messages: list[BaseMessage]  # conversation history
-
-    # Accumulated during the tool loop
-    messages: Annotated[list[BaseMessage], add_messages]
-    tool_calls: Annotated[list[ToolCallRecord], append_list]
-    iteration_count: int
-
-    # Separate retry budgets
-    verification_retry_count: int
-    length_retry_count: int
-
-    verified: bool
-
-    # Resource accumulators
-    bytes_consumed: int
-    prompt_tokens: int
-    completion_tokens: int
-    llm_calls: int
-
-    errors: Annotated[list[TurnError], append_list]
-    cancelled: bool
-
-    # Guardrail outcomes
-    needs_approval: bool
-    pending_queries: list[dict]
-    deferred_dax: list[dict]
-    estimated_cost: str | None
-    cost_cap_exceeded: bool
-    iteration_cap_hit: bool
-    answer_submitted: bool  # True only when submit_answer was the sole tool
-
-    # Building toward AgentResponse
-    answer_markdown: str
-    chart_urls: Annotated[list[str], append_list]
-    sources: list[str]
-    all_prose_numeric_claims: list[float]  # llm provided numeric claims in prose
-    suggested_follow_ups: list[str]
-
-
-# --- Entry/exit: called by the gateway, not the graph -------------
-
-def build_human_message(question: str, filter_context: list[dict], active_page: str | None) -> HumanMessage:
-    """The turn's initial HumanMessage -- question plus dashboard grounding."""
-    content = question
-    if active_page:
-        content += f"\n\nCurrent dashboard page: {active_page}"
-    if filter_context:
-        content += f"\n\nCurrent filter state: {filter_context}"
-    return HumanMessage(content=content)
-
-
-def build_initial_state(
-    question: str, conversation_id: str, user_id: str,
-    filter_context: list[dict], active_page: str | None, image_base64: str | None,
-) -> AgentState:
-    """Initializes every AgentState field for a fresh turn."""
-    return AgentState(
-        question=question,
-        conversation_id=conversation_id,
-        user_id=user_id,
-        turn_started_at=datetime.now(timezone.utc),
-        filter_context=filter_context,
-        active_page=active_page,
-        image_base64=image_base64,
-        history_messages=[],
-        messages=[build_human_message(question, filter_context, active_page)],
-        tool_calls=[],
-        iteration_count=0,
-        verification_retry_count=0,
-        length_retry_count=0,
-        verified=False,
-        bytes_consumed=0,
-        prompt_tokens=0,
-        completion_tokens=0,
-        llm_calls=0,
-        errors=[],
-        cancelled=False,
-        needs_approval=False,
-        pending_queries=[],
-        deferred_dax=[],
-        estimated_cost=None,
-        cost_cap_exceeded=False,
-        iteration_cap_hit=False,
-        answer_submitted=False,
-        answer_markdown="",
-        chart_urls=[],
-        sources=[],
-        all_prose_numeric_claims=[],
-        suggested_follow_ups=[],
-    )
-
-
-def build_agent_response(state: AgentState) -> AgentResponse:
-    """Converts the graph's final state into the gateway's wire format."""
-    return AgentResponse(
-        answer_markdown=state["answer_markdown"],
-        sources=state["sources"],
-        needs_approval=state["needs_approval"],
-        chart_urls=state["chart_urls"],
-        suggested_follow_ups=state["suggested_follow_ups"],
-        iteration_cap_hit=state["iteration_cap_hit"],
-        pending_query=state["pending_queries"][-1]["query"] if state["pending_queries"] else None,
-        estimated_cost=state["estimated_cost"],
-        cost_cap_exceeded=state["cost_cap_exceeded"],
-    )
 
 
 # --- Helper functions ----------------------------------------------------
@@ -269,6 +147,24 @@ def inject_dax_args(tc: dict) -> dict:
             "dataset_id": POWER_BI_DATASET_ID,
             "row_cap": DAX_ROW_CAP,
             "timeout_seconds": DAX_TIMEOUT_SECONDS,
+        },
+    }
+
+
+def inject_code_search_args(tc: dict) -> dict:
+    """Adds GitHub identity/connection values and this project's curated
+    file descriptions to a get_repo_contents call -- excluded from the
+    model's schema (exclude_args). A different deployer supplies their own
+    file_descriptions for their own repo instead."""
+    return {
+        **tc,
+        "args": {
+            **tc["args"],
+            "owner": GITHUB_REPO_OWNER,
+            "repo": GITHUB_REPO_NAME,
+            "branch": GITHUB_REPO_BRANCH,
+            "access_token": get_secret("github-read-token", GCP_PROJECT_ID),
+            "file_descriptions": FILE_DESCRIPTIONS,
         },
     }
 
@@ -431,6 +327,8 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord]) 
             name=tc["name"], tool_call_id=tc["id"], status="error")
     if tc["name"] == "run_dax_query":
         return await ALL_TOOLS[tc["name"]].ainvoke(inject_dax_args(tc))
+    if tc["name"] == "get_repo_contents":
+        return await ALL_TOOLS[tc["name"]].ainvoke(inject_code_search_args(tc))
     if tc["name"] == "generate_chart":
         try:
             resolved = resolve_chart_data(tc, prior_tool_calls)
@@ -496,8 +394,8 @@ def check_table_rows(answer_markdown: str) -> bool:
 
 
 # verify_node: pooled numeric-claim verification
-
-NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
+# NUMERIC_SOURCE_TOOLS is defined near the top of the file, with the other
+# module-level constants.
 
 
 def extract_numeric_values(data: list[dict] | str) -> list[float]:
@@ -565,13 +463,21 @@ def _decimal_places(value: float) -> int:
 
 
 def claim_matches_pool(claim: float, pool: set[float]) -> bool:
-    """True if claim is a legitimately-rounded or percentage-scaled
-    representation of some tool result, not just numerically close to one."""
-    precision = _decimal_places(claim)
-    return any(
-        round(v, precision) == claim or round(v * 100, precision) == claim
-        for v in pool
-    )
+    """True if claim matches some pool value, or its *100 percentage-scaled
+    form, once both are rounded to the claim's own decimal precision
+    (capped at MAX_CLAIM_PRECISION), or once both are truncated to it
+    instead -- covers a model that truncates rather than rounds when
+    reproducing a long float."""
+    precision = min(_decimal_places(claim), MAX_CLAIM_PRECISION)
+    factor = 10 ** precision
+    claim_rounded = round(claim, precision)
+    claim_truncated = math.floor(claim * factor) / factor # Truncation to precision
+
+    def _matches(v: float) -> bool:
+        return (round(v, precision) == claim_rounded
+                or math.floor(v * factor) / factor == claim_truncated)
+
+    return any(_matches(v) or _matches(v * 100) for v in pool)
 
 
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
@@ -586,8 +492,7 @@ SOURCE_LABELS = {
     "run_dax_query":    "Query dashboard",
     "get_measure_dax":  "Measure Lookup",
     "get_page_info":    "PBI page info",
-    "list_repo_files":  "list code",
-    "read_repo_file":   "Read code",
+    "get_repo_contents": "Read code",
     "search_docs":      "Doc Search",
     "generate_chart":   "Create chart",
 }
@@ -659,10 +564,14 @@ async def call_tool_node(state: AgentState) -> dict:
     batch_bytes = 0
     estimates: list[int] = []
     cost_cap_exceeded = False
+    dry_run_error: str | None = None
     if bq_calls:
-        estimates = await asyncio.gather(*[dry_run(tc["args"]["query"]) for tc in bq_calls])
-        batch_bytes = sum(estimates)
-        cost_cap_exceeded = exceeds_absolute_cap(state["bytes_consumed"], batch_bytes)
+        try:
+            estimates = await asyncio.gather(*[dry_run(tc["args"]["query"]) for tc in bq_calls])
+            batch_bytes = sum(estimates)
+            cost_cap_exceeded = exceeds_absolute_cap(state["bytes_consumed"], batch_bytes)
+        except ToolError as e:
+            dry_run_error = str(e)
 
     other_started_at = datetime.now(timezone.utc)
     other_messages = await asyncio.gather(*[
@@ -671,7 +580,19 @@ async def call_tool_node(state: AgentState) -> dict:
     other_completed_at = datetime.now(timezone.utc)
 
     bq_started_at = datetime.now(timezone.utc)
-    if cost_cap_exceeded:
+    if dry_run_error is not None:
+        bq_messages = [
+            ToolMessage(
+                content=(
+                    f"Not executed -- a query in this batch failed to price (dry-run): "
+                    f"{dry_run_error} All run_bigquery_sql calls in the same round are "
+                    "declined together when this happens, so this error may describe a "
+                    "different query than this one. Check each query in the batch, fix "
+                    "the one it describes, and retry."),
+                name=tc["name"], tool_call_id=tc["id"], status="error")
+            for tc in bq_calls
+        ]
+    elif cost_cap_exceeded:
         bq_messages = [
             ToolMessage(
                 content=(
@@ -687,7 +608,12 @@ async def call_tool_node(state: AgentState) -> dict:
     bq_completed_at = datetime.now(timezone.utc)
 
     ref_counter = sum(1 for r in state["tool_calls"] if r.get("ref_id")) + 1
-    bq_error_type = "cost_cap_exceeded" if cost_cap_exceeded else "tool_error"
+    if dry_run_error is not None:
+        bq_error_type = "dry_run_failed"
+    elif cost_cap_exceeded:
+        bq_error_type = "cost_cap_exceeded"
+    else:
+        bq_error_type = "tool_error"
 
     bq_batch = ToolBatch(bq_calls, bq_messages, bq_started_at, bq_completed_at, bq_error_type)
     bq_result = build_tool_call_records_and_messages(bq_batch, ref_counter)

@@ -39,15 +39,22 @@ VECTOR_SEARCH_SA_EMAIL = "vector-search-sa@instacart-ml-model.iam.gserviceaccoun
 SEARCH_DOCS_TOP_K_DEFAULT = 5
 SEARCH_DOCS_MAX_TOP_K = 20
 
+# GitHub (get_repo_contents, MCP-hosted)
+GITHUB_REPO_OWNER = "Jason-Handerhan"
+GITHUB_REPO_NAME = "Kaggle-Instacart-Reorder-Engine-Portfolio-Project"
+GITHUB_REPO_BRANCH = "main"
+MAX_REPO_FILE_CONTENT_CHARS = 300_000  # final cap on returned text, after any stripping
+
 # Conversation history
-HISTORY_TURN_COUNT = 5    # sessions.recent_messages FIFO length
-HISTORY_ROW_CAP = 100     # rows kept per stored tool result
+HISTORY_TURN_COUNT = 5    # sessions.history_messages FIFO length
 
 # Orchestrator loop guardrail settings
 MAX_ANSWER_CHARS = 6000
 MAX_ANSWER_TABLE_ROWS = 25  # cap on any single markdown table in an answer -- a display limit, not a fetch limit
 MAX_LENGTH_RETRIES = 2
 MAX_VERIFY_RETRIES = 3
+MAX_CLAIM_PRECISION = 5  # decimals past this are float-reproduction noise,
+                          # not a real mismatch -- claim_matches_pool caps to it
 BIGQUERY_TIMEOUT_SECONDS = 40
 BIGQUERY_ROW_CAP = 1000  # cap on rows fetched -- LIMIT doesn't reduce bytes scanned
 DAX_ROW_CAP = BIGQUERY_ROW_CAP  # same constraint as BigQuery's cap, not platform-specific
@@ -72,7 +79,7 @@ ABSOLUTE_CAP = 3 * 1024 ** 3  # 3 GiB -- turn-cumulative cap, hard-declines furt
 
 # LangSmith tracing
 LANGSMITH_TRACING = "true"
-LANGCHAIN_CALLBACKS_BACKGROUND = "false"
+LANGCHAIN_PROJECT = "analytics-agent"
 
 
 def get_secret(secret_id: str, project_id: str, version: str = "latest") -> str:

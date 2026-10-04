@@ -118,6 +118,7 @@ that area, rather than reconstructing the design from memory:
 | `docs/testing.md` | Writing any test, or deciding if something is testable |
 | `docs/data-pipeline.md` | All three pipelines: `agent_safe`, the model-schema artifact, the docs vector index |
 | `docs/chart-tool.md` | Anything touching `generate_chart` or chart specs |
+| `docs/combine-tool.md` | Anything touching `combine_results` or its stack/join contract |
 | `docs/code-search.md` | The GitHub code tools — why agentic, not vector |
 | `docs/approval-workflow.md` | Cost tiers, the approval pause, `/ask/respond` |
 | `docs/auth.md` | Any identity boundary — the request-time chain, connector OAuth, service accounts |
@@ -209,14 +210,14 @@ gcloud run deploy analytics-gateway \
 **No `--set-env-vars`, no `--set-secrets`.** Every non-secret config value
 (`GCP_PROJECT_ID`, `TENANT_ID`, `EXPECTED_AUDIENCE`, `GCS_CHART_BUCKET`,
 `POWER_BI_DATASET_ID`, `POWER_BI_WORKSPACE_ID`, `LANGSMITH_TRACING`,
-`LANGCHAIN_CALLBACKS_BACKGROUND`) is a **hardcoded literal in
+`LANGCHAIN_PROJECT`) is a **hardcoded literal in
 `app/config.py`**, not read from an env var — confirmed live (2026-09-16),
 this deploy command. `LANGSMITH_API_KEY` is fetched via `get_secret()` at
 startup exactly like every other secret — no Cloud-Run-native secret
 mounting needed for it specifically. One remaining wrinkle: the LangSmith SDK
-itself only reads its three settings off `os.environ`, so app startup pushes
-them there once, before any LangChain/LangGraph import
-(`local-dev-environment-setup.md` Step 17).
+itself only reads its settings off `os.environ`, so `init_orchestrator()`
+pushes them there once, before the first LLM call
+(`.claude/rules/orchestrator.md`'s "LangSmith tracing" section).
 
 **Deployed gateway URL:** `https://analytics-gateway-551802026956.us-central1.run.app`
 — not app config, `config.py` has no reason to know its own address; this is

@@ -8,3 +8,4 @@ mcp = FastMCP(MCP_SERVER_NAME)
 # registers the tools.
 from app.mcp_server import dax_tool
 from app.mcp_server import chart_tool
+from app.mcp_server import code_search

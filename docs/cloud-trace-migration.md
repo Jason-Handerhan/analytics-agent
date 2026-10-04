@@ -72,7 +72,7 @@ Confirmed independently, not taken on faith:
    LangChainInstrumentor().instrument(tracer_provider=provider)
    ```
 5. Drop `langsmith-api-key` from Secret Manager; remove
-   `LANGSMITH_TRACING`/`LANGCHAIN_CALLBACKS_BACKGROUND` from `app/config.py`.
+   `LANGSMITH_TRACING`/`LANGCHAIN_PROJECT` from `app/config.py`.
 6. Update component reference §3 to reflect the closed trade-off.
 
 ## What doesn't change

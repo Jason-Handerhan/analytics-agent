@@ -127,6 +127,7 @@ class _FakeGraph:
 
     async def astream(self, initial_state, stream_mode=None):
         yield ("values", {
+            "messages": [],  # build_updated_history's write-back needs this key
             "answer_markdown": "There were 551,399 orders.",
             "sources": ["Query warehouse"],
             "needs_approval": False,

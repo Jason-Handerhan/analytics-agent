@@ -110,6 +110,8 @@ def test_caching_dispatch_matches_the_model(model, expects_marker):
 
 ## 3. Model schema build — fixture-driven assembly, real API calls stay Layer 2
 
+**File: `tests/test_model_schema_build.py`.**
+
 **Decided 2026-09-17:** the model schema is now built from live Power BI
 (`executeQueries` + the Scanner API), not TMDL parsing — `docs/data-pipeline.md`.
 `scripts/build_model_context.py` itself isn't rewritten to this design yet;
@@ -182,8 +184,8 @@ properly registered.
 @pytest.mark.parametrize("tool_name,args", [
     ("run_bigquery_sql", {...}), ("run_dax_query", {...}),
     ("get_measure_dax", {...}), ("search_docs", {...}),
-    ("get_page_info", {}), ("list_repo_files", {}),
-    ("read_repo_file", {...}), ("generate_chart", {...}),
+    ("get_page_info", {}), ("get_repo_contents", {...}),
+    ("generate_chart", {...}),
 ])
 async def test_tool_returns_a_sensible_result(tool_name, args):
     """Failures report per-case: test_tool_returns_a_sensible_result[run_dax_query]

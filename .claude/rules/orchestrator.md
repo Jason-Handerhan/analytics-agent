@@ -287,19 +287,30 @@ def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
     return pool
 
 def claim_matches_pool(claim: float, pool: set[float]) -> bool:
-    """True if claim is a legitimately-rounded or percentage-scaled
-    representation of some tool result, not just numerically close to one --
-    precision-aware, not a flat tolerance. Rounds each pool value to the
-    claim's own decimal precision (from its shortest string form) before
-    comparing for equality -- handles ordinary rounding (0.379987 -> 0.38)
-    and percentage-scaled display (a raw fraction shown as a percent)
-    without the false-accept risk a wider flat tolerance carries on large
-    numbers."""
-    precision = _decimal_places(claim)
-    return any(
-        round(v, precision) == claim or round(v * 100, precision) == claim
-        for v in pool
-    )
+    """True if claim matches some pool value, or its *100 percentage-scaled
+    form, once both are rounded to the claim's own decimal precision --
+    precision-aware, not a flat tolerance. Capped at MAX_CLAIM_PRECISION (5)
+    since a model reproducing a 15+ digit DAX/BigQuery float can round OR
+    truncate a trailing digit -- checked symmetrically (rounded-to-rounded,
+    truncated-to-truncated, never crossed) so it covers either direction
+    without the false-accept risk a wider flat tolerance, or comparing
+    mismatched round/truncate pairs, carries on large numbers. Confirmed
+    live (2026-10-02): a real DAX float with its last digit dropped by the
+    model was failing verification until this fix; an earlier floor/ceil-
+    against-a-single-rounded-claim version of this fix was then found to
+    admit a genuine false-accept (two values a full unit apart at the
+    target precision could match if each rounded toward the other's
+    opposite boundary) -- this symmetric version closes that gap."""
+    precision = min(_decimal_places(claim), MAX_CLAIM_PRECISION)
+    factor = 10 ** precision
+    claim_rounded = round(claim, precision)
+    claim_truncated = math.floor(claim * factor) / factor
+
+    def _matches(v: float) -> bool:
+        return (round(v, precision) == claim_rounded
+                or math.floor(v * factor) / factor == claim_truncated)
+
+    return any(_matches(v) or _matches(v * 100) for v in pool)
 
 def verify_response(state: AgentState) -> tuple[bool, str | None]:
     # 1. Shape check first -- catches "never called submit_answer" (answer_markdown
@@ -1320,19 +1331,32 @@ forced tool choice → *then* sub-agents. Decide from eval metrics, not feel.
 
 ## LangSmith tracing — local and deployed
 
-`LANGSMITH_TRACING`/`LANGSMITH_API_KEY` give a per-turn trace of the agent
-loop: every LLM call, tool call, and iteration, nested in order. **Not deploy
-flags** — `LANGSMITH_TRACING` and `LANGCHAIN_CALLBACKS_BACKGROUND` are
+`LANGSMITH_TRACING`/`LANGSMITH_API_KEY`/`LANGCHAIN_PROJECT` give a per-turn
+trace of the agent loop: every LLM call, tool call, and iteration, nested in
+order. **Not deploy flags** — `LANGSMITH_TRACING` and `LANGCHAIN_PROJECT` are
 literals in `app/config.py` (identical in every environment), and
 `LANGSMITH_API_KEY` is fetched via `get_secret()` at startup like every other
-secret. All three get pushed to `os.environ` once before any
-LangChain/LangGraph import, since the SDK only reads them from there
-(`CLAUDE.md` Commands section).
+secret. All three get pushed to `os.environ` inside `init_orchestrator()`
+(2026-10-02), the same place `ANTHROPIC_API_KEY` is set — confirmed this is
+early enough: nothing calls a LangChain tracing check before the first real
+LLM call, so it doesn't need to happen before `langchain_anthropic`/
+`langgraph` are *imported*, only before that first call. Once set, every
+`ainvoke()` auto-attaches a `LangChainTracer` — confirmed at the source level
+(`langchain_core.callbacks.manager._configure`) — no explicit callback wiring
+needed anywhere else.
 
-**`LANGCHAIN_CALLBACKS_BACKGROUND=false` is required wherever it's deployed.**
-Trace uploads go through a background callback by default; Cloud Run freezes
-CPU the instant the response is sent, so the upload is lost — the same trap
-already solved for telemetry writes.
+**No flush call on turn end, deliberately.** Trace uploads go through a
+background thread by default, and Cloud Run throttles CPU to near-zero the
+instant a response is sent — the same trap already solved for telemetry
+writes, confirmed via independent sources, not just this project's own
+assumption. `langchain_core.tracers.langchain.wait_for_all_tracers()` is the
+real mechanism to force a synchronous flush (**not** an env var —
+`LANGCHAIN_CALLBACKS_BACKGROUND`, documented here until 2026-10-02, does not
+exist anywhere in the installed SDK; confirmed by source search, not
+assumed). Decided not to call it: traces are a debugging aid, not something
+the judge/golden-dataset pipeline depends on (`agent_telemetry` is the real
+record), so an occasional dropped trace is an accepted risk, not worth the
+added complexity.
 
 **Separate from `agent_telemetry`, not a replacement**
 (`.claude/rules/telemetry.md`). Traces are a per-turn debugging view; the

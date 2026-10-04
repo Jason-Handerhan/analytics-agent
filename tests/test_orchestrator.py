@@ -6,11 +6,8 @@ from datetime import datetime
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.config import MAX_ANSWER_TABLE_ROWS, MAX_LENGTH_RETRIES, MAX_VERIFY_RETRIES
+from app.gateway.entry_exit import build_agent_response, build_human_message, build_initial_state
 from app.orchestrator.orchestrator import (
-    AgentState,
-    build_agent_response,
-    build_human_message,
-    build_initial_state,
     check_table_rows,
     extract_table_values,
     iteration_cap_update,
@@ -20,6 +17,7 @@ from app.orchestrator.orchestrator import (
     route_after_verify,
     verify_response,
 )
+from app.orchestrator.state import AgentState
 
 
 # Entry/exit helpers
@@ -48,6 +46,7 @@ def test_build_initial_state():
         filter_context=[{"filter_column": "department", "value": "produce"}],
         active_page="Financial Impact",
         image_base64=None,
+        history_messages=[],
     )
 
     # Every AgentState key present, nothing extra, nothing missing

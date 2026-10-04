@@ -24,16 +24,22 @@ enough to sit in static context (`.claude/rules/gateway.md`).
 ## The two tools
 
 ```python
-FILE_DESCRIPTIONS = {                      # hand-written, this repo
+# file_descriptions is an injected arg (hand-written, this repo), not a
+# hardcoded constant -- a different deployer supplies their own for their
+# own repo (.claude/rules/tools.md's hidden-args pattern).
+file_descriptions = {
     "utils/data_prep.py": "Train/test split, cleaning, feature engineering",
     "utils/metrics.py":   "Evaluation metrics: precision, recall, F1, AUC",
-    # partial coverage is fine — paths without an entry still get returned
 }
 
-def list_repo_files() -> list[dict]:
-    """One Trees API call. Returns every path; description where we have one."""
+def list_repo_files(file_descriptions: dict[str, str]) -> list[dict]:
+    """One Trees API call. Filters to described paths only, when any are
+    known -- unfiltered otherwise, so a deployer with no descriptions yet
+    still gets a usable listing instead of an empty one."""
     paths = _github_tree()                 # GET /repos/{o}/{r}/git/trees/{sha}?recursive=1
-    return [{"path": p, "description": FILE_DESCRIPTIONS.get(p)} for p in paths]
+    if file_descriptions:
+        paths = [p for p in paths if p in file_descriptions]
+    return [{"path": p, "description": file_descriptions.get(p)} for p in paths]
 
 def read_repo_file(path: str) -> str:
     """One Contents API call."""
@@ -66,11 +72,19 @@ token is for the rate limit, not access.
 
 ## Descriptions live in the tool, not static context
 
-`FILE_DESCRIPTIONS` is returned by `list_repo_files`, **not** added to the
+Descriptions are returned by `list_repo_files`, **not** added to the
 always-injected orientation bundle. Static context is paid on *every* turn,
 including DAX and BigQuery questions that never touch code. Returning it from
 the tool means only code-exploration turns pay for it — same conditional-cost
 principle as the DLP check and the approval pause.
+
+**Injected, not baked into the tool itself** (confirmed real, 2026-10-03):
+the tool is MCP-hosted specifically to be reusable by someone else's
+deployment, so it can't hardcode *this* project's own descriptions file.
+`file_descriptions` is a hidden arg, same treatment as `owner`/`repo`/
+`branch`/`access_token` — this project's orchestrator loads its own
+`github_file_descriptions.json` once at startup and injects it; a different
+deployer injects their own, or none at all (unfiltered listing, not broken).
 
 **Manually maintained**, like the HTML-measure exclusion list. A new file in
 the ML repo appears with no description until the dict is updated. Fine for a

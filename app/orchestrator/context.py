@@ -15,7 +15,7 @@ from functools import lru_cache
 from google.cloud import bigquery
 
 from app.config import (
-    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, HISTORY_ROW_CAP, MODEL,
+    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, MODEL,
 )
 from app.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_REGISTRY
 
@@ -169,26 +169,18 @@ BigQuery answers upstream/warehouse questions -- raw order and product features,
 
 run_dax_query results are capped at {DAX_ROW_CAP} rows -- prefer TOPN or a tighter filter over a query likely to return more.
 
-Tools that search or render (search_docs, get_page_info, generate_chart) are never a source of a number themselves. Same for an uploaded screenshot, when present -- it's layout and attention context only.
-
 GROUNDING
-Every number in an answer -- prose or table cell -- must come from a live run_bigquery_sql or run_dax_query call made this turn; each one is checked against this turn's tool results after you submit, whether or not it's in all_prose_numeric_claims. Never state a number from memory, background material, or your own arithmetic.
-
-If you need a value you'd otherwise compute by hand -- a rank, percentage change, difference, ratio, average -- you have two options: add it to the query (RANKX/ROW_NUMBER, a calculated DAX measure, a SQL expression) and re-run it before calling submit_answer, or leave it out of the table/prose entirely and describe the pattern in words instead. Never collapse several exact values into one approximate number either -- in prose (e.g. don't write "roughly 65-67%" for three different figures) or in a table (don't add a row averaging several departments together) -- state each specific value, or describe the pattern with no number at all.
-
 There is no live source for future data, only current and historical figures. Decline requests for forecasts or projections rather than generating one.
 
 Table and measure names come from the registries in this prompt, which are a complete enumeration, not a partial index -- never invent a plausible-looking name.
 
-When composing DAX, reference an existing measure by name rather than reconstructing its logic -- only write new calculation logic when no existing measure covers the question.
-
 filter_context and active_page describe what the user is currently looking at and are authoritative -- incorporate them into a DAX query rather than answering against the model's default, unfiltered state. Field parameters (which evaluation metric or ensemble combination is currently displayed) cannot be captured this way and are structurally unknowable -- don't guess or imply you know which one is selected.
 
 CONVERSATION HISTORY
-Prior turns' tool calls and their results are part of this conversation, exactly as they ran -- adapt a working query for a related follow-up rather than re-deriving one from scratch. Their results are historical, not a source for this turn's answer -- every number you state still needs its own live call this turn, even one that looks identical to what's shown there. Results in that history are truncated to the first {HISTORY_ROW_CAP} rows, so a fresh call this turn may correctly return a different count -- that's expected, not an error.
+Prior turns' tool calls are part of this conversation, exactly as they ran -- adapt a working query or approach for a related follow-up, but first check it actually fits this question's semantics; a structurally similar prior query can still answer something different. Every prior turn's tool results (except submit_answer's) are replaced with a removal notice in history ("Result removed..."). Any tool result (excluding submit_answer) without this message is from the current turn. A prior turn's submit_answer call's numbers are visible, but aren't a live source. Do not use them. Use your tools to re-run instead.
 
 RESPONDING
-You must call submit_answer to respond -- never plain text. See its own field descriptions for exact formatting requirements (table size and remediation, chart inclusion, table escaping, suggested follow-ups) and when a partial answer is appropriate."""
+You must call submit_answer to respond -- never plain text. The user will not recieve your answer otherwise and the loop will continue."""
 
 
 def build_static_context(model: str, static_text: str) -> list[dict] | str:

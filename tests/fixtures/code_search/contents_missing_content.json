@@ -1,0 +1,13 @@
+{
+  "name": "big_notebook.ipynb",
+  "path": "notebooks/big_notebook.ipynb",
+  "sha": "x6",
+  "size": 3596734,
+  "url": "https://api.github.com/repos/owner/repo/contents/notebooks/big_notebook.ipynb",
+  "html_url": "https://github.com/owner/repo/blob/main/notebooks/big_notebook.ipynb",
+  "git_url": "https://api.github.com/repos/owner/repo/git/blobs/x6",
+  "download_url": "https://raw.githubusercontent.com/owner/repo/main/notebooks/big_notebook.ipynb",
+  "type": "file",
+  "content": "",
+  "encoding": "none"
+}
