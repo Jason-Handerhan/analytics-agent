@@ -5,6 +5,7 @@ paths:
   - 'app/model_schema.py'
   - 'tests/test_tools.py'
   - 'tests/test_chart_tool.py'
+  - 'tests/test_combine_tool.py'
   - 'tests/test_guardrails.py'
 ---
 
@@ -12,6 +13,7 @@ paths:
 
 > **Deep dives:** `docs/chart-tool.md` before touching `chart_tool.py` — it
 > has the full spec hierarchy, all 10 chart types, and the styling contract.
+> `docs/combine-tool.md` before touching `combine_tool.py` or its stand-in.
 > `docs/data-pipeline.md` for how `agent_safe` and the vector index are built.
 > `docs/data-pipeline.md` for the access-boundary reasoning.
 
@@ -28,6 +30,7 @@ instance of this, not five independent rules.
 | `run_dax_query` | Yes |
 | `list_repo_files`, `read_repo_file` | Yes |
 | `generate_chart` | Yes |
+| `combine_results` | Yes (stand-in schema bound to the model; `docs/combine-tool.md`) |
 | `run_bigquery_sql` | **No** — a plain function in the orchestrator |
 | `submit_answer` | **No** — a plain function in the orchestrator |
 | `get_measure_dax` | **No** — a plain function in the orchestrator |
@@ -191,13 +194,14 @@ later changes the URL and adds auth headers — not this file.
 | `list_repo_files` | Paths + descriptions for the ML repo (Trees API, one call) | Entry point for any code question |
 | `read_repo_file` | One file's contents from the ML repo (Contents API) | Authoritative for implementation detail |
 | `generate_chart` | Visualization | Renders already-fetched data; **never** a number source |
+| `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at
 all, see below. `submit_answer` isn't either — it's not a number *source*,
 it's how the model delivers the answer built from everything above; see its
 own section below.
 
-**Eight tools, one vector store** — deliberately not 1:1:
+**Nine tools, one vector store** — deliberately not 1:1:
 
 - **Code search is agentic (list + read), not vector search.** Embeddings
   flatten the structural relationships — imports, call graphs — that code
@@ -277,9 +281,12 @@ not duplicated here.
 
 - **Dry-run first, then three tiers by BYTES scanned** — not two. Evaluated
   in `call_tool_node` on the **summed batch**, not per call. Under
-  `BIG_QUERY_THRESHOLD` runs automatically; over it routes to approval; at or
-  over the **absolute cap** (the turn's cumulative `bytes_consumed`) hard-declines
-  with `cost_cap_exceeded` and offers no approval at all. Full logic in
+  `PENDING_APPROVAL_THRESHOLD` runs automatically (unless the query uses
+  `TABLESAMPLE`, which always routes to approval regardless of the estimate
+  — its dry-run bytes have repeatedly underestimated actual billed bytes);
+  over the threshold also routes to approval; at or over the **absolute
+  cap** (the turn's cumulative `bytes_consumed`) hard-declines with
+  `cost_cap_exceeded` and offers no approval at all. Full logic in
   `docs/approval-workflow.md`; `maximum_bytes_billed` stays set as the
   engine-level fail-safe underneath all of it.
 - On the approval path, the generated SQL becomes `pending_query` and the
@@ -359,9 +366,8 @@ def _check_unclosed_fence(markdown: str) -> bool:
 
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
-        min_length=1,  # non-empty is what flags a never-submitted answer --
-                       # verify_node's model_validate
-        description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
+        default="",
+        description=f"Plain Markdown. Empty only when clarifying_question is set. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
                     "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
                     "or use generate_chart instead. Escape a literal | inside a table cell as \\| or "
                     "it's read as an extra column and breaks the table. Never state a hand-rolled "
@@ -389,7 +395,13 @@ class SubmitAnswerArgs(BaseModel):
         default=[],
         description="1-3 short, natural follow-up questions -- include these by default, since "
                     "they help the user continue the conversation. Leave empty only when nothing "
-                    "natural genuinely fits.")
+                    "natural genuinely fits or clarifying_question is set.")
+    clarifying_question: str = Field(
+        default="",
+        description="Set this INSTEAD of answer_markdown, and leave answer_markdown empty, only when "
+                    "the request is genuinely ambiguous and a wrong guess would mislead the user. Ask "
+                    "one short question naming the specific choice. Otherwise answer -- do not ask "
+                    "about anything a reasonable default covers.")
 
     @field_validator("answer_markdown")
     def _unescape_newlines(cls, value: str) -> str:
@@ -420,10 +432,24 @@ class SubmitAnswerArgs(BaseModel):
             raise ValueError("A ``` code fence was opened but never closed.")
         return value
 
+    @model_validator(mode="after")
+    def _exactly_one_of_answer_or_question(self) -> "SubmitAnswerArgs":
+        """Requires exactly one of answer_markdown or clarifying_question."""
+        has_answer = bool(self.answer_markdown.strip())
+        has_question = bool(self.clarifying_question.strip())
+        if has_answer and has_question:
+            raise ValueError("Set only one of answer_markdown or clarifying_question, not both.")
+        if not (has_answer or has_question):
+            raise ValueError(
+                "Set exactly one of answer_markdown (your final answer) or clarifying_question "
+                "(one question for the user, only when the request is genuinely ambiguous).")
+        return self
+
 @tool(args_schema=SubmitAnswerArgs)
 async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
-                         suggested_follow_ups: list[str]) -> str:
-    """Call this with your final answer once you have everything you need.
+                         suggested_follow_ups: list[str], clarifying_question: str = "") -> str:
+    """Call this with your final answer once you have everything you need or
+    with a clarifying question when the request is genuinely ambiguous.
     This is how you respond to the user -- a plain-text reply will not be
     delivered and the turn will be asked to retry. If you can't fully
     answer within a reasonable number of steps, submit the best partial
@@ -438,6 +464,16 @@ async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[flo
     """
     return "Answer recorded."
 ```
+
+**Clarifying question.** `clarifying_question` is the second way to end a
+turn, and exactly one of it or `answer_markdown` must be set (the model
+validator enforces this). A question turn is normalized in `call_tool_node`
+(`.claude/rules/orchestrator.md`): the question is copied into
+`answer_markdown`, so the length check, verification, and `finalize` run
+unchanged, and `suggested_follow_ups` is cleared. No marker goes on
+`AgentResponse` -- the UI renders the text, and the user replies with a
+normal `POST /ask`. The field is in the schema either way, so it costs the
+model nothing on an ordinary answer, which just leaves it empty.
 
 **No forced tool choice, and that's a real constraint to design around, not
 an oversight.** `agent_node` can't set `tool_choice` to force `submit_answer`

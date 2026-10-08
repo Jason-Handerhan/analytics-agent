@@ -12,7 +12,7 @@ from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 from langchain_core.tools import tool, ToolException
 import mistune
-from pydantic import BaseModel, Field, create_model, field_validator
+from pydantic import BaseModel, Field, create_model, field_validator, model_validator
 
 from app.config import (
     BIGQUERY_ROW_CAP,
@@ -52,8 +52,8 @@ class BigQuerySqlArgs(BaseModel):
                                     "LIMIT, which doesn't reduce bytes scanned.")
 
 
-@tool(args_schema=BigQuerySqlArgs)
-async def run_bigquery_sql(query: str) -> list[dict]:
+@tool(args_schema=BigQuerySqlArgs, response_format="content_and_artifact")
+async def run_bigquery_sql(query: str) -> tuple[list[dict], dict]:
     """Runs a SQL query against agent_safe (BigQuery) -- upstream/warehouse data:
     raw order and product features, pre-model. The only dataset this can reach
     (IAM-scoped).
@@ -64,12 +64,10 @@ async def run_bigquery_sql(query: str) -> list[dict]:
     """
 
     # bigquery.Client.query() is synchronous, run it in a thread to avoid blocking the event loop.
-    def _run() -> list[dict]:
+    def _run() -> tuple[list[dict], dict]:
         job_config = bigquery.QueryJobConfig(maximum_bytes_billed=MAX_BYTES_BILLED)
         job = get_bq_client().query(query, job_config=job_config)
         try:
-            # ONE call -- max_results here, not a second .result() call, which
-            # would re-fetch from scratch and defeat the cap.
             rows = job.result(timeout=BIGQUERY_TIMEOUT_SECONDS, max_results=BIGQUERY_ROW_CAP)
         except concurrent.futures.TimeoutError:
             get_bq_client().cancel_job(job.job_id)
@@ -86,18 +84,13 @@ async def run_bigquery_sql(query: str) -> list[dict]:
             # Any other BigQuery-side failure (bad SQL, etc.)
             raise ToolError(f"BigQuery error: {e}")
 
-        # total_rows is the query's true total, unaffected by max_results --
-        # fail loudly rather than silently hand back a partial result.
+        #Row Cap Gaurdrail
         if rows.total_rows > BIGQUERY_ROW_CAP:
             raise ToolError(
                 f"Query returned {BIGQUERY_ROW_CAP}+ rows. Add a filter or "
                 "aggregate to narrow it.")
 
-        #Future insurance gaurd if date, time, or Decimal types are returned in the rows. Convert them to JSON-serializable types.
-        #As written, build_tool_call_record() fails loudly if it encounters a non-serializable type.
-        #This is intentional to ensure inconsistent, hard to work with, formats don't sneak through
-        # to Tool_Call_Record.result in telemetry
-
+        #Future insurance gaurd if date, time, or Decimal types are returned in the rows
         def _convert(v):
             if isinstance(v, Decimal):
                 return float(v)
@@ -105,10 +98,11 @@ async def run_bigquery_sql(query: str) -> list[dict]:
                 return v.isoformat()
             return v
 
-        return [
+        result_rows = [
             {k: _convert(v) for k, v in dict(row).items()}
             for row in rows
         ]
+        return result_rows, {"bytes_billed": job.total_bytes_billed}
     return await asyncio.to_thread(_run)
 
 #Ensures that ToolError exceptions raised in run_bigquery_sql() are converted to a ToolMessage.
@@ -155,8 +149,8 @@ def _check_unclosed_fence(markdown: str) -> bool:
 
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
-        min_length=1,
-        description=f"Plain Markdown. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
+        default="",
+        description=f"Plain Markdown. Empty only when clarifying_question is set. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
                     "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
                     "or use generate_chart instead. Escape a literal | inside a table cell as \\| or "
                     "it's read as an extra column and breaks the table. Never state a hand-rolled "
@@ -180,7 +174,15 @@ class SubmitAnswerArgs(BaseModel):
                     "any other tool -- it will fail verification.")
     suggested_follow_ups: list[str] = Field(
         default=[],
-        description="1-3 short, natural follow-up questions -- include these by default, since they help the user continue the conversation. Leave empty only when nothing natural genuinely fits.")
+        description="1-3 short, natural follow-up questions -- include these by default, "
+                    "since they help the user continue the conversation. Leave empty only when "
+                    "nothing natural genuinely fits or clarifying_question is set.")
+    clarifying_question: str = Field(
+        default="",
+        description="Set this INSTEAD of answer_markdown, and leave answer_markdown empty, only when "
+                    "the request is genuinely ambiguous and a wrong guess would mislead the user. Ask "
+                    "one short question naming the specific choice. Otherwise answer -- do not ask "
+                    "about anything a reasonable default covers.")
 
     @field_validator("answer_markdown")
     def _unescape_newlines(cls, value: str) -> str:
@@ -211,11 +213,25 @@ class SubmitAnswerArgs(BaseModel):
             raise ValueError("A ``` code fence was opened but never closed.")
         return value
 
+    @model_validator(mode="after")
+    def _exactly_one_of_answer_or_question(self) -> "SubmitAnswerArgs":
+        """Requires exactly one of answer_markdown or clarifying_question."""
+        has_answer = bool(self.answer_markdown.strip())
+        has_question = bool(self.clarifying_question.strip())
+        if has_answer and has_question:
+            raise ValueError("Set only one of answer_markdown or clarifying_question, not both.")
+        if not (has_answer or has_question):
+            raise ValueError(
+                "Set exactly one of answer_markdown (your final answer) or clarifying_question "
+                "(one question for the user, only when the request is genuinely ambiguous).")
+        return self
+
 
 @tool(args_schema=SubmitAnswerArgs)
-async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
-                         suggested_follow_ups: list[str]) -> str:
-    """Call this with your final answer once you have everything you need.
+async def submit_answer(answer_markdown: str = "", all_prose_numeric_claims: list[float] | None = None,
+                         suggested_follow_ups: list[str] | None = None, clarifying_question: str = "") -> str:
+    """Call this with your final answer once you have everything you need or
+    with a clarifying question when the request is genuinely ambiguous.
     This is how you respond to the user -- a plain-text reply will not be
     delivered and the turn will be asked to retry. If you can't fully
     answer within a reasonable number of steps, submit the best partial
@@ -368,4 +384,56 @@ async def chart_tool_call_standin(**kwargs) -> None:
     """
     raise NotImplementedError(
         "generate_chart's real MCP tool object handles dispatch -- this "
+        "stand-in exists only so bind_tools() advertises a different schema.")
+
+
+# --- combine_results (model-facing stand-in) -----------------------------------
+
+class CombineResultsToolCallArgs(BaseModel):
+    source_refs: list[str] = Field(
+        ...,
+        description="Reference ids of two or more earlier results to combine -- "
+                     "e.g. ['ref_1', 'ref_2']. Copy them exactly as shown; never "
+                     "invent one. For 'join', the first ref is the left table.")
+    method: Literal["stack", "join"] = Field(
+        ..., description="'stack' appends rows -- use when every input has the "
+                           "same columns but covers a different slice. 'join' "
+                           "merges rows on join_key into wider rows -- use when "
+                           "inputs have different columns about the same entities.")
+    join_key: list[str] | None = Field(
+        default=None,
+        description="One or more column names to join on -- required when "
+                     "method is 'join', must exist in every input. Omit for 'stack'.")
+    join_how: Literal["inner", "left"] = Field(
+        default="inner",
+        description="'inner' (default) keeps only rows that match in every "
+                     "input. 'left' keeps every row from the first input, "
+                     "filling unmatched numeric columns with 0 and unmatched "
+                     "categorical columns with null.")
+
+    @model_validator(mode="after")
+    def _at_least_two_refs(self) -> "CombineResultsToolCallArgs":
+        if len(self.source_refs) < 2:
+            raise ValueError(
+                f"combine_results needs at least two source_refs, got "
+                f"{len(self.source_refs)}. Reference another earlier result, or "
+                "call generate_chart on this one directly.")
+        return self
+
+
+@tool("combine_results", args_schema=CombineResultsToolCallArgs)
+async def combine_results_call_standin(**kwargs) -> None:
+    """Stacks or joins several earlier tool results into one new reference
+    id, usable anywhere a source_ref is accepted (generate_chart, or
+    another combine_results call).
+
+    Use it when one query can't answer the question as-is: (a) the result
+    would be too large or too costly, so split the columns into narrower
+    queries and combine them on a shared key (join) or stack same-shaped
+    slices (stack); (b) you need to compare a BigQuery result with a DAX
+    result, so run each and join them on a shared key. Don't use it for
+    data that didn't come from earlier tool calls.
+    """
+    raise NotImplementedError(
+        "combine_results' real MCP tool object handles dispatch -- this "
         "stand-in exists only so bind_tools() advertises a different schema.")

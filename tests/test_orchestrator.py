@@ -1,102 +1,29 @@
 """Layer 1 tests for app/orchestrator/orchestrator.py -- pure functions and
 plain-dict state only, no LLM/BigQuery/MCP calls (docs/testing.md).
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
-from langchain_core.messages import AIMessage, HumanMessage
+import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
-from app.config import MAX_ANSWER_TABLE_ROWS, MAX_LENGTH_RETRIES, MAX_VERIFY_RETRIES
-from app.gateway.entry_exit import build_agent_response, build_human_message, build_initial_state
+from app.config import MAX_ANSWER_TABLE_ROWS, MAX_LENGTH_RETRIES, MAX_VERIFY_RETRIES, PENDING_APPROVAL_THRESHOLD
+import app.orchestrator.orchestrator as orchestrator
 from app.orchestrator.orchestrator import (
+    ToolBatch,
+    build_tool_call_records_and_messages,
+    call_tool_node,
     check_table_rows,
     extract_table_values,
     iteration_cap_update,
+    resolve_chart_data,
+    resolve_combine_data,
     route_after_agent,
     route_after_call_tool,
     route_after_check_length,
     route_after_verify,
     verify_response,
 )
-from app.orchestrator.state import AgentState
-
-
-# Entry/exit helpers
-
-def test_build_human_message():
-    """Question plus optional dashboard-page/filter-state grounding."""
-    plain = build_human_message("How many orders?", [], None)
-    assert isinstance(plain, HumanMessage)
-    assert plain.content == "How many orders?"
-
-    with_page = build_human_message("q", [], "Financial Impact")
-    assert "Current dashboard page: Financial Impact" in with_page.content
-
-    with_filters = build_human_message(
-        "q", [{"filter_column": "department", "value": "produce"}], None)
-    assert "Current filter state:" in with_filters.content
-    assert "produce" in with_filters.content
-
-
-def test_build_initial_state():
-    """Every AgentState key present, with correct defaults and seeded messages."""
-    state = build_initial_state(
-        question="How many orders?",
-        conversation_id="conv-1",
-        user_id="user-1",
-        filter_context=[{"filter_column": "department", "value": "produce"}],
-        active_page="Financial Impact",
-        image_base64=None,
-        history_messages=[],
-    )
-
-    # Every AgentState key present, nothing extra, nothing missing
-    assert set(state) == set(AgentState.__annotations__)
-
-    assert state["question"] == "How many orders?"
-    assert state["conversation_id"] == "conv-1"
-    assert state["user_id"] == "user-1"
-    assert isinstance(state["turn_started_at"], datetime)
-    assert state["history_messages"] == []
-    assert len(state["messages"]) == 1
-    assert isinstance(state["messages"][0], HumanMessage)
-    assert "Financial Impact" in state["messages"][0].content
-
-    # Fresh-turn defaults
-    assert state["tool_calls"] == []
-    assert state["iteration_count"] == 0
-    assert state["verified"] is False
-    assert state["bytes_consumed"] == 0
-    assert state["answer_submitted"] is False
-    assert state["answer_markdown"] == ""
-    assert state["chart_urls"] == []
-    assert state["pending_queries"] == []
-    assert state["estimated_cost"] is None
-
-
-def test_build_agent_response():
-    """Projects final state into AgentResponse; empty vs. non-empty pending_queries."""
-    base_state = {
-        "answer_markdown": "The answer.",
-        "sources": ["Query warehouse"],
-        "needs_approval": False,
-        "chart_urls": ["https://example.com/chart.png"],
-        "suggested_follow_ups": ["What about last quarter?"],
-        "iteration_cap_hit": False,
-        "pending_queries": [],
-        "estimated_cost": None,
-        "cost_cap_exceeded": False,
-    }
-    response = build_agent_response(base_state)
-    assert response.answer_markdown == "The answer."
-    assert response.chart_urls == ["https://example.com/chart.png"]
-    assert response.suggested_follow_ups == ["What about last quarter?"]
-    assert response.pending_query is None
-
-    # Non-empty pending_queries -- the most recently added one
-    with_pending = {**base_state, "pending_queries": [
-        {"id": "a", "query": "SELECT 1"}, {"id": "b", "query": "SELECT 2"},
-    ]}
-    assert build_agent_response(with_pending).pending_query == "SELECT 2"
+from app.orchestrator.tools import ToolError
 
 
 # Guardrails
@@ -252,3 +179,185 @@ def test_iteration_cap_update():
     assert all(r["success"] is False for r in result["tool_calls"])
     assert [e["tool_call_id"] for e in result["errors"]] == ["tc1", "tc2"]
     assert all(e["error_type"] == "iteration_cap_hit" for e in result["errors"])
+
+
+def test_build_tool_call_records_and_messages():
+    """Records, display messages, and errors across a mixed batch: chartable
+    success gets a ref_id, a failure gets a TurnError, submit_answer gets a
+    message but no record, and other tools get a record with no ref_id."""
+    now = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    calls = [
+        {"id": "tc1", "name": "run_bigquery_sql", "args": {"query": "SELECT 1"}},
+        {"id": "tc2", "name": "run_dax_query", "args": {"dax": "EVALUATE ROW(\"x\", 2)"}},
+        {"id": "tc3", "name": "run_bigquery_sql", "args": {"query": "SELECT bad"}},
+        {"id": "tc4", "name": "submit_answer", "args": {}},
+        {"id": "tc5", "name": "list_repo_files", "args": {}},
+    ]
+    messages = [
+        ToolMessage(content='[{"n": 1}]', name="run_bigquery_sql", tool_call_id="tc1", status="success",
+                    artifact={"bytes_billed": 1234}),
+        ToolMessage(content='[{"v": 2}]', name="run_dax_query", tool_call_id="tc2", status="success"),
+        ToolMessage(content="boom", name="run_bigquery_sql", tool_call_id="tc3", status="error"),
+        ToolMessage(content="Answer recorded.", name="submit_answer", tool_call_id="tc4", status="success"),
+        ToolMessage(content='["a.py"]', name="list_repo_files", tool_call_id="tc5", status="success"),
+    ]
+    batch = ToolBatch(calls, messages, now, now, "tool_error")
+
+    result = build_tool_call_records_and_messages(batch, ref_counter=3)
+
+    # submit_answer gets no record; chartable successes take ref_3/ref_4 and advance the counter
+    assert result.records == [
+        {"id": "tc1", "name": "run_bigquery_sql", "args": {"query": "SELECT 1"},
+         "query_text": "SELECT 1", "result": [{"n": 1}], "success": True, "error": None,
+         "ref_id": "ref_3", "bytes_billed": 1234, "started_at": now, "completed_at": now},
+        {"id": "tc2", "name": "run_dax_query", "args": {"dax": 'EVALUATE ROW("x", 2)'},
+         "query_text": 'EVALUATE ROW("x", 2)', "result": [{"v": 2}], "success": True, "error": None,
+         "ref_id": "ref_4", "bytes_billed": None, "started_at": now, "completed_at": now},
+        {"id": "tc3", "name": "run_bigquery_sql", "args": {"query": "SELECT bad"},
+         "query_text": "SELECT bad", "result": "", "success": False, "error": "boom",
+         "ref_id": None, "bytes_billed": None, "started_at": now, "completed_at": now},
+        {"id": "tc5", "name": "list_repo_files", "args": {},
+         "query_text": None, "result": ["a.py"], "success": True, "error": None,
+         "ref_id": None, "bytes_billed": None, "started_at": now, "completed_at": now},
+    ]
+    assert result.ref_counter == 5
+
+    # Only the failed call produces a TurnError, joined to its record by tool_call_id
+    assert result.errors == [
+        {"stage": "call_tool", "error_type": "tool_error", "message": "boom",
+         "occurred_at": now, "tool_call_id": "tc3"},
+    ]
+
+    # One display message per call; chartable results carry the reference label
+    assert result.display_messages == [
+        ToolMessage(content='Reference id for charting this result: ref_3\n[{"n": 1}]',
+                    name="run_bigquery_sql", tool_call_id="tc1", status="success"),
+        ToolMessage(content='Reference id for charting this result: ref_4\n[{"v": 2}]',
+                    name="run_dax_query", tool_call_id="tc2", status="success"),
+        messages[2],
+        messages[3],
+        messages[4],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_tool_node_submit_answer_branch():
+    """A sole submit_answer call is normalized into state: a question turn copies
+    the question into answer_markdown and clears follow-ups; an answer turn passes
+    its answer and follow-ups straight through."""
+    question_call = {"id": "call_q", "name": "submit_answer", "type": "tool_call", "args": {
+        "answer_markdown": "", "all_prose_numeric_claims": [],
+        "suggested_follow_ups": ["What about last quarter?"],
+        "clarifying_question": "Which metric?",
+    }}
+    question_state = {"messages": [AIMessage(content="", tool_calls=[question_call])],
+                      "iteration_count": 0}
+    question_update = await call_tool_node(question_state)
+
+    assert question_update["answer_submitted"] is True
+    assert question_update["clarifying_question"] == "Which metric?"
+    assert question_update["answer_markdown"] == "Which metric?"
+    assert question_update["suggested_follow_ups"] == []
+
+    answer_call = {"id": "call_a", "name": "submit_answer", "type": "tool_call", "args": {
+        "answer_markdown": "There were 551,399 orders.", "all_prose_numeric_claims": [551399.0],
+        "suggested_follow_ups": ["What about last quarter?"], "clarifying_question": "",
+    }}
+    answer_state = {"messages": [AIMessage(content="", tool_calls=[answer_call])],
+                    "iteration_count": 0}
+    answer_update = await call_tool_node(answer_state)
+
+    assert answer_update["answer_submitted"] is True
+    assert answer_update["clarifying_question"] == ""
+    assert answer_update["answer_markdown"] == "There were 551,399 orders."
+    assert answer_update["suggested_follow_ups"] == ["What about last quarter?"]
+    assert answer_update["all_prose_numeric_claims"] == [551399.0]
+
+
+def test_resolve_chart_and_combine_data():
+    """Ref resolution into real-tool args for charts and combines, plus every
+    resolve error path (unknown, failed, non-chartable, too few refs)."""
+    prior = [
+        {"name": "run_bigquery_sql", "ref_id": "ref_1", "success": True, "result": [{"a": 1}]},
+        {"name": "run_dax_query", "ref_id": "ref_2", "success": True, "result": [{"a": 2}]},
+        {"name": "run_bigquery_sql", "ref_id": "ref_3", "success": False, "result": ""},
+        {"name": "generate_chart", "ref_id": "ref_4", "success": True, "result": {"chart_url": "x"}},
+    ]
+
+    chart_tc = {"id": "call_c", "name": "generate_chart", "args": {
+        "source_ref": "ref_1",
+        "spec": {"chart_type": "bar", "title": "T", "x_label": "X", "y_label": "Y",
+                 "x_field": "a", "y_field": "a"}}}
+    chart = resolve_chart_data(chart_tc, prior)
+    assert chart == {"id": "call_c", "name": "generate_chart", "args": {"args": {
+        "data": [{"a": 1}],
+        "spec": {"chart_type": "bar", "title": "T", "x_label": "X", "y_label": "Y",
+                 "x_field": "a", "y_field": "a", "sort_order": None, "value_format": "auto"},
+    }}}
+
+    combine_tc = {"id": "call_m", "name": "combine_results", "args": {
+        "source_refs": ["ref_1", "ref_2"], "method": "stack"}}
+    combined = resolve_combine_data(combine_tc, prior)
+    assert combined == {"id": "call_m", "name": "combine_results", "args": {"args": {
+        "data": [[{"a": 1}], [{"a": 2}]], "method": "stack", "join_key": None, "join_how": "inner",
+    }}}
+
+    unknown_chart_tc = {"id": "call_c", "name": "generate_chart", "args": {
+        "source_ref": "ref_9",
+        "spec": {"chart_type": "bar", "title": "T", "x_label": "X", "y_label": "Y",
+                 "x_field": "a", "y_field": "a"}}}
+    with pytest.raises(ToolError, match="'ref_9' is not a successfully completed"):
+        resolve_chart_data(unknown_chart_tc, prior)
+
+    failed_chart_tc = {"id": "call_c", "name": "generate_chart", "args": {
+        "source_ref": "ref_3",
+        "spec": {"chart_type": "bar", "title": "T", "x_label": "X", "y_label": "Y",
+                 "x_field": "a", "y_field": "a"}}}
+    with pytest.raises(ToolError, match="'ref_3' is not a successfully completed"):
+        resolve_chart_data(failed_chart_tc, prior)
+
+    too_few_tc = {"id": "call_m", "name": "combine_results", "args": {
+        "source_refs": ["ref_1"], "method": "stack"}}
+    with pytest.raises(ToolError, match="at least two"):
+        resolve_combine_data(too_few_tc, prior)
+
+    non_chartable_tc = {"id": "call_m", "name": "combine_results", "args": {
+        "source_refs": ["ref_1", "ref_4"], "method": "stack"}}
+    with pytest.raises(ToolError, match="'ref_4' is not a successfully completed"):
+        resolve_combine_data(non_chartable_tc, prior)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_node_pauses_over_threshold(monkeypatch):
+    """A batch over PENDING_APPROVAL_THRESHOLD pauses before any tool runs, and the
+    card's query is the one with the largest estimate."""
+    big, small = PENDING_APPROVAL_THRESHOLD, PENDING_APPROVAL_THRESHOLD // 2
+    estimates = {"SELECT big": big, "SELECT small": small}
+
+    async def fake_dry_run(query):
+        return estimates[query]
+
+    monkeypatch.setattr(orchestrator, "dry_run", fake_dry_run)
+    executed = []
+
+    class _RecordingTool:
+        async def ainvoke(self, tc):
+            executed.append(tc)
+
+    monkeypatch.setitem(orchestrator.ALL_TOOLS, "run_bigquery_sql", _RecordingTool())
+    calls = [
+        {"id": "c1", "name": "run_bigquery_sql", "type": "tool_call", "args": {"query": "SELECT big"}},
+        {"id": "c2", "name": "run_bigquery_sql", "type": "tool_call", "args": {"query": "SELECT small"}},
+    ]
+    state = {"messages": [AIMessage(content="", tool_calls=calls)], "bytes_consumed": 0, "iteration_count": 0,
+             "approved_batch": False}
+
+    update = await call_tool_node(state)
+
+    assert update["needs_approval"] is True
+    assert update["largest_pending_query"] == "SELECT big"
+    assert update["pending_queries"] == [
+        {"id": "c1", "query": "SELECT big", "estimated_bytes": big},
+        {"id": "c2", "query": "SELECT small", "estimated_bytes": small},
+    ]
+    assert executed == []  # the pause runs no tool

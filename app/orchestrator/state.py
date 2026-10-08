@@ -21,8 +21,24 @@ class ToolCallRecord(TypedDict):
     success: bool
     error: str | None
     ref_id: str | None  # set only for a chartable tool's successful result
+    bytes_billed: int | None  # from the tool's artifact; None for non-BigQuery or failed calls
     started_at: datetime
     completed_at: datetime
+
+
+class PendingApproval(TypedDict):
+    conversation_id: str
+    question: str
+    filter_context: list[dict]
+    active_page: str | None
+    messages: list[dict]  # messages_to_dict(state["messages"]) -- this turn so far
+    pending_queries: list[dict]
+    deferred_dax: list[dict]
+    tool_calls: list[ToolCallRecord]
+    iteration_count: int
+    bytes_consumed: int
+    estimated_cost: str
+    paused_at: datetime
 
 
 class TurnError(TypedDict):
@@ -62,6 +78,8 @@ class AgentState(TypedDict):
 
     # Resource accumulators
     bytes_consumed: int
+    bytes_consumed_baseline: int  # bytes_consumed's value at this phase's start --
+                                  # 0 for a fresh turn, seeded from PendingApproval on resume
     prompt_tokens: int
     completion_tokens: int
     llm_calls: int
@@ -71,7 +89,11 @@ class AgentState(TypedDict):
 
     # Guardrail outcomes
     needs_approval: bool
+    approved_batch: bool  # True on a resumed turn's first batch; skips the pause gate once
+    approval_decision: str | None  # "approved" | "rejected"; None until the user decides
     pending_queries: list[dict]
+    largest_pending_query: str | None  # the query the approval card shows: largest estimated_bytes
+    paused_at: datetime | None  # set by call_tool_node's pause branch; None until a pause happens
     deferred_dax: list[dict]
     estimated_cost: str | None
     cost_cap_exceeded: bool
@@ -80,6 +102,7 @@ class AgentState(TypedDict):
 
     # Building toward AgentResponse
     answer_markdown: str
+    clarifying_question: str  # "" unless the turn ended on a clarifying question
     chart_urls: Annotated[list[str], append_list]
     sources: list[str]
     all_prose_numeric_claims: list[float]  # llm provided numeric claims in prose

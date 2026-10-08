@@ -1,218 +1,98 @@
-# Combine Results Tool Design
+# Combine Results Tool
 
-**Not built yet — planning doc, read before starting item 11
-(`docs/build-order.md`).** Mirrors `generate_chart`'s `source_ref` pattern
-(`docs/chart-tool.md`, `.claude/rules/tools.md`) rather than inventing a new
-mechanism.
+Built 2026-10-04 (build-order item 11). Stacks or joins several earlier tool
+results into one new `ref_id`, which `generate_chart` or another
+`combine_results` call can consume.
 
-## Motivating case
+## Why it exists
 
-A live BigQuery cost-cap investigation (2026-10-04, `agent_telemetry`
-transcript) surfaced a real gap: a wide correlation question across many
-features didn't fit under the real per-query byte cap in one shot.
-`TABLESAMPLE`'s dry-run estimate turned out to dramatically underestimate
-real execution cost on the table in question, so steering the model toward
-it as a cost-reduction strategy isn't safe. The reliable alternative —
-select fewer columns per query — means a wide analysis has to be split
-across several smaller `run_bigquery_sql` calls, each covering a different
-slice (a different subset of features). Nothing could then combine those
-separate results into one `generate_chart` call: the chart tool takes
-exactly one `source_ref`.
+A wide question sometimes can't fit under the per-query cost cap in one shot.
+`TABLESAMPLE` looked like the fix, but its dry-run estimate underestimated real
+cost on the table in question, so it isn't a safe steer. Selecting fewer
+columns per query works, but splits the answer across several results, and
+`generate_chart` takes exactly one `source_ref`. `combine_results` is the
+separate step that reassembles those results. It's also the way to put a
+BigQuery result and a DAX result side by side for comparison.
 
-**This tool is the fix — not a `generate_chart` change.** It's a new,
-separate step that combines several existing results into one new
-`ref_id`, which `generate_chart` (or another `combine_results` call) then
-consumes exactly like any other chartable result.
+## Hosting
 
-## Hosting — MCP, and more portable than `generate_chart`
+Hosted on the MCP server. The real tool needs only the data it's given: no
+identity, connection, or hidden args. Going local was considered and rejected:
+the logic is small, but the tool is generic enough that another MCP client can
+call it directly with its own data, which is the reuse case that justifies
+hosting it. Both hosting options need the same plumbing (the model supplies
+`source_refs`, so something has to resolve them), so hosting cost nothing extra.
 
-The real tool operates purely on already-fetched tabular data (`list[dict]`
-per source) plus an operation name — no identity, no connection info, no
-GCS bucket to hide. Unlike every other MCP-hosted tool here, it needs
-**zero hidden args at all**, which makes it the most reusable tool in the
-inventory, not an exception to the hosting rule (`.claude/rules/tools.md`).
+## The two methods
 
-## Two methods, model-picked — guardrails catch a mismatched choice
+- **`stack`** appends rows. Every input must have the same columns.
+- **`join`** merges rows on `join_key` (one or more columns) into wider rows.
+  `join_how` picks the join type:
+  - `inner` (default) keeps only rows that match in every input.
+  - `left` keeps every row of the first input. Unmatched numeric columns fill
+    with 0, and unmatched categorical columns stay null.
 
-- **`stack`** — appends rows together. Use when every referenced result has
-  the *same columns* but covers a different slice (e.g. different feature
-  batches of the same two-column `feature_name, correlation` shape — the
-  motivating case above).
-- **`join`** — merges rows that share a key into wider rows. Use when
-  referenced results have *different columns* describing the same entities
-  (e.g. per-product revenue in one ref, per-product units in another),
-  matched on a shared key column.
+The first input is the left table for a join.
 
-**Guardrails live in the real tool, not the resolve step** — same place
-`chart_tool.py`'s `render()` validates its spec against its data
-(`docs/chart-tool.md`), so the tool is self-contained and correct for any
-caller, not just this orchestrator:
-- `stack`: every input must have the identical column set. Mismatched →
-  actionable `ToolError` naming which columns differ and in which ref.
-- `join`: `join_key` must be present in every input. Missing from any →
-  actionable `ToolError` naming which ref lacks it. If the merge produces
-  zero rows, error rather than silently returning nothing — this is exactly
-  what catches the model picking `join` when the inputs were actually
-  disjoint batches that needed `stack`.
+## Real tool
 
-## Real tool schema
+`app/mcp_server/combine_tool.py`, registered on the MCP server.
 
-```python
-# app/mcp_server/combine_tool.py
+- `CombineResultsArgs`: `data` (list of lists of dicts, `min_length=2`),
+  `method`, `join_key` (`list[str] | None`), `join_how` (default `inner`).
+  A model validator requires `join_key` when `method` is `join`. That's an
+  argument-shape check, so it runs at construction, before the tool body.
+- Guardrails run in the tool body against the real data, and raise
+  `fastmcp.exceptions.ToolError`:
+  - `stack`: input column sets must match.
+  - `join`: every key column must exist in every input.
+  - `join` with no real matches: an inner probe catches this even for a left
+    join, since a left join is never empty on its own. The message depends on
+    whether the inputs share columns. Same columns suggest stacking. Different
+    columns point at the key or its values.
+- The tool returns JSON-safe rows (`to_json` then `json.loads`), so `NaN` becomes `null`.
 
-class CombineResultsArgs(BaseModel):
-    data: list[list[dict]] = Field(..., min_length=2)
-    method: Literal["stack", "join"]
-    join_key: str | None = None
+## Stand-in (model-facing)
 
-    @model_validator(mode="after")
-    def _join_key_required_for_join(self) -> "CombineResultsArgs":
-        if self.method == "join" and not self.join_key:
-            raise ValueError("join_key is required when method is 'join'.")
-        return self
+`app/orchestrator/tools.py`: `CombineResultsToolCallArgs` and
+`combine_results_call_standin`.
 
+- `source_refs: list[str]` replaces `data`. There's no `minItems`, because
+  Anthropic's tool schemas accept only `minItems` 0 or 1. The "at least two"
+  rule lives in a model validator on this class instead, which keeps it out of
+  the schema the model sees.
+- The stand-in's docstring carries the guidance for when to use the tool: query
+  size limits (split by columns, then combine), and comparing BigQuery with DAX.
+- Bound to the model in `BIND_TOOLS_LIST` in place of the real tool, the same
+  swap `generate_chart` uses.
 
-@mcp.tool()
-async def combine_results(args: CombineResultsArgs) -> list[dict]:
-    """Stacks or joins several already-fetched results into one combined
-    table. 'stack' appends rows -- use when every input has the same
-    columns but covers a different slice. 'join' merges rows on a shared
-    key into wider rows -- use when inputs have different columns about
-    the same entities. Never computes a new value; only recombines rows
-    and columns that already exist in the inputs.
-    """
-    if args.method == "stack":
-        return _stack(args.data)
-    return _join(args.data, args.join_key)
-```
+## Dispatch
 
-`_stack`/`_join` are plain-Python/`pandas` helpers implementing the
-guardrails above — no new concept beyond what `chart_tool.py`'s own
-row-count-mismatch check already establishes for this codebase.
+`app/orchestrator/orchestrator.py`.
 
-## Model-facing stand-in — same substitution pattern as `generate_chart`
+- `resolve_combine_data`: validates the stand-in args. On a `ValidationError`, it
+  raises `ToolError` with the validator's own message. Then it looks up each ref
+  with `_lookup_source_ref` and builds the real tool's args: `data`, `method`,
+  `join_key`, `join_how`.
+- `dispatch_other_call`: a `combine_results` branch. A `ToolError` becomes an
+  error `ToolMessage` the model can retry from.
+- No injected args, since nothing is hidden from the model.
+- `CHARTABLE_TOOLS` includes `combine_results`, so its results get a `ref_id`.
 
-```python
-# app/orchestrator/tools.py, next to chart_tool_call_standin
+## Verification
 
-CombineResultsToolCallArgs = create_model(
-    "CombineResultsToolCallArgs",
-    source_refs=(list[str], Field(
-        ..., min_length=2,
-        description="Reference ids of the results to combine -- e.g. "
-                     "['ref_1', 'ref_2']. Copy them exactly as shown; "
-                     "never invent one.")),
-    method=(Literal["stack", "join"], Field(
-        ..., description="'stack' appends all rows together -- use when "
-                          "every ref has the same columns but covers a "
-                          "different slice (e.g. different feature "
-                          "subsets, different date ranges). 'join' merges "
-                          "rows that share a key into wider rows -- use "
-                          "when each ref has different columns about the "
-                          "same entities (e.g. revenue per product in one "
-                          "ref, units per product in another).")),
-    join_key=(str | None, Field(
-        default=None, description="Column name to join on -- required "
-                                    "when method is 'join', must exist in "
-                                    "every referenced ref's columns. Omit "
-                                    "for 'stack'.")),
-)
+`combine_results` is in `NUMERIC_SOURCE_TOOLS`. It only recombines numbers
+from earlier queries, plus the 0s that a left join fills in for missing
+numeric values. A filled 0 means "no matching value," which is a fact about the
+data, so a model that states it passes verification.
 
+## Tests
 
-@tool("combine_results", args_schema=CombineResultsToolCallArgs)
-async def combine_results_call_standin(**kwargs) -> None:
-    """Stacks or joins several earlier tool results into one new reference
-    id, which can then be passed to generate_chart or another
-    combine_results call. See method's own description for which to pick.
-    """
-    raise NotImplementedError(
-        "combine_results' real MCP tool object handles dispatch -- this "
-        "stand-in exists only so bind_tools() advertises a different schema."
-    )
-```
+`tests/test_combine_tool.py`: `test_combine_results_stack_join_and_guardrails`
+covers the tool. Ref resolution (`resolve_combine_data`) is tested in
+`tests/test_orchestrator.py`, alongside `resolve_chart_data`.
 
-**No discriminated union, no `ge=`/`le=` bound** — unlike `generate_chart`'s
-spec, this schema has nothing `strict=True` rejects
-(`.claude/rules/orchestrator.md`'s "Constrained decoding" section), so it
-binds under the normal `strict=True` path. No raw-Anthropic-dict workaround
-needed here.
+## Live
 
-## Dispatch wiring
-
-```python
-# app/orchestrator/orchestrator.py
-
-def resolve_combine_data(combine_tc: dict, prior_tool_calls: list[ToolCallRecord]) -> dict:
-    """Rewrites a model-facing combine call into the real MCP tool's args shape."""
-    call_args = CombineResultsToolCallArgs.model_validate(combine_tc["args"])
-    source_tcs = [_lookup_source_ref(ref, prior_tool_calls) for ref in call_args.source_refs]
-    return {
-        **combine_tc,
-        "args": {"args": {
-            "data": [tc["result"] for tc in source_tcs],
-            "method": call_args.method,
-            "join_key": call_args.join_key,
-        }},
-    }
-```
-
-In `dispatch_other_call`:
-
-```python
-if tc["name"] == "combine_results":
-    try:
-        resolved = resolve_combine_data(tc, prior_tool_calls)
-    except ToolError as e:
-        return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
-    return await ALL_TOOLS[tc["name"]].ainvoke(resolved)
-```
-
-No `inject_combine_args` — nothing to inject.
-
-## `ref_id` reuse — its result is chartable, and combinable again
-
-Add `"combine_results"` to `CHARTABLE_TOOLS`, so a successful call gets a
-`ref_id` the same way `run_bigquery_sql`/`run_dax_query` do, and can feed
-`generate_chart` or a second `combine_results` call.
-
-**Rename `_lookup_chart_source` → `_lookup_source_ref`** — it's resolving
-refs for two tools now, not just charts. Update its error message to name
-all three source tools:
-
-```python
-def _lookup_source_ref(source_ref: str, prior_tool_calls: list[ToolCallRecord]) -> ToolCallRecord:
-    source_tc = next(
-        (r for r in prior_tool_calls
-         if r.get("ref_id") == source_ref and r["success"] and r["name"] in CHARTABLE_TOOLS),
-        None)
-    if source_tc is None:
-        raise ToolError(
-            f"'{source_ref}' is not a successfully completed run_bigquery_sql, "
-            "run_dax_query, or combine_results call from earlier this turn -- it may not "
-            "exist, may have failed, or may be from later in this same batch and hasn't "
-            "run yet. Fetch the data first, then reference it in a follow-up step.")
-    return source_tc
-```
-
-`resolve_chart_data` calls this same renamed function — no behavior change
-for `generate_chart`, just a shared name.
-
-`SOURCE_LABELS` (`.claude/rules/orchestrator.md`) gains
-`"combine_results": "Combine data"` for the badge trail.
-
-## Verification contract — unchanged, deliberately
-
-`combine_results` stays **out of `NUMERIC_SOURCE_TOOLS`.** Every value in
-its output already exists in the pool via the original
-`run_bigquery_sql`/`run_dax_query` records it recombined — it's a pure
-reshape, never a computation. Adding it to `NUMERIC_SOURCE_TOOLS` would be
-redundant at best; leaving it out keeps the verification contract exactly
-as documented, with nothing new to reason about. This only holds because
-the tool's contract is genuinely restricted to stack/join with no derived
-columns — if that ever changes, revisit this section first.
-
-## Build order
-
-Notebook-first in `phase3_graph.ipynb`, proven live (both methods, plus
-each guardrail's failure case), then ported — same workflow as every other
-tool this build. See `docs/build-order.md` item 11.
+Q2 (the wide-correlation question) ran end to end: batched queries, then
+`combine_results`, then a chart.

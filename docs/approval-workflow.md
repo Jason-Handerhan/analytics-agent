@@ -1,46 +1,51 @@
 # Approval Workflow
 
-The cost-approval pause, its three tiers, and how a paused turn resumes. Read
-before building `POST /ask/respond` or the cost-tier logic.
-`.claude/rules/orchestrator.md` carries the summary that points here.
+The cost-approval pause, its tiers, and how a paused turn resumes. Read
+before touching `call_tool_node`'s cost logic or `run_agent_turn`'s
+`approval_decision` branch. `.claude/rules/orchestrator.md` carries the
+summary that points here.
 
-## Three cost tiers
+## Three tiers
 
 **Decisions are made in BYTES; dollars are display only.** Compare dry-run
-`total_bytes_processed` against byte thresholds — the native unit, no
-conversion, nothing to drift. `estimated_cost` is a derived dollar string for
-humans, computed from bytes via BigQuery's per-TB rate. If that pricing
-constant goes stale the *display* is wrong; the *decision* never is.
+estimates against byte thresholds — the native unit, no conversion, nothing
+to drift. `estimated_cost` is a derived dollar string for humans
+(`format_cost`), computed from bytes via BigQuery's per-TB rate. If that
+pricing constant goes stale the *display* is wrong; the *decision* never is.
 
 | Tier | Condition | Behavior |
 |---|---|---|
-| Auto | Under per-query byte threshold | Runs normally |
-| Approval | Batch over `BIG_QUERY_THRESHOLD`, turn total under absolute cap | `needs_approval: True` + pause |
-| Hard decline | **Combined total** at/over absolute cap | `cost_cap_exceeded: True` — no approval offered |
+| Auto | Batch under `PENDING_APPROVAL_THRESHOLD`, turn total under `ABSOLUTE_CAP` | Runs normally |
+| Approval | Batch over `PENDING_APPROVAL_THRESHOLD` (or any query uses `TABLESAMPLE`), turn total under `ABSOLUTE_CAP` | `needs_approval: True` + pause |
+| Hard decline | Turn total at/over `ABSOLUTE_CAP` | `cost_cap_exceeded: True` — no approval offered |
 
-**Both constants are deliberately unvalued** — they're on `CLAUDE.md`'s
-ask-first list. Pick them together once you can see real dry-run figures from
-`agent_safe`: a threshold that never fires teaches nothing, and one that fires
-on every query makes approval noise the user learns to click through.
+**Values, set in `app/config.py`:** `ABSOLUTE_CAP = 4 GiB` (turn-cumulative),
+`PENDING_APPROVAL_THRESHOLD = ABSOLUTE_CAP // 2` (per-batch). `MAX_BYTES_BILLED`
+equals `ABSOLUTE_CAP` — the per-query server-side fail-safe
+(`maximum_bytes_billed`), independent of these gates.
 
-**Two different scopes.** `BIG_QUERY_THRESHOLD` gates **this batch** — the
-summed bytes of every BigQuery call dispatched together, so it triggers
-whether one query is enormous or three are merely large. The **absolute cap**
-gates **the whole turn**: `bytes_consumed` accumulates across every tool loop
-and survives an approval pause, so a turn can't spend its way past the cap in
-installments. BigQuery-only; `executeQueries` has no dry-run to price
-against.
+**Two different scopes.** `PENDING_APPROVAL_THRESHOLD` gates **this batch** —
+the summed dry-run bytes of every `run_bigquery_sql` call dispatched
+together, so it triggers whether one query is enormous or three are merely
+large. `ABSOLUTE_CAP` gates **the whole turn**: `bytes_consumed` accumulates
+across every tool loop and survives an approval pause, so a turn can't spend
+its way past the cap in installments. BigQuery-only — DAX (`executeQueries`)
+has no dry-run to price against, and isn't cost-gated at all.
 
-**Tune the threshold value for a batch, not a single query.** Summing means
-the same number pauses more often than it would per-query — three moderate
-queries can cross a bar none of them would alone.
+**`TABLESAMPLE` forces a pause regardless of the estimate.** Its dry-run byte
+count has repeatedly underestimated actual billed bytes in practice — not a
+hypothetical risk, an observed one — so any query containing it (case-insensitive
+substring check on the query text) always sets `needs_approval`, even when
+the (untrustworthy) estimate reads under threshold. It does **not** bypass
+`cost_cap_exceeded` — that check still uses the same estimate, so a
+`TABLESAMPLE` query estimated far enough over `ABSOLUTE_CAP` still hard-declines.
+Scoped to `run_bigquery_sql` only; the keyword doesn't exist in DAX.
 
 **Hard decline is a distinct terminal state**, not a refusal to answer and not
-an approval prompt. Populate `estimated_cost` so the message is specific:
-*"This would cost an estimated $47, which exceeds the maximum for a single
-question. Try narrowing your question."*
+an approval prompt. `estimated_cost` is still populated so the decline message
+can cite a figure.
 
-## The cost gate lives in the node, not the tool — three phases
+## The cost gate lives in `call_tool_node`, not the tool — dry-run, decide, dispatch
 
 **Per-tool gating is unsafe for a batch.** Three BigQuery calls dispatched
 together each read the same `state["bytes_consumed"]`, captured before any of
@@ -49,329 +54,204 @@ they blow the cap. No dispatch ordering fixes this; the sum only exists at the
 node, so the decision belongs there.
 
 ```python
-async def call_tool_node(state: AgentState) -> dict:
-    if await is_cancelled(state["conversation_id"]):
-        return {"cancelled": True}
+bq_calls = [tc for tc in tool_calls if tc["name"] == "run_bigquery_sql"]
+other_calls = [tc for tc in tool_calls if tc["name"] != "run_bigquery_sql"]
 
-    tool_calls = state["messages"][-1].tool_calls
-    check_batch_ordering(tool_calls)
-    bq  = [tc for tc in tool_calls if tc["name"] == "run_bigquery_sql"]
-    rest = [tc for tc in tool_calls if tc["name"] != "run_bigquery_sql"]
-
-    # Validate at the boundary — strict=True constrains generation, but this
-    # is the first RUNTIME check, and the node unpacks args before any tool
-    # function (and its own validation) is ever reached. zip(bq, bq_args)
-    # below is what keeps each validated query paired with its ORIGINAL
-    # tool_call — losing that pairing loses the id a ToolMessage needs.
-    try:
-        bq_args = [RunBigQuerySqlArgs.model_validate(tc["args"]) for tc in bq]
-    except ValidationError as e:
-        return {"errors": [TurnError(stage="call_tool",
-                                     error_type="ValidationError",
-                                     message=str(e), occurred_at=now())]}
-
-    # PHASE 1 — price every query. Dry runs are free, scan nothing, and are
-    # where BigQuery validates syntax and resolves table references.
-    estimates = await asyncio.gather(
-        *[dry_run(a.query) for a in bq_args], return_exceptions=True)
-
-    # A malformed query fails HERE, for free. Fail the whole batch: pricing a
-    # subset would decide cost against an incomplete picture, and the agent is
-    # about to rewrite and re-dispatch anyway. Surface BigQuery's own message
-    # verbatim — "Unrecognized name: reveune at [3:8]" is what makes the retry
-    # land; wrapping it in something generic throws away the useful part.
-    # zip(bq, ...), not bq_args alone — same reason as above: failed_record
-    # and messages_from both need the ORIGINAL tool_call for its id.
-    failed = [(tc, e) for tc, e in zip(bq, estimates) if isinstance(e, Exception)]
-    if failed:
-        return {"tool_calls": [failed_record(tc, e) for tc, e in failed],
-                "messages": messages_from(failed),
-                "errors": [TurnError(stage="call_tool", error_type="QueryError",
-                                     message=str(e), occurred_at=now())
-                           for _, e in failed]}
-
-    # PHASE 2 — ONE decision, on the summed batch. Nothing dispatched yet.
+if bq_calls:
+    estimates = await asyncio.gather(*[dry_run(tc["args"]["query"]) for tc in bq_calls])
     batch_bytes = sum(estimates)
+    cost_cap_exceeded = state["bytes_consumed"] + batch_bytes >= ABSOLUTE_CAP
+    uses_tablesample = any("TABLESAMPLE" in tc["args"]["query"].upper() for tc in bq_calls)
+    needs_approval = ((batch_bytes > PENDING_APPROVAL_THRESHOLD or uses_tablesample)
+                      and not cost_cap_exceeded and not state["approved_batch"])
 
-    if state["bytes_consumed"] + batch_bytes >= ABSOLUTE_CAP:
-        # Dispatch NOTHING — spending on searches for a turn about to be
-        # declined outright is pure waste.
-        return {"cost_cap_exceeded": True,
-                "pending_queries": [{"id": tc["id"], "query": a.query}
-                                     for tc, a in zip(bq, bq_args)]}
-
-    if batch_bytes > BIG_QUERY_THRESHOLD:
-        # DEFER the two query tools; run everything else (including
-        # generate_chart) and bank it.
-        #   run_bigquery_sql — the thing being approved
-        #   run_dax_query    — deferring keeps its (potentially large) result
-        #                      out of Firestore, and re-reads fresher data
-        # generate_chart is NOT deferred: if its source is an
-        # already-completed call, it just renders now; if its source is one
-        # of the queries deferred above, resolve_chart_data's existing
-        # ToolError("No tool call '...' found this turn.") fires on its own
-        # and flows through the same exception handling as any other tool
-        # failure — no special-casing needed.
-        # The turn stops here either way, so the agent isn't reasoning during
-        # the pause — deferring changes WHEN these run, not what it knows.
-        DEFERRED = {"run_bigquery_sql", "run_dax_query"}
-        other_calls = [tc for tc in rest if tc["name"] not in DEFERRED]
-        other = await asyncio.gather(
-            *[dispatch_tool(tc, state) for tc in other_calls],
-            return_exceptions=True)
-        paired = list(zip(other_calls, other))   # small results only
-        return {"tool_calls": records_from(paired),
-                "messages": messages_from(paired),
-                "needs_approval": True,
-                "pending_queries": [{"id": tc["id"], "query": a.query}
-                                     for tc, a in zip(bq, bq_args)],
-                "deferred_dax": [{"id": tc["id"], "dax": tc["args"]["dax"]}
-                                  for tc in rest if tc["name"] == "run_dax_query"],
-                "estimated_cost": format_cost(batch_bytes)}
-
-    # PHASE 3 — normal path: one plain dispatch, no special ordering. gather()
-    # IS the join point; nothing below runs until every call resolves, so a
-    # completed sibling's result is never abandoned.
-    dispatched = bq + rest   # same order as the gather below, positionally
-    results = await asyncio.gather(
-        *[execute(tc, a, state) for tc, a in zip(bq, bq_args)],
-        *[dispatch_tool(tc, state) for tc in rest],
-        return_exceptions=True)
-    paired = list(zip(dispatched, results))
-    return {"tool_calls": records_from(paired),
-            "messages": messages_from(paired),
-            "bytes_consumed": state["bytes_consumed"] + batch_bytes}
+if needs_approval:
+    # Nothing dispatched -- the whole batch (BigQuery AND everything else
+    # in this round) waits. largest_pending_query is re-derived by index,
+    # not a lambda, for the card's single display query.
+    largest_index = estimates.index(max(estimates))
+    return {
+        "needs_approval": True,
+        "pending_queries": [{"id": tc["id"], "query": tc["args"]["query"], "estimated_bytes": est}
+                             for tc, est in zip(bq_calls, estimates)],
+        "largest_pending_query": bq_calls[largest_index]["args"]["query"],
+        "estimated_cost": format_cost(batch_bytes),
+        "paused_at": datetime.now(timezone.utc),
+    }
 ```
 
-**Never inspect results as they arrive and return early** (`as_completed` with
-a `return` inside the loop). Still-running calls get orphaned — they keep
-executing and keep costing — and a `search_docs` result that already finished
-is lost, so the resumed turn re-runs a search it already paid for.
+**`not state["approved_batch"]` is what lets a resumed, already-approved batch
+through without re-pausing itself.** `approved_batch` is `True` only on the
+first `call_tool_node` call after a resume, and the node's own return dict
+resets it to `False` immediately — so a *second* huge query discovered later
+in the same resumed turn pauses normally. `TABLESAMPLE`'s forced pause is
+gated by the same two conditions (`not cost_cap_exceeded`, `not approved_batch`)
+as the threshold check, for the same reason.
 
-**`records_from` and `messages_from` both take `paired` — `list[zip(tool_call,
-result)]`, not bare `results`.** A successful entry's `ToolMessage` already
-carries the right `tool_call_id` on its own; the pairing exists for the
-`Exception` case (from `return_exceptions=True`), which carries no id at
-all — only the original `tool_call` sitting next to it has one. Same reason
-`execute` takes `tc` alongside `a` instead of just `a.query`.
+**The pause returns before dispatching anything in the batch — BigQuery
+*and* every other tool requested in the same round.** `other_calls` (DAX,
+`search_docs`, `generate_chart`, whatever else the model asked for alongside
+the big query) are never run, never recorded, and nothing tracks them for
+later — they're simply re-requested on resume, for free, because resume
+replays the *entire* dangling `AIMessage.tool_calls` list, not just the
+approved query (see below). **`deferred_dax` is a field that exists on
+`AgentState`/`PendingApproval` but is never populated in the current
+build** — the deferral mechanism the original design sketched (re-invoking
+specific deferred DAX calls by id on approve) was superseded by the simpler
+replay approach once that was settled; the field is vestigial, kept rather
+than removed since dropping it is a schema change for no behavioral gain.
 
-- **`records_from`** builds each `ToolCallRecord` from a `ToolMessage` —
-  `execute`/`dispatch_tool` both return real ones
-  (`.claude/rules/orchestrator.md`). `result` comes from `.artifact` when
-  present (already native Python — no JSON re-parsing) and falls back to
-  parsing `.content` otherwise. An `Exception` entry is what `failed_record`
-  turns into a `success: False` record, `id` taken from its paired
-  `tool_call["id"]`.
-- **`messages_from`** builds `state["messages"]`'s contribution — the
-  `ToolMessage` unchanged for a success, or a constructed
-  `ToolMessage(content=f"Error: {e}", tool_call_id=tc["id"], status="error")`
-  for an `Exception`. **Every dispatched `tool_call` needs a `ToolMessage`
-  back, success or failure** — Anthropic requires a `tool_result` for every
-  `tool_use` it sent, so a call that errors still has to produce one, just
-  one carrying the error instead of a result.
+**`pending_queries` is informational, not load-bearing, for the same
+reason.** The original design had resume re-invoke each entry explicitly by
+id. The real resume path doesn't read `pending_queries` for dispatch at
+all — it replays the dangling `AIMessage`, and `call_tool_node` re-splits
+*that* into `bq_calls`/`other_calls` fresh, exactly like any other round.
+`pending_queries` only ever feeds the approval card's display and the pause
+telemetry row.
 
-**`result` is written as a native Firestore array-of-maps, not a JSON
-string.** Firestore has a real timestamp type, so datetimes round-trip
-properly — JSON would force `default=str` and lose them. Two constraints:
-`Decimal` isn't a Firestore type (the query tools already coerce it to
-`float`, `.claude/rules/tools.md`), and **arrays can't directly contain
-arrays** — fine for flat scalar rows, but an ARRAY column would need
-flattening first. Map keys holding `Table[Column]` (DAX's fully-qualified
-names) write fine: the bracket restriction applies to dot-notation *field
-paths*, and these documents are written whole with `set()`.
-
-**Deferring both query tools reduces Firestore exposure — it doesn't
-eliminate it.** Deferral only stops *this batch's* queries from running. A
-query that completed in an **earlier iteration** is already in `tool_calls`
-when a later batch pauses, and it's written to `PendingApproval` with
-everything else — that's the round trip the resumed turn depends on for
-citing and verifying those numbers.
-
-So:
-- **Single-iteration pause** (the common case) — no query results at all,
-  just vector-search hits, a file read, a page's HTML.
-- **Multi-iteration pause** — carries whatever prior batches returned,
-  bounded by the 1,000-row cap per call. A few hundred KB at the extreme.
-
-**The 1,000-row cap is what bounds the worst case**, not deferral. If a turn
-ever does approach 1 MB, the fix is offloading large results to GCS and
-storing a reference — unlikely enough not to build now, but not ruled out.
-
-**Nothing is truncated anywhere.** A result is either complete or the call
-failed — a 10,000-row DAX result raises at the row cap, so `success: False`
-with the error recorded and no result. A failed record carried into
-`PendingApproval` is useful in its own right: the resumed agent knows it
-already tried that query and why.
-
-**Firestore vs. telemetry.** Firestore holds the minimum needed to resume;
-`agent_telemetry` holds the durable record — `query_text` *and* `result`,
-written when the query actually runs, which for a deferred query is on the
-resumed turn. BigQuery has no document-size limit, so full results live there
-regardless.
-
-**The helpers the node leans on.** `execute` and `dispatch_tool` both invoke
-with the full `ToolCall` shape (`id` included), not plain args — that alone
-is what makes LangChain hand back a real `ToolMessage`, MCP-hosted or not,
-artifact/`structuredContent` included, with no manual construction anywhere
-below (`.claude/rules/orchestrator.md`). A batch of these needs no combining
-either: `ChatAnthropic` coalesces consecutive `ToolMessage`s into one
-multi-result turn on its own.
-
-```python
-async def dry_run(query: str) -> int:
-    """Price a query without scanning anything. Free, and where BigQuery
-    validates syntax and resolves table references."""
-    job = client.query(query, job_config=QueryJobConfig(dry_run=True))
-    return job.total_bytes_processed
-
-async def execute(tc: dict, args: RunBigQuerySqlArgs, state: AgentState) -> ToolMessage:
-    """Run one already-priced, already-approved BigQuery query."""
-    tool_call = {**tc, "args": {"query": args.query,
-                                 "conversation_id": state["conversation_id"]}}
-    return await run_bigquery_sql.ainvoke(tool_call)
-
-# MCP_TOOLS: {name: tool} built once from client.get_tools() at startup.
-async def dispatch_tool(tool_call: dict, state: AgentState) -> ToolMessage:
-    """Routes one non-BigQuery tool call to the MCP server."""
-    name = tool_call["name"]
-    if name == "get_page_info":
-        tool_call["args"]["active_page"] = state["active_page"]
-    elif name == "generate_chart":
-        tool_call = {**tool_call,
-                     "args": resolve_chart_data(tool_call, state["tool_calls"])}
-    return await MCP_TOOLS[name].ainvoke(tool_call)
-```
-
-**`resolve_chart_data` is `generate_chart`'s equivalent of the two lines above
-for `get_page_info`** — same "mutate `args` before invoking" shape, just a
-lookup instead of a direct state read. Defined in `docs/chart-tool.md`, next
-to the args models it translates between.
-
-**Revisit when this is actually built (2026-09-27):** `dispatch_tool` above
-doesn't yet inject `generate_chart`'s `bucket_name`/`storage_backend`/
-`expiration_hours`/`access_token` (`docs/chart-tool.md`), and has no branch
-for `run_dax_query` at all — today that injection lives inline in
-`orchestrator.py` as `inject_dax_args`, a separate mechanism from this
-function. Reconcile both into whatever this function actually looks like
-once the approval-workflow/cost-tier system is built — not before, since too
-much could still change between now and then.
-
-**`dry_run` is a plain helper, not a tool.** It wraps
-`QueryJobConfig(dry_run=True)` and returns bytes. The model never calls it —
-the node does, on queries the model already produced. Exposing it would add a
-tool that returns a byte count and invite the model to report an estimate as
-if it were data.
+**Multiple pending queries in one batch — rare, handled simply.** Show the
+**largest query's text** on the card (`largest_pending_query` — two SQL
+blocks would hit the same wall-of-text problem the answer-length check
+exists for), but show the **summed `estimated_cost`** across the whole
+batch (`format_cost(batch_bytes)`, already a sum) — showing one query's
+price while running several would recreate the exact "approving a number
+that isn't the real one" failure this feature exists to prevent.
 
 ## The pause is resumable — cache the whole turn, not just the query
 
-The original `POST /ask` **has already returned** by the time the user decides.
-There's no open connection to resume, so approval arrives as a *new* request.
-Linking them uses **`live_turns/{conversation_id}` in Firestore** — the same
-document that already holds the status string and cancel flag
+The original `POST /ask` **has already returned** by the time the user
+decides. There's no open connection to resume, so a decision arrives as a
+*new* `POST /ask` call — `approval_decision` is a field on `AskRequest`
+itself (`"approved"` or `"rejected"`), mutually exclusive with `question`;
+there is no separate `/ask/respond` endpoint. Linking the decision back to
+the paused turn uses **`live_turns/{conversation_id}` in Firestore** — the
+same document that already holds the status string and cancel flag
 (`.claude/rules/gateway.md`).
 
 **Not process memory.** Cloud Run runs multiple concurrent instances, and the
-approval click could land on a different one than the turn that paused. An
+decision could land on a different one than the turn that paused. An
 in-memory dict would silently miss it.
 
 **Telemetry is never read back for this.** It's a write-only audit log of
-*completed* turns; a paused turn isn't in it yet. Firestore is the live state.
+completed turns; a paused turn isn't in it yet. Firestore is the live state.
 
-**`PendingApproval`'s schema is in `.claude/rules/gateway.md`** — 11 fields,
-one place. **Built by `build_pending_approval()`** (defined alongside
-`AgentState` in `.claude/rules/orchestrator.md`), **called from the
-gateway's `run_agent_turn` after the graph finishes — not from `finalize`**,
-which never touches `live_turns` (see that doc's `finalize` section for
-why). What matters here is the *rule* behind `PendingApproval`'s contents,
-not where it's assembled:
+**`PendingApproval`'s schema is in `.claude/rules/gateway.md`** (`app/orchestrator/state.py`
+is where it's actually defined). **Built by `build_pending_approval()`**
+(`app/gateway/entry_exit.py`), **called from `consume_graph`'s `finally`
+block, not `finalize`** — `finalize` never touches `live_turns`
+(`.claude/rules/gateway.md`'s "Why not in `finalize`" explains why: `astream`
+only yields a node's update after it finishes, so a `finalize`-side write
+would race the gateway's own cleanup). `consume_graph` replaces the whole
+`live_turns` document with `{"pending_approval": ...}` (no merge — nothing
+else in the document matters once paused) when `final_state["needs_approval"]`,
+and deletes it on every other exit.
 
-**Carry what bounds total turn consumption; reset what's scoped to one
-attempt.** `iteration_count` and `bytes_consumed` carry, so approval can't be
-used to bypass the absolute cap. Token counts don't — the pause row already
-recorded them, and counting them twice would inflate the turn. `filter_context`
-and `active_page` carry as frozen copies: the resumed turn must answer against
-the dashboard state the question was asked under, not whatever the user has
-clicked since.
+**Carry what bounds total turn consumption or is needed to resume reasoning;
+reset what's scoped to one attempt; omit what's already recorded elsewhere.**
+`iteration_count` and `bytes_consumed` carry, so approval can't be used to
+bypass the absolute cap. `verification_retry_count`/`length_retry_count`
+reset — scoped to one synthesis attempt, and post-approval synthesis runs
+against a different, larger result set. Token counts and `errors` are
+omitted — the pause telemetry row already recorded them. `question` *is*
+carried (unlike the earlier design) — telemetry needs it for the response
+row, and there's no other way to recover it once it's folded into the
+`HumanMessage`'s content.
 
-**`pending_queries` and `deferred_dax` carry `{id, query}`/`{id, dax}`, not
-bare text** — the id is the original `tool_call_id`, so resume can invoke
-with the same id and the resulting `ToolMessage` lands where the paused
-`AIMessage` is waiting for it. A batch can trip the threshold with several
-queries in it, and every one runs on approve.
+**Messages are redacted before storage, then selectively restored on
+resume.** `build_pending_approval` redacts every successful non-`submit_answer`
+`ToolMessage` with a generic notice (`PAUSE_REDACTED_MESSAGE`,
+`app/gateway/entry_exit.py`'s `_redact_tool_results` — the same helper
+`build_updated_history` uses for cross-turn staleness, just a different
+message). On resume, `rebuild_paused_messages` walks the stored messages and
+restores only the ones whose matching `ToolCallRecord` is a successful
+`NUMERIC_SOURCE_TOOLS` result — reconstructing the exact labeled content
+(`label_chartable_result`, `app/orchestrator/shared_helpers.py`) the model
+originally saw, same `ref_id` included, by reading `tool_calls` (which is
+*never* redacted, carried in full) rather than re-running anything. Numeric
+results survive **every** pause/resume cycle in a turn, all the way back to
+its start, because `tool_calls` only ever accumulates (`append_list`) and
+each resume re-seeds from the full list. Non-numeric results
+(`search_docs`, `get_page_info`, code search, `generate_chart`) are never
+restored — once redacted, they stay redacted through every subsequent
+resume; the model re-calls the tool if it still needs them. This is
+deliberate: non-numeric results are the ones where staleness during an
+unpredictable human-approval wait is a real risk, so they're always treated
+as potentially stale rather than silently re-presented as current.
 
-**`tool_calls` must carry full `result`, not summaries** — on resume, the
-model cites across the *combined* old-plus-new results, so old ones need to be
-as complete as they were originally. Size is already bounded: the row caps
-fired before the pause, so nothing here exceeds 1,000 rows.
+## Resuming — `POST /ask` with `approval_decision: "approved"`
 
-**Multiple pending queries in one turn — rare, handled simply.** Show the
-**largest query's text** on the card (two SQL blocks would hit the same
-wall-of-text problem the answer-length check exists for), but show the
-**summed `estimated_cost`** across all of them — showing one query's price
-while executing several would recreate the exact "approving a number that
-isn't the real one" failure this feature exists to prevent. On approval,
-**execute every pending query**, not just the displayed one; they were all
-part of answering the question.
+`run_agent_turn` (`app/gateway/gateway.py`) branches on `body.approval_decision`
+before building `initial_state`:
 
-## `POST /ask/respond/{conversation_id}` — the return path
+1. Read `live_turns/{conversation_id}`'s `pending_approval`. If it's missing
+   (already resumed once, or a bogus request — the frontend disabling
+   send-while-approval-card-showing is what should make this rare in
+   practice), return the same generic fallback message any other
+   unexpected failure gets (`GENERIC_TURN_ERROR_MESSAGE`) — no graph run.
+2. **Delete the `live_turns` document — read first, then clear, before
+   resuming.** Avoids a window where a second, racing resume request could
+   read the same pending approval twice.
+3. Build `initial_state` via the normal `build_initial_state(...)`, using
+   `pending`'s `question`/`filter_context`/`active_page` (not the request
+   body's — the body carries no question on a resume). Then override:
+   `messages` (via `rebuild_paused_messages`), `tool_calls`, `iteration_count`,
+   `bytes_consumed`, `bytes_consumed_baseline` (= `pending["bytes_consumed"]`,
+   marking where this phase starts — see `.claude/rules/telemetry.md` for why),
+   `approved_batch = True`, `approval_decision = "approved"`.
+4. Run it through `consume_graph` exactly like a fresh turn. `route_entry`'s
+   conditional edge off `START` sends a batch with `approved_batch` set
+   straight to `call_tool` — **no separate resume node.** `call_tool_node`
+   reads `state["messages"][-1].tool_calls`, which is the dangling
+   `AIMessage`'s original request — the *same* batch that paused, BigQuery
+   and non-BigQuery calls alike — and dispatches it normally, with
+   `approved_batch` only skipping the pause decision, not the dry-run (still
+   needed for `cost_cap_exceeded`) or anything else.
+5. From there it's an ordinary turn: `agent`/`verify`/`check_length` all run
+   as usual, including the possibility of a *second* pause later in the same
+   resumed turn (each one gets its own pause row) or a hard decline if
+   `bytes_consumed` crosses `ABSOLUTE_CAP` mid-loop — the user already paid
+   for the approved query and can still get a decline; correct, if
+   surprising the first time you see it.
+6. `finalize` writes the **response row** the same way it writes any other
+   row — post-approval work only, by construction: `bytes_consumed_baseline`
+   is subtracted in `build_telemetry_row` so this row never double-counts
+   bytes the pause row already reported (`.claude/rules/telemetry.md`).
+7. History write and `live_turns` cleanup happen exactly as for a fresh turn.
 
-Body: `{decision: "approve" | "reject"}`.
+## Rejecting — `POST /ask` with `approval_decision: "rejected"`
 
-**On approve:**
-1. Look up `PendingApproval` by `conversation_id`.
-2. **Invoke every `pending_queries`/`deferred_dax` entry with its original
-   `id`** — same `.ainvoke(tool_call)` mechanism as normal dispatch, so each
-   call auto-produces a real `ToolMessage` carrying that same `tool_call_id`.
-   No LLM in this step. This is what guarantees the query that runs is the one
-   the human priced and approved; asking the model to "decide" to call it
-   again guarantees nothing. The DAX ones weren't priced (no dry-run exists
-   for `executeQueries`) — they were deferred so their results wouldn't sit in
-   Firestore, and they run here against fresher data.
-3. Seed state: `messages_from_dict(pending.messages)` becomes
-   `state["messages"]`, with the new `ToolMessage`s appended so the paused
-   `AIMessage`'s tool_calls are all finally resolved — `ChatAnthropic`
-   coalesces them into one valid turn regardless of when each was built.
-   `tool_calls` seeds from `pending.tool_calls` plus `ToolCallRecord`s built
-   from the new results (`records_from`). `iteration_count` and
-   `bytes_consumed` carry forward.
-4. **Re-enter the normal agent loop.** The approved query is not necessarily
-   the last thing the question needed — the threshold can be crossed at step
-   2 of a 4-step chain. Synthesizing immediately would answer from incomplete
-   data; verification would then correctly decline, meaning the user paid for
-   a query and still got nothing.
-5. Normal verification, guardrails, and iteration cap apply.
-6. Write the **response row** — post-approval work only
-   (`.claude/rules/telemetry.md`).
-7. Clear the `live_turns` document.
+No graph run at all — rejection is a pure gateway short-circuit:
 
-**Re-approval is expected, not an error.** The resumed loop can cross the
-threshold again; each pause writes its own row.
+1. Same read-then-delete of `pending_approval` as the approved path (shared
+   code, branches after).
+2. Build and write a **minimal telemetry row** directly from `gateway.py`
+   (`write_rejected_telemetry`) — the one case where a telemetry row isn't
+   written by `finalize`, because there's no graph run for `finalize` to be
+   part of. `question`/`filter_context`/`active_page`/`estimated_cost`/
+   `pending_queries`/`deferred_dax` carry from `pending` for continuity;
+   `bytes_consumed`/`iteration_count` are `0` (no new work happened, and the
+   pause row already reported the running total); `cancelled: True` and
+   `approval_decision: "rejected"` both set.
+3. Return `AgentResponse(answer_markdown=REJECTED_MESSAGE, sources=[])`.
 
-**A resumed turn can still hard-decline.** If `bytes_consumed` crosses the
-absolute cap mid-loop, `cost_cap_exceeded` fires exactly as in any other turn
-— the user already paid for the approved query and still gets a decline.
-Correct, and worth knowing before it happens.
+**Abandoned approvals need no cleanup code and no detection logic.** If a
+user never responds, the `live_turns` document sits there until the next
+turn on that conversation overwrites it (normal or another resume), or the
+owning `sessions` document ages out on its own 30-day TTL (`SESSIONS_TTL_DAYS`,
+`.claude/rules/gateway.md`) — nothing time-based targets `pending_approval`
+specifically. They're already findable in telemetry regardless: a pause row
+with no matching response row for the same `conversation_id` *is* the
+record — one query, no scheduled sweep.
 
-**On reject** — no query execution, no reasoning call needed for tool
-selection. If earlier tools already succeeded, this is a **partial answer**,
-reusing the `iteration_cap_hit` machinery: synthesize from `tool_calls` alone
-and state plainly what wasn't addressed — *"I wasn't able to answer the
-numeric part; the query needed approval and was declined."* Log
-`approval_decision: "rejected"` with `pending_query` retained.
+**A normal question arriving while a pending approval exists** is handled as
+a frontend responsibility, not backend code — the send control should
+disable while the approval card is showing, same `DisplayMode` mechanism
+already used for "turn in flight" (`docs/frontend.md`). If that's ever
+bypassed, the backend degrades safely with no special handling: a fresh
+turn's `initial_state` never reads `pending_approval`, and `consume_graph`'s
+first write to `live_turns` (`.set(...)`, not merged) overwrites the stale
+object as a side effect.
 
-**Abandoned approvals need no cleanup code and no detection logic.** If a user
-never responds, the `live_turns` document sits there harmlessly and ages out
-with the conversation. And they're already findable: a pause row with no
-matching response row for the same `conversation_id` *is* the record
-(`.claude/rules/telemetry.md`) — one query, no scheduled sweep. Only the
-*timing* of abandonment is unrecorded, bounded by the pause row's timestamp
-and the conversation TTL.
-
-**Clear the whole `live_turns` document once resolved** — approved, rejected,
-or cancelled. All three of its fields are scoped to one in-flight turn, so a
-wholesale delete is safe. `sessions/{conversation_id}` is deliberately a
-*separate* document precisely so this cleanup can't touch chat history.
-
-**Safe to show the query verbatim:** it can only reference `agent_safe`
-objects (IAM enforces this before it runs). Assumes the approver reads SQL —
-true here. Rendering is a gateway concern — see `.claude/rules/gateway.md`.
+**Safe to show the pending query verbatim:** it can only reference
+`agent_safe` objects (IAM enforces this before it runs). Rendering is a
+gateway/frontend concern — `.claude/rules/gateway.md`, `docs/frontend.md`.

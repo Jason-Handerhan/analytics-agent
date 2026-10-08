@@ -539,8 +539,7 @@ class StackedHorizontalBarChartSpec(ChartSpecBase):
         for segment in grid.columns:
             ax.barh(grid.index, grid[segment], left=left, label=str(segment))
             left += grid[segment]
-        ax.legend(title=self.segment_field, bbox_to_anchor=(1.02, 1),
-                  loc="upper left")     # outside — segments crowd the plot
+        ax.legend(title=self.segment_field)     # placed below the plot by _finish()
         return self._finish(fig, ax)
 
 class LineChartSpec(ChartSpecBase):

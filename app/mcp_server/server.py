@@ -9,3 +9,4 @@ mcp = FastMCP(MCP_SERVER_NAME)
 from app.mcp_server import dax_tool
 from app.mcp_server import chart_tool
 from app.mcp_server import code_search
+from app.mcp_server import combine_tool

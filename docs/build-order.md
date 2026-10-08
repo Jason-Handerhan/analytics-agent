@@ -6,18 +6,69 @@
 real graph and verified live, and item 9 fully complete** — all three
 remaining tools (`search_docs`, `get_page_info`, `get_repo_contents`) built,
 live-verified, and now Layer 1 tested too (see the entries below item 8).
-**Items 10-15 (Firestore chat history, `combine_results`, `ask_user`,
-`live_turns`/status polling, the approval workflow, cancellation) not
-started** — item 10's chat-history half is already proven live in
-`notebooks/phase3_orchestrator_e2e.ipynb`, just not yet ported into
-`app/gateway/gateway.py`; the rest is substantial remaining Phase 3 scope,
-not small wrap-up items, despite every *tool* from the original lineup now
-being done. All of items 1-6 promoted
+**Item 10 (Firestore chat history) complete, 2026-10-04** — ported into
+`app/gateway/gateway.py`'s `run_agent_turn`, Layer 1 tested
+(`tests/test_entry_exit.py`), and live-verified via
+`notebooks/phase3_gateway_e2e.ipynb` (real write, real follow-up, real
+read-back). **Item 11 (`combine_results`) complete, 2026-10-04** — ported
+to `app/mcp_server/combine_tool.py`, dispatch wired in `orchestrator.py`,
+Layer 1 tested (`tests/test_combine_tool.py`), and live-verified on Q2. Item 12 (`ask_user`) superseded by the clarifying-question design, 2026-10-05. **Item 13 (`live_turns` status polling) complete, 2026-10-06** -- the status path is `consume_graph`, `read_live_status`, and `GET /ask/status` in `app/gateway/gateway.py`, Layer 1 tested in `tests/test_gateway.py`, and live-verified in `notebooks/phase3_gateway_e2e.ipynb`. The final few statuses are best-effort; see `.claude/rules/gateway.md`.
+
+**Item 14 (approval workflow) complete, 2026-10-08** -- pending-approval
+pause/resume/reject fully built: `PendingApproval` (`app/orchestrator/state.py`),
+the gateway pause path with a conditional `live_turns` delete (`consume_graph`),
+message strip/rebuild (`_redact_tool_results`/`rebuild_paused_messages`,
+`app/gateway/entry_exit.py`), `approval_decision` on `AskRequest` with its
+exactly-one-of validator, `route_entry`'s conditional edge off `START`, and
+`run_agent_turn`'s three-way branch (approved resume, rejected-as-cancellation,
+fresh turn) in `app/gateway/gateway.py`. All three telemetry rows (pause,
+approve, reject) write correctly, including a `bytes_consumed_baseline` fix so
+a resumed turn's response row doesn't double-count bytes its pause row already
+reported. Layer 1 tested across `tests/test_entry_exit.py`,
+`tests/test_orchestrator.py`, `tests/test_gateway.py`, `tests/test_telemetry.py`;
+live-verified via the resume-path sections added to `notebooks/phase3_graph.ipynb`
+and `notebooks/phase3_orchestrator_e2e.ipynb`, and end to end through the real
+HTTP routes in `notebooks/phase3_gateway_e2e.ipynb`'s own resume section --
+approve and reject both pass; the `TABLESAMPLE` gate correctly forced multiple
+sequential pauses on one turn, all approved and resolved correctly with
+accurate telemetry; the absolute byte cap produced a correct partial answer;
+and the dry-run-failure decline path works. The normal-question-while-pending
+backstop is resolved as a frontend responsibility (disable send while the
+approval card shows) rather than backend code -- the backend already degrades
+safely if that's ever bypassed, since a fresh turn never reads `pending_approval`
+and the next `consume_graph` run overwrites the stale doc regardless.
+
+**Real deviations from the originally-documented design, still to reconcile in
+the docs pass below:** resume replays the dangling `AIMessage.tool_calls`
+through the ordinary `call_tool_node`, not a separate `execute_approved` node;
+`PendingApproval.pending_queries` turned out to be informational only for
+resume, not load-bearing; `last_activity_at`'s TTL field was fixed to write a
+real future expiry instead of `now()` (it was expiring sessions almost
+immediately); `get_db` was renamed to `get_firestore_client`.
+
+**Docs pass (step 14 of this item) not yet done** -- `.claude/rules/gateway.md`,
+`.claude/rules/orchestrator.md`, `.claude/rules/telemetry.md`,
+`docs/approval-workflow.md`, `docs/frontend.md`, and `docs/testing.md` all need
+updating to match what's actually built.
+
+**Item 15 (cancellation) not started** — substantial remaining Phase 3 scope,
+despite every *tool* from the original lineup now being done. All of items
+1-6 promoted
 out of
 the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
 nodes, routing, graph) and `app/orchestrator/tools.py`
 (`run_bigquery_sql`, `dry_run`, `submit_answer`) — verified live end to end
 against a real MCP server, real Claude calls, and a real telemetry write.
+
+**Clarifying question (folded into `submit_answer`), 2026-10-05** -- `submit_answer`
+takes exactly one of `answer_markdown` or `clarifying_question`. A question turn
+copies the question into `answer_markdown` so the length check, verification,
+and `finalize` run unchanged, clears `suggested_follow_ups`, and writes
+`clarifying_question` to `agent_telemetry` (NULL on answer turns). This replaces
+the separate `ask_user` tool planned for item 12. Layer 1 tested
+(`tests/test_submit_answer.py`, `tests/test_orchestrator.py`,
+`tests/test_telemetry.py`). Live-verified in `notebooks/phase3_graph.ipynb` and
+`notebooks/phase3_orchestrator_e2e.ipynb`, including the telemetry row.
 
 **Item 6 (verification) done, 2026-09-25 — with real deviations from the
 originally-documented design.** `verify_node`/`verify_response` are real, not
@@ -203,8 +254,8 @@ pre-IAM `bigquery.AccessEntry` dataset ACL API instead (`entity_type=
 "userByEmail"`, not `"serviceAccount"` — the REST schema has no separate
 service-account entity type).
 
-`tests/test_orchestrator.py` gained 3 tests for the new helpers;
-`tests/test_gateway_auth.py`'s `test_post_ask_success` now mocks
+`tests/test_orchestrator.py` gained 3 tests for the new helpers (since moved to `tests/test_entry_exit.py`);
+`tests/test_gateway.py`'s `test_post_ask_success` now mocks
 `init_orchestrator`/`graph` (a small `_FakeGraph` stand-in) instead of
 asserting the old echo text, plus a new test for the `MAX_QUESTION_CHARS`
 rejection. Live-verified end to end against the deployed Cloud Run service:
@@ -420,11 +471,11 @@ is built yet — this entry is planning only.**
 split out into its own item 13.** The original item 10 bundled two
 Firestore documents with two different lifecycles and two very different
 build states: `sessions.history_messages` (read/write, FIFO-trimmed chat
-history) is already proven live end to end in
+history) was already proven live end to end in
 `notebooks/phase3_orchestrator_e2e.ipynb` — real Claude calls, real history
-read-back and write-back — and only needs porting into
-`app/gateway/gateway.py`'s `run_agent_turn` (still `history_messages=[]
-# TODO` there today). `live_turns` (`status`/`thinking_log`, the
+read-back and write-back — and has since been ported into
+`app/gateway/gateway.py`'s `run_agent_turn` (item 10 is now complete, see
+the status block above). `live_turns` (`status`/`thinking_log`, the
 `GET /ask/status` polling endpoint) has no notebook prototype at all and
 hasn't been started. Bundling them under one item obscured that gap;
 splitting them makes it visible. Sequenced after the two new tool items
@@ -432,11 +483,16 @@ splitting them makes it visible. Sequenced after the two new tool items
 (`combine_results`) → 12 (`ask_user`) → 13 (`live_turns`/status polling) →
 14 (approval workflow) → 15 (cancellation).
 
-**Doc correction made in passing:** `.claude/rules/gateway.md`'s `sessions`
-schema names this field `recent_messages`; the actual, notebook-proven
+**Doc correction, fixed 2026-10-04:** `.claude/rules/gateway.md`'s `sessions`
+schema named this field `recent_messages`; the actual, now-shipped
 implementation calls it `history_messages` (matching `app/config.py`'s own
-`HISTORY_TURN_COUNT` comment). Code is authoritative — the doc's wording is
-stale here and still needs correcting, not yet done as part of this entry.
+`HISTORY_TURN_COUNT` comment). Code is authoritative — `gateway.md`'s whole
+"Conversation history" section was rewritten to match the real, shipped
+redaction design (`build_updated_history` replaces every successful
+non-`submit_answer` result, `generate_chart` included, with a fixed
+stale-result notice) in place of the originally-planned `HISTORY_ROW_CAP`
+row-capping, which was never built and is removed from the docs that still
+named it (here, `gateway.md` ×2, `orchestrator.md`).
 
 _Last updated: 2026-10-04._ **Phase 0 (2026-09-13): all nine items verified
 live against the real project, complete** — see git history for the full
@@ -444,7 +500,7 @@ verification detail if ever needed; kept brief here since it's done, not
 current.
 
 **Phase 1, all 7 items done.** Items 1+2 (echo `/ask`, `/conversation` +
-ownership check) built and Layer 1 tested (`tests/test_gateway_auth.py`,
+ownership check) built and Layer 1 tested (`tests/test_gateway.py`,
 9 tests). Item 3 (`Dockerfile` + deploy) done and verified live. Item 4
 (custom connector) done and verified live — both operations return real
 `200`s through real OAuth. Two real deviations from plan, both now reflected
@@ -1010,8 +1066,9 @@ layer failed.
    `call_tool`, `check_length`, `verify`, `finalize` — wired with an empty
    tool list (`.claude/rules/orchestrator.md`). `agent` writes
    `answer_markdown` itself whenever it has no tool calls; no separate
-   structured-output call. `route_entry` and `execute_approved` are
-   approval-specific and land with #11.
+   structured-output call. `route_entry` is approval-specific and lands
+   with #11 (as a conditional edge off `START`, not a node — see item 14's
+   entry above for how this actually landed).
    **Consume with `astream`, not `ainvoke`, from the start** — status
    updates depend on it, and switching invocation style later means touching
    every call site (`.claude/rules/gateway.md`). Status *strings* land in
@@ -1114,9 +1171,9 @@ layer failed.
    clarifying exchange already in `history_messages` via the normal
    `sessions.history_messages` read-back. One honest trade-off: the tool
    calls made before the question demote from this turn's live messages to
-   history one turn earlier than they otherwise would, so `HISTORY_ROW_CAP`
-   (tighter than the live per-tool cap) applies to them a turn sooner —
-   minor, already an accepted property of history elsewhere. Real
+   history one turn earlier than they otherwise would, so their results get
+   redacted to the stale-result notice a turn sooner than they otherwise
+   would — minor, already an accepted property of history elsewhere. Real
    motivating case (2026-09-30 transcript): asked for "training vs. test,"
    the model discovered no training split exists, silently substituted
    validation vs. test, and explained the substitution only after already
@@ -1136,7 +1193,7 @@ layer failed.
    `sessions.history_messages`/`build_history_messages()` plumbing item 10
    builds, so implementing it immediately after, while that machinery is
    fresh, costs less than picking it up cold later as a standalone item.
-13. **`live_turns` — live status polling** (`.claude/rules/gateway.md`) —
+13. **`live_turns` — live status polling** (`.claude/rules/gateway.md`) — **built 2026-10-06** (the names below, `set_status`/`append_thinking`, became `consume_graph`/`log_thinking`) —
    the `live_turns` document's `status` and `thinking_log` fields only;
    `cancel_requested` and `pending_approval` are items 14 and 15's own
    concern, written there, not here. `set_status`/`append_thinking` calls
@@ -1146,14 +1203,16 @@ layer failed.
    happy path). **Split out of the original item 10, 2026-10-04** — no
    notebook prototype exists for any of this yet, unlike item 10's chat
    history half.
-14. **The approval workflow** (`docs/approval-workflow.md`) — the pause,
-   `PendingApproval` caching, `POST /ask/respond`, `route_entry` and
-   `execute_approved`, and the hard-decline tier. Depends on #5's cost tiers
-   and #10's/#13's Firestore state. The UI half (approve/reject buttons)
-   lands in Phase 4. **Verify it here anyway, via curl/script against
-   `/ask/respond`** — same pattern as Phase 0's `executeQueries` smoke test.
-   The resume logic shouldn't sit a whole phase untested just because its
-   buttons don't exist yet.
+14. **The approval workflow** (`docs/approval-workflow.md`) — **built
+   2026-10-08** (see the status block above for what actually landed: no
+   separate respond endpoint — `approval_decision` on `AskRequest` instead
+   — and no `execute_approved` node; resume replays the dangling
+   `AIMessage.tool_calls` through the ordinary `call_tool_node`) — the
+   pause, `PendingApproval` caching, `route_entry`, and the hard-decline
+   tier. Depended on #5's cost tiers and #10's/#13's Firestore state, as
+   planned. The UI half (approve/reject buttons) still lands in Phase 4;
+   verified directly via the real `/ask` route in the meantime, same
+   pattern as Phase 0's `executeQueries` smoke test.
 15. **User cancellation** — `POST /ask/cancel/{conversation_id}` writing the
    `cancel_requested` flag, and the node-level checks that route to
    `finalize`. The per-tool cancellation mechanism already shipped with

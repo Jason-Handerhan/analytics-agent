@@ -145,11 +145,6 @@ than the task needs.
 - Anything that changes the verification contract.
 - Whether Instacart bronze already has `products`/`aisles`/`departments` with
   id→name mappings — check before assuming new ingestion is needed.
-- **The three cost thresholds**: `BIG_QUERY_THRESHOLD` (per *batch*, not per
-  query — the summed dry-run bytes of one dispatch), `ABSOLUTE_CAP` (the
-  turn's cumulative `bytes_consumed`, and also `maximum_bytes_billed` on
-  every job), and the per-TB display rate. Decisions in bytes; dollars
-  display only.
 - Adding a dependency not in `pyproject.toml`.
 - Adding a new top-level directory or module.
 - Anything making a number reachable without a live tool call — including

@@ -108,10 +108,11 @@ drift apart. Re-run `create_table.py` after any schema change (BigQuery can't
 | `cost_cap_exceeded` | No — `False` | Phase 3 — hard decline, logged synchronously like any normal turn |
 | `chart_urls` | No — empty | Phase 3 (`generate_chart`) — every successful chart URL this turn, not just one |
 | `suggested_follow_ups` | No — empty | Phase 3 item 6, via `submit_answer` (`.claude/rules/orchestrator.md`) — moved up from its original Phase 4 slot |
+| `clarifying_question` | No — NULL | Clarifying-question feature (`.claude/rules/orchestrator.md`) -- the question asked instead of answering. The writer maps an empty string to NULL, so answer turns stay NULL; on question turns `answer_markdown` holds the same text |
 | `all_prose_numeric_claims` | No — empty | Phase 3 item 6, via `submit_answer` — the model's declared prose claims, promoted to a top-level `REPEATED FLOAT` column for the same reason as `query_text`: direct queryability, no `JSON_VALUE(args, ...)` needed on the `submit_answer` entry in `tool_calls` |
 | `is_projection` | **Not a field yet** | Added *with* the Phase 7 `run_projection` tool, not before |
 | `prompt_tokens`, `completion_tokens`, `llm_calls` | No — 0 | Accumulated in `AgentState` across every LLM call. **Instrument, don't gate**: `max_iterations` and the retry caps already bound LLM spend, and there's no unbounded-tail case like a table scan. Also the signal for prompt bloat — rising prompt tokens means static context grew or cache hits dropped |
-| `bytes_consumed` | No — 0 | Phase 3 — the turn's BigQuery total, same counter the cost guardrail reads. The pause/response split means **summing both rows** gives the turn's real spend |
+| `bytes_consumed` | No — 0 | Phase 3 — *this row's* increment only, not the running total the cost guardrail reads (`AgentState.bytes_consumed`) — `build_telemetry_row` subtracts `bytes_consumed_baseline` before writing. Summing every row for a turn (however many pauses it took) gives the real spend |
 | `iteration_count` | No — 0 | Phase 3 — **the count, not just `iteration_cap_hit`.** The cap is a calibration starting point (`.claude/rules/orchestrator.md`); a boolean only says how often 12 was hit, never what the 95th percentile actually needs |
 | `errors` | No — `[]` | Turn-level failures (stage, type, message, timestamp, `tool_call_id`). A tool-call-scoped failure carries the matching `tool_call_id` — a direct join to `tool_calls`, not a duplicate of it — one entry per failed call, not deduped per batch. Also covers LLM call failures, verification exhaustion, chart failures (`tool_call_id: null`). Carried in `AgentState.errors`; write it or the diagnosis is lost |
 | `cancelled` | No — `False` | Phase 3 — set when `POST /ask/cancel` fires. **Different from abandoned approvals**, which are deliberately unlogged: a cancel is a real synchronous event with a clean trigger, not silence over time |
@@ -147,14 +148,27 @@ everywhere else. So:
    `prompt_tokens`, `completion_tokens`, `llm_calls`, `bytes_consumed`,
    `errors`, timing, plus `pending_query`, `pending_queries`,
    `deferred_dax`, and `estimated_cost`. `approval_decision` is null.
-2. **Response row** — written when `/ask/respond` fires. Same
-   `conversation_id`, `approval_decision` set, covering **post-approval work
-   only**.
+2. **Approved response row** — written by `finalize` when a resumed turn
+   (a *new* `POST /ask` call with `approval_decision: "approved"`) completes.
+   Same `conversation_id`, `approval_decision` set, covering **post-approval
+   work only**.
+3. **Rejected response row** — written directly by the gateway
+   (`write_rejected_telemetry`, `app/gateway/gateway.py`), not by `finalize` —
+   a rejection never runs the graph at all. Minimal: `bytes_consumed` and
+   `iteration_count` are `0` (no new work happened), `cancelled: True`,
+   `approval_decision: "rejected"`.
 
-**Sum the two rows for the turn's true total.** Each row is self-contained
-for its own half, so nothing is double-counted — this is why
-`PendingApproval` carries `bytes_consumed` (a guardrail input the resumed
-loop needs) but not token counts (already recorded here).
+**Sum every row for the turn's true total — including a turn that pauses
+more than once.** Each row is self-contained for its own slice, enforced by
+`build_telemetry_row` itself: it takes both `bytes_consumed` (the running
+cumulative total at write time) and `bytes_consumed_baseline` (where *this*
+phase started — `0` for a turn's first pass, re-seeded from the pending
+object's own `bytes_consumed` on every resume) and reports their
+*difference*, not the raw total. This is why `PendingApproval` carries
+`bytes_consumed` (a guardrail input the resumed loop needs, and the source
+of the next row's baseline) but not token counts (already recorded here).
+A turn that pauses twice gets three rows, each reporting only its own
+increment; summing all of them still equals the true total.
 
 **Abandoned approvals are findable with no extra machinery.** A pause row
 with no matching response row for the same `conversation_id` *is* the record

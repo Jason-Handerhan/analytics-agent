@@ -127,7 +127,7 @@ what it renders. Re-deriving it client-side isn't an option.
 
 **`colChat` and the server's history are two different things.** `colChat` is
 the *visible transcript* — everything the user has scrolled through this
-session, client-side only. The model sees `sessions.recent_messages`, capped
+session, client-side only. The model sees `sessions.history_messages`, capped
 at the **last 5 turns** (`.claude/rules/gateway.md`). So a user can be looking
 at twenty messages while the model is working from five. Don't send `colChat`
 to the server; it isn't the history, and the server already has its own.
@@ -205,6 +205,12 @@ to the server; it isn't the history, and the server already has its own.
   string as a side effect of running the turn; the mechanism, the status
   vocabulary, and why status lives in Firestore rather than process memory
   are all in `.claude/rules/gateway.md`.
+
+  **Status lines are past tense, with a duration.** Each one names a step that
+  already finished, e.g. `Gathered results from BigQuery (1.5s)`. `Verified results`
+  appears only when the answer passed verification. The last few steps are written and
+  deleted within a fraction of a second, so a 1-second poll often misses them. Treat
+  the final status as best-effort; the answer itself is always in the `PostAsk` response.
 
 - **User-cancel button (Phase 4 — the endpoint lands in Phase 3):** a `Cancel` button shown alongside the thinking icon, `Visible` exactly while a response is in flight. `OnSelect` fires `POST /ask/cancel/{conversation_id}`
   (`.claude/rules/gateway.md`) — fire-and-forget; the original blocked call resolves on its own shortly after. Complements, doesn't replace, the automatic gateway timeout — gives the user control without changing the underlying guardrail.
@@ -318,6 +324,15 @@ Set(varAnswer, IfError(
 ));
 ```
 
+**TODO -- no connector error handling built yet.** `IfError(..., Blank())`
+discards whatever the failure was; nothing downstream checks
+`IsBlank(varAnswer)`. So today, any non-2xx response -- a 401, the
+`MAX_QUESTION_CHARS` 400, a validation 422 (e.g. `AskRequest`'s
+exactly-one-of-`question`-or-`approval_decision` check,
+`.claude/rules/gateway.md`), a 500 -- has an undefined user experience, not
+a helpful message. Needs real handling before this matters in practice; not
+deciding the approach here.
+
 **A missing parameter filter is worse than a missing dimensional one.** A
 missing dimensional filter gives the right number for the wrong slice; a
 missing parameter filter makes the disconnected table fall back to its
@@ -399,12 +414,26 @@ Microsoft documentation and was never independently verified — flagging per
 regardless: a readability/display-sanity ceiling, not a workaround for a
 platform limit that turned out not to exist.
 - **The approval card needs two buttons, not just a display.** `Approve` and
-  `Reject` both fire `POST /ask/respond/{conversation_id}` with their
-  decision (`docs/approval-workflow.md`), then replace the card with whatever
-  `AgentResponse`
-  comes back — a real answer on approve, a partial answer on reject.
-  Show `estimated_cost` (the dollar string) prominently alongside
-  `pending_query`; that's the number the human is actually approving.
+  `Reject` both fire the same `POST /ask` route as a normal question, with
+  `approval_decision` set to `"approved"`/`"rejected"` instead of `question`
+  — there's no separate respond endpoint (`docs/approval-workflow.md`). Then
+  replace the card with whatever `AgentResponse` comes back — a real answer
+  on approve, a flat cancellation message on reject (not a partial answer;
+  rejection never re-synthesizes from whatever ran before the pause). Show
+  `estimated_cost` (the dollar string) prominently alongside `pending_query`;
+  that's the number the human is actually approving.
+- **Disable the send control while the approval card is showing, same
+  mechanism as "turn in flight."** The window between the pause response
+  landing and the user clicking Approve/Reject isn't "in flight" (the
+  `POST /ask` call already returned), so the existing in-flight
+  `DisplayMode.Disabled` doesn't cover it on its own — extend the same
+  formula with an OR: `DisplayMode.Disabled` while *either* a turn is in
+  flight *or* an unresolved approval card is showing. The variable the card
+  already needs for its own content (`pending_query`/`estimated_cost`) is
+  the same signal this needs — no new tracking required, just wiring the
+  send control to it too. This is the primary defense against a normal
+  question arriving mid-pause; the backend already degrades safely if it's
+  ever bypassed (`docs/approval-workflow.md`).
 - **`cost_cap_exceeded: true` is a third distinct card state** — not an
   approval prompt (there's nothing to approve) and not a normal answer.
   No buttons; just the declined message and `estimated_cost` so the user

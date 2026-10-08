@@ -2,16 +2,15 @@
 paths:
   - 'app/gateway/**'
   - 'app/config.py'
-  - 'tests/test_gateway_auth.py'
+  - 'tests/test_gateway.py'
   - 'tests/test_static_context.py'
-  - 'tests/test_conversation_state.py'
-  - 'tests/test_approval_e2e.py'
+  - 'tests/test_entry_exit.py'
 ---
 
 # Gateway: auth, API surface, response formatting
 
-> **Deep dives:** `docs/approval-workflow.md` before building
-> `/ask/respond`. `docs/auth.md` for the full request-time auth chain,
+> **Deep dives:** `docs/approval-workflow.md` for the approval pause/resume
+> flow. `docs/auth.md` for the full request-time auth chain,
 > `docs/frontend.md` for Power Apps response rendering. `local-dev-environment-setup.md`
 > Step 14 for the Entra app registrations this depends on.
 
@@ -69,7 +68,7 @@ def validate_api_key(x_api_key: str) -> None:
 # Decided (2026-09-15): plain function calls read the same to anyone who
 # knows Python; Depends() only means something if you already know
 # FastAPI's DI model. Not needed for testability either — tests
-# monkeypatch get_db()/get_gateway_api_key() directly, which works
+# monkeypatch get_firestore_client()/get_gateway_api_key() directly, which works
 # identically either way.
 ```
 
@@ -111,7 +110,7 @@ Auth validates identity on every request, but a `conversation_id` is just a
 string in a URL — nothing stops a caller sending someone else's. **Every
 endpoint taking one verifies the token's `oid` matches the stored
 `user_id`** before returning or acting: `POST /ask`, `GET /ask/status`,
-`POST /ask/respond`, `POST /ask/cancel`.
+`POST /ask/cancel`.
 
 ```python
 async def assert_owns_conversation(conversation_id: str, claims: dict) -> None:
@@ -133,9 +132,8 @@ owner before any turn runs.
 | Endpoint | Purpose | Blocking? |
 |---|---|---|
 | `POST /conversation` | Mint a `conversation_id`, create its `sessions` doc | No — milliseconds |
-| `POST /ask` | Run one turn end to end; returns `AgentResponse` | **Yes** — the long one |
+| `POST /ask` | Run one turn end to end, **or** resume/resolve a paused one (`approval_decision`); returns `AgentResponse` | **Yes** — the long one (rejection returns fast, no graph run) |
 | `GET /ask/status/{conversation_id}` | Read the current status string and accumulated `thinking_log` | No — polled every 1–2s |
-| `POST /ask/respond/{conversation_id}` | Approve or reject a paused query | Yes — resumes the turn |
 | `POST /ask/cancel/{conversation_id}` | Set the cancel flag (Phase 3) | No — returns immediately |
 
 **Every endpoint except `POST /conversation` takes a `conversation_id` and
@@ -144,7 +142,7 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
 
 - `POST /conversation` — no body. Mints a UUID, creates
   `sessions/{conversation_id}` with `user_id` from the token's `oid`, empty
-  `recent_messages`, and `last_activity_at`. Returns `{conversation_id}`. No
+  `history_messages`, and `last_activity_at`. Returns `{conversation_id}`. No
   LLM, no tools — returns in milliseconds, and **must stay that way**: it's
   called from `App.OnStart`, which blocks the first screen (`docs/frontend.md`).
 
@@ -152,9 +150,15 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
   it** — an ID that only arrived with the answer would leave turn one
   unpollable.
 - `POST /ask` — body `{question, image_base64, filter_context, active_page,
-  conversation_id}`. Returns the `AgentResponse` model **serialized as-is —
-  snake_case, no field-name conversion**
-  (`.claude/rules/orchestrator.md` is the schema of record).
+  conversation_id, approval_decision}`. **`approval_decision` is
+  `"approved" | "rejected" | None`, mutually exclusive with `question` —
+  exactly one of the two is set** (`AskRequest`'s own validator). A fresh
+  question omits it; resolving a pending approval omits `question` instead.
+  There is no separate respond endpoint — this is the return path for the
+  approval card too (`docs/approval-workflow.md` has the full resume/reject
+  flow). Returns the `AgentResponse` model **serialized as-is — snake_case,
+  no field-name conversion** (`.claude/rules/orchestrator.md` is the schema
+  of record).
 
   **Deliberately no camelCase translation.** Power Apps reads property names
   from the connector's OpenAPI schema, which FastAPI generates from the
@@ -163,13 +167,8 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
   of field names to keep in sync; that drift already bit once, when a field
   was removed from the model but left in the conversion. One model, one
   shape, all the way to the screen.
-- `GET /ask/status/{conversation_id}` — `{status: string, thinking_log: list[dict]}`,
-  backs progress indication. Reads `live_turns/{conversation_id}` in Firestore (see below).
-- `POST /ask/respond/{conversation_id}` — body `{decision: "approve" | "reject"}`.
-  The return path for the approval card. **A new request, not a resumed one**
-  — the original `/ask` already returned. Reads the cached `pending_approval`
-  from `live_turns/{conversation_id}` (see `.claude/rules/orchestrator.md` for
-  the full resume flow) and returns a normal `AgentResponse`.
+- `GET /ask/status/{conversation_id}` — `{status: string | null, thinking_log: list[dict]}`,
+  backs progress indication. `null` when no turn is running. Reads `live_turns/{conversation_id}` in Firestore (see below).
 - `POST /ask/cancel/{conversation_id}` — Phase 3. No body; returns
   `{cancel_requested: true}` as soon as the flag is written. **Writes a flag,
   doesn't kill a task directly** — see the Firestore section below for why.
@@ -227,8 +226,8 @@ normally.
 
 | Collection | Lifetime | Holds | Read by |
 |---|---|---|---|
-| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 11 fields — schema below**) | `GET /ask/status`, the cancel check, `POST /ask/respond` |
-| `sessions/{conversation_id}` | Whole conversation; 30-day TTL | `user_id`, `recent_messages`, `last_activity_at` | Prompt assembly, the ownership check |
+| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 12 fields — schema below**) | `GET /ask/status`, the cancel check, `POST /ask`'s approval-decision branch |
+| `sessions/{conversation_id}` | Whole conversation; 30-day TTL | `user_id`, `history_messages`, `last_activity_at` | Prompt assembly, the ownership check |
 
 **`pending_approval` is a field, not a third collection** — it has its own
 schema and its own consumer, which makes it look like a peer of the other two
@@ -263,9 +262,10 @@ live_turns/{conversation_id}          # scoped to ONE in-flight turn
 sessions/{conversation_id}            # spans the whole conversation
 {
   "user_id": "...",                        # claims["oid"] — same source as telemetry
-  "recent_messages": [                     # FIFO, last HISTORY_TURN_COUNT
+  "history_messages": [                    # FIFO, last HISTORY_TURN_COUNT
     {
-      "messages": [...],                   # messages_to_dict(state["messages"]), row-capped
+      "messages": [...],                   # messages_to_dict(state["messages"]), non-submit_answer
+                                           # tool results already redacted
       "timestamp": ...
     }
   ],
@@ -273,7 +273,7 @@ sessions/{conversation_id}            # spans the whole conversation
 }
 ```
 
-## Conversation history — `sessions.recent_messages`
+## Conversation history — `sessions.history_messages`
 
 **Each entry stores the turn's real message sequence, not a paraphrase.**
 `messages_to_dict(state["messages"])` (`langchain_core.messages`) —
@@ -286,11 +286,36 @@ describing them — nothing to imitate, no query text leaking into a new
 answer's body — and it's still what makes follow-ups work: adapting a
 working DAX/SQL query beats re-deriving one from schema chunks.
 
-**Every tool call the turn made is stored — no per-tool exclusion.** Includes
-`generate_chart`: it only ever returns a `chart_url` string, and a stale
-`source_ref` replayed from history already fails with
-`resolve_chart_data`'s existing `ToolError` (`docs/chart-tool.md`) — an
-ordinary, actionable tool error, not a new hazard.
+**Every tool call the turn made is stored, but every successful result
+except `submit_answer`'s is redacted first — a deliberate broadening from an
+earlier numeric-tools-only design, after a real transcript showed the model
+mistaking stale prior-turn data for this turn's.** `build_updated_history`
+(`app/gateway/entry_exit.py`) replaces a successful non-`submit_answer`
+`ToolMessage`'s content with a fixed `STALE_RESULT_MESSAGE`, keeping its
+`name`/`tool_call_id`/`status` intact:
+
+```python
+STALE_RESULT_MESSAGE = ("Result removed -- this tool call is from a prior turn, not this one. "
+                         "Re-run it if you need this data now.")
+
+def build_updated_history(history_messages: list[dict], state: AgentState) -> list[dict]:
+    redacted = []
+    for msg in state["messages"]:
+        if isinstance(msg, ToolMessage) and msg.name != "submit_answer" and msg.status != "error":
+            msg = ToolMessage(content=STALE_RESULT_MESSAGE, name=msg.name,
+                               tool_call_id=msg.tool_call_id, status=msg.status)
+        redacted.append(msg)
+    new_entry = {"messages": messages_to_dict(redacted), "timestamp": datetime.now(timezone.utc)}
+    return (history_messages + [new_entry])[-HISTORY_TURN_COUNT:]
+```
+
+**Includes `generate_chart`, deliberately — no per-tool exclusion.** A stale
+`chart_url` sitting in history would look exactly as current as a real one;
+redacting it the same way as every other result is simpler and safer than
+relying on `resolve_chart_data`'s `ToolError` (`docs/chart-tool.md`) to catch
+a replayed `source_ref` downstream. An error-status `ToolMessage` is left
+untouched — it was never live data to begin with, so there's nothing stale
+to remove.
 
 **Retry-loop messages (`check_length`, `verify`) are kept too.** No
 correctness risk: `verify_response` checks whatever numbers appear in *this*
@@ -299,17 +324,17 @@ in history, so a resurfaced number from a rejected attempt fails verification
 again on its own. A standard checkpointer would carry these forward anyway,
 and seeing what didn't work last time is plausibly useful, not just inert.
 
-**Tool results are row-capped at `HISTORY_ROW_CAP` (`app/config.py`),
-applied to the native `ToolCallRecord.result` before it's serialized into the
-`ToolMessage`'s content — never by slicing the resulting JSON string**, which
-could produce invalid JSON mid-row. This is shape-based (any row-returning
-result), not a tool-name list, so it covers a future row-returning tool
-automatically. At `HISTORY_ROW_CAP` rows × `HISTORY_TURN_COUNT` turns, this
-stays well under Firestore's 1MB document cap.
+**No row cap on stored tool results — redaction makes one unnecessary.** An
+earlier design row-capped each `ToolCallRecord.result` before storing it
+(`HISTORY_ROW_CAP`); that was never built, and once every non-`submit_answer`
+result is replaced with a short fixed string instead, there's no real row
+data left to cap. Document size is bounded by `HISTORY_TURN_COUNT` ×
+a handful of fixed-size redaction strings, comfortably under Firestore's
+1MB document cap.
 
-**No separate answer truncation.** Row-capped tool results are now the
-dominant size term — a character cap on the final answer's text bought little
-in comparison, so it's left out. Revisit if real turns show otherwise.
+**No separate answer truncation.** Redacted tool results are now small and
+fixed-size, so there's no size pressure left for a character cap on the
+final answer's text to relieve. Revisit if real turns show otherwise.
 
 **No separate `filter_context` field.** The live `HumanMessage` each turn
 already has the filter-context block folded into its content (see "What
@@ -332,7 +357,7 @@ not by `finalize`.** Matches the existing split: `finalize` only sets
 `AgentState` fields and writes `agent_telemetry`
 (`.claude/rules/orchestrator.md`).
 
-**Reading `recent_messages` back and including it in the prompt.** Storing
+**Reading `history_messages` back and including it in the prompt.** Storing
 chat history is only half the job — it has to actually reach the model, or
 a follow-up like *"what about last quarter?"* has no antecedent. **Fails
 silently:** the Firestore write succeeds, the data looks right, and the
@@ -340,11 +365,26 @@ agent just answers as if every turn were the first. Read from
 `sessions/{conversation_id}` at the start of each turn, before assembling
 the prompt; append the completed turn after.
 
+**Split into two functions, deliberately — Firestore I/O stays out of
+`app/gateway/entry_exit.py`.** `fetch_history_messages` (`app/gateway/gateway.py`)
+does the actual read; `build_history_messages` (`app/gateway/entry_exit.py`)
+is a pure reconstruction over whatever list it's handed, no client, no
+`conversation_id`. Same split as `write_history_messages`/`build_updated_history`
+on the way out, and the same reason `app/orchestrator/state.py` stays free of
+heavier imports (`.claude/rules/orchestrator.md`): either module can be
+imported, and in `entry_exit.py`'s case unit-tested
+(`tests/test_entry_exit.py`), with no live credentials.
+
 ```python
-async def build_history_messages(conversation_id: str) -> list[BaseMessage]:
-    session = await get_session(conversation_id)
+# app/gateway/gateway.py -- Firestore I/O
+async def fetch_history_messages(conversation_id: str) -> list[dict]:
+    snap = await get_firestore_client().collection("sessions").document(conversation_id).get()
+    return snap.to_dict().get("history_messages", []) if snap.exists else []
+
+# app/gateway/entry_exit.py -- pure reconstruction, no I/O
+def build_history_messages(history_messages: list[dict]) -> list[BaseMessage]:
     result: list[BaseMessage] = []
-    for turn in session.get("recent_messages", []):
+    for turn in history_messages:
         result.extend(messages_from_dict(turn["messages"]))
     return result
 ```
@@ -354,14 +394,15 @@ async def build_history_messages(conversation_id: str) -> list[BaseMessage]:
 part of the initial state: `{"history_messages": history, "messages": [...]}`.
 Never merge it into `messages` itself (`.claude/rules/orchestrator.md`'s
 `AgentState` — the reason is the write-back above: `messages` becomes one new
-`recent_messages` entry per turn, and a history-seeded `messages` would make
+`history_messages` entry per turn, and a history-seeded `messages` would make
 that entry recursively contain every prior turn too).
 
-**Tell the model what the row cap means**, in the system prompt
-(`app/orchestrator/context.py`): history's tool results are truncated to
-`HISTORY_ROW_CAP` rows, and re-running the same query this turn may
-legitimately return a different count. Nothing left to explain about queries
-as adaptable patterns — real `tool_calls` already carry that structurally.
+**Tell the model which results are still current**, in the system prompt
+(`app/orchestrator/context.py`): every prior turn's tool result except
+`submit_answer`'s carries the removal notice; any tool result without it is
+from this turn. A prior turn's `submit_answer` numbers are visible but
+explicitly not a live source — the model is told to re-run the call instead
+of reusing them.
 
 **The split exists because these two get cleared at opposite times.** All
 three `live_turns` fields die together the moment a turn ends (normally, via
@@ -374,12 +415,14 @@ splitting costs no extra round trip.
 ## The approval handoff — `PendingApproval`
 
 **`pending_approval` is a purpose-built handoff object, not a state dump.**
-How it's produced and consumed — the batch cost gate, deferred DAX, the full
-resume sequence — is in `docs/approval-workflow.md`; this is the schema and
-the carry rule. `POST /ask/respond` is a *new request* — the graph run that paused already
-ended, so `AgentState` is gone. Resume can't re-run the agent loop (that
-could pick a different query than the human reviewed), so everything it needs
-must be carried here explicitly:
+How it's produced and consumed — the batch cost gate, the full resume
+sequence — is in `docs/approval-workflow.md`; this is the schema and the
+carry rule. A resume arrives as a *new* `POST /ask` call — the graph run
+that paused already ended, so `AgentState` is gone. Resume can't re-run the
+agent loop (that could pick a different query than the human reviewed), so
+everything it needs must be carried here explicitly. Defined in
+`app/orchestrator/state.py`, built by `build_pending_approval()`
+(`app/gateway/entry_exit.py`):
 
 ```python
 from datetime import datetime
@@ -388,17 +431,17 @@ from typing import TypedDict
 
 class PendingApproval(TypedDict):
     conversation_id: str
+    question: str                            # carried -- see rule below
     filter_context: list[dict]               # frozen copy — see rule below
     active_page: str | None                  # which page the user was on
-    messages: list[dict]                     # messages_to_dict(state["messages"])
-                                             # — this turn so far, dangling
-                                             # AIMessage included; messages_from_dict
-                                             # rebuilds state["messages"] on resume
-    pending_queries: list[dict]              # BigQuery — {id, query}, priced,
-                                             # awaiting approval
-    deferred_dax: list[dict]                 # DAX — {id, dax}, deferred so its
-                                             # results never touch Firestore;
-                                             # runs on approve
+    messages: list[dict]                     # messages_to_dict(state["messages"]),
+                                             # redacted -- this turn so far, dangling
+                                             # AIMessage included; rebuild_paused_messages
+                                             # restores numeric results on resume
+    pending_queries: list[dict]              # BigQuery — {id, query, estimated_bytes},
+                                             # display/telemetry only, not load-bearing
+    deferred_dax: list[dict]                 # vestigial -- never populated; see
+                                             # docs/approval-workflow.md
     tool_calls: list[ToolCallRecord]         # same name and shape as
                                              # AgentState.tool_calls — seeds it
                                              # directly on resume, no translation
@@ -417,20 +460,23 @@ single attempt; omit anything already recorded elsewhere.
 - `iteration_count` and `bytes_consumed` **carry** — both are guardrail
   inputs. Resetting `bytes_consumed` would let a turn spend a full budget on
   each side of the pause, making approval a way *around* the absolute cap it
-  belongs to.
+  belongs to. (The response row doesn't double-count this on top of the
+  pause row — `.claude/rules/telemetry.md`'s `bytes_consumed_baseline`.)
 - `verification_retry_count` and `length_retry_count` **reset** — they're
   scoped to one synthesis attempt, and post-approval synthesis runs against a
   different, larger result set.
-- Token counts, `errors`, and `question` are **omitted** — the pause row
-  already records them (`.claude/rules/telemetry.md`); carrying them would
-  double-count.
+- Token counts and `errors` are **omitted** — the pause row already records
+  them (`.claude/rules/telemetry.md`); carrying them would double-count.
+- `question` **is carried**, unlike the rest of that omitted group — there's
+  no other way to recover it on resume (it's folded into the `HumanMessage`'s
+  content, not stored separately), and the response row's telemetry needs it.
 
-**Anything not in these eleven fields resets by construction.** That's the
+**Anything not in these twelve fields resets by construction.** That's the
 safety property, not an oversight: `needs_approval` carried as `True` would
 re-pause the resumed turn immediately, and outputs like `answer_markdown` or
 `claims` haven't been produced yet at pause time.
 
-**A minimal checkpointer, scoped to the one point that pauses.** Eleven
+**A minimal checkpointer, scoped to the one point that pauses.** Twelve
 fields cover the one case that exists; LangGraph's `interrupt()` needs a
 persistent checkpointer with no free GCP-native option. **No `code_version`
 check on resume** — a pause outliving a deploy runs against whatever code is
@@ -459,8 +505,10 @@ a turn that already finished.
 **One turn per conversation, enforced only in the UI.** Every turn-scoped
 field is keyed on `conversation_id` alone, so two concurrent turns would
 interleave statuses and overwrite each other's `pending_approval`. Power Apps
-disables the send button while a turn is in flight (`docs/frontend.md`); no
-server-side guard.
+disables the send button while a turn is in flight, and again while a pending
+approval's card is showing (`docs/frontend.md`); no server-side guard. A
+normal question slipping through anyway degrades safely regardless --
+`docs/approval-workflow.md`.
 
 **`user_id` is stored but no logic uses it yet** — deliberately. It makes a
 future "this user's recent conversations" query possible (`where user_id == X`)
@@ -476,134 +524,52 @@ actual benefit.
 
 ## Live status during a turn
 
-**Applies to the two endpoints that run the graph — `POST /ask` and
-`POST /ask/respond`.** `GET /ask/status` only reads what they write;
-`POST /ask/cancel` and `POST /conversation` never touch the graph.
+**`POST /ask` runs the turn; `GET /ask/status/{conversation_id}` reads what it writes.**
+Power Apps polls the status route about once a second while `POST /ask` is pending.
+`POST /ask` itself is one ordinary long request.
 
-**Consume with `astream`, never `ainvoke` — build it in from the start.**
-Retrofitting invocation style across a working loop is avoidable churn.
-`astream` yields after every node; `ainvoke` blocks until the end and gives
-you nothing to report progress from. Node names come from the graph in
-`.claude/rules/orchestrator.md`; the status mapping below must track it.
+**Consume the graph with `astream` and `version="v2"`.** Each chunk is
+`{"type": ..., "data": ...}`. `values` chunks carry the full state, and the last one
+is the final state. `updates` chunks carry `{node: returned_update}` for the node that
+just finished, so each status describes a step that already happened.
 
-**Two concurrent HTTP calls, not one streaming call** — this is what lets
-"no streaming to the client" and "live status" both be true:
-- `POST /ask` — one ordinary long request. Internally consumes an async
-  generator; externally indistinguishable from any blocking call.
-- `GET /ask/status/{conversation_id}` — many short polls from a Power Apps `Timer`,
-  reading the Firestore document the first call is concurrently writing to.
+**`consume_graph(initial_state)` writes the status**, in `app/gateway/gateway.py`:
+- **Start:** creates `live_turns/{conversation_id}` with `status: "Thinking..."` and `thinking_log: []`.
+- **`agent`:** `"Thought"`. Any thinking text in the reply is appended to `thinking_log`
+  as `{seq, text}` via `ArrayUnion`. `seq` is a per-turn counter, so the front end can
+  show only entries it hasn't seen. Adaptive thinking means some rounds have none.
+- **`call_tool`:** `call_tool_status(names)`, from the tools the batch dispatched.
+  `submit_answer` is ignored. A chart in the batch gives `"Prepared the chart"`, a combine
+  gives `"Combined results"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
+  `app/config.py`) distinct sources, such as `"Gathered results from BigQuery, project
+  documentation, and semantic model"`, or `"Gathered results from {n} sources"` above that.
+  Source names come from `SOURCE_NAMES`.
+- **`verify`:** `"Verified results"` only when verification passes. A rejected answer
+  writes nothing, so the agent's `Thought` line stays up until the retry shows its own.
+- **`finalize`:** `"Prepared your answer"` normally, `"Needs your approval"` when the
+  turn just paused (`update.get("needs_approval")`) — otherwise a pause would show the
+  same text as a real final answer, which read as misleadingly final in practice.
+- **`route_entry`, `check_length`:** no write.
 
-Power Apps never needs websockets, SSE, or streaming support.
+Each status is suffixed with the seconds since the previous write, for example
+`"Gathered results from BigQuery (1.5s)"`. Silent nodes don't move that timer, so their time
+rolls into the next step.
 
-```python
-# Serves POST /ask — returns AgentResponse to that caller. The set_status()
-# calls are a SIDE EFFECT for a different endpoint: GET /ask/status polls the
-# Firestore document these writes update. One function, two consumers.
-async def run_agent_turn(question: str, conversation_id: str) -> AgentResponse:
-    # Write BEFORE invoking: on a resumed turn, live_turns may still hold
-    # content from the paused turn, and a poll could land before the first node.
-    set_status(conversation_id, "Starting...")
+**The document is deleted when the turn ends, whether it succeeded or failed** (`finally`).
+`live_turns` holds only turns that are running. The last few writes can land within a
+tenth of a second of the delete, so the final statuses are best-effort: a poll may or may
+not catch them. The answer is always in the `POST /ask` response.
 
-    # Both modes are needed: "updates" carries node names (for status), "values"
-    # carries full state — the only way to get the final state back, since the
-    # loop IS the return path. version="v2" is the unified StreamPart shape
-    # (LangGraph >= 1.1); without it you get the legacy bare {node: update}.
-    final_state = None
-    async for chunk in graph.astream(
-        {"question": question},
-        stream_mode=["updates", "values"], version="v2", ...
-    ):
-        if chunk["type"] == "values":
-            final_state = chunk["data"]        # last one wins = final state
-            continue
-        if chunk["type"] != "updates":
-            continue
-        node = next(iter(chunk["data"]))
-        if node == "call_tool":
-            # A batch may dispatch SEVERAL tools concurrently — this is a list,
-            # not a single value. Assuming one silently breaks compound questions.
-            tools = chunk["data"][node]["dispatched_tools"]
-            if len(tools) == 1:
-                set_status(conversation_id,
-                           f"{FRIENDLY_TOOL_NAMES.get(tools[0], 'Working')}...")
-            else:
-                set_status(conversation_id,
-                           f"Gathering information from {len(tools)} sources...")
-        elif node == "execute_approved":
-            set_status(conversation_id, "Running the approved query...")
-        elif node == "agent":
-            set_status(conversation_id, "Thinking...")
-            append_thinking(conversation_id, chunk["data"][node]["messages"][0])
-        elif node == "verify":
-            set_status(conversation_id, "Verifying results...")
-        elif node == "finalize":
-            set_status(conversation_id, "Preparing your answer...")
-        # route_entry and check_length write nothing — both are sub-millisecond,
-        # and Firestore holds the last value, so a poll during them reads
-        # stale-but-accurate rather than blank.
-    return build_agent_response(final_state)
-```
+**The whole stream runs inside `asyncio.wait_for(consume_graph(...), GATEWAY_TURN_TIMEOUT_SECONDS)`.**
+On timeout or error, `POST /ask` returns a plain `AgentResponse`, not an HTTP error.
 
-**`append_thinking(conversation_id, response)`** — reads `response.content` (the
-just-emitted `AIMessage`) for a `thinking` block with non-empty text
-(`agent_node`'s `thinking={"type": "adaptive", "display": "summarized"}`,
-`.claude/rules/orchestrator.md`), and if one exists, appends `{seq, text}` to
-`thinking_log` via `ArrayUnion` — `seq` a local counter in `run_agent_turn`,
-not read back from Firestore. **Adaptive thinking means not every round
-produces one** — a round with no `thinking` block appends nothing, no
-special-casing needed; `GET /ask/status` returns whatever `thinking_log` has
-accumulated so far, and a client polling faster than new entries arrive just
-sees the same list until the next one lands.
+**`GET /ask/status/{conversation_id}`** validates the key and token, checks ownership
+with `assert_owns_conversation`, and returns `{status, thinking_log}` from
+`live_turns`. With no document it returns `{status: null, thinking_log: []}`.
+`read_live_status(conversation_id)` is the same read, without auth, for the notebook.
 
-**Enforce the ~90s timeout by wrapping this whole loop in `asyncio.wait_for(...)`**,
-not `ainvoke` — the `astream` consumption above already has to exist for
-status reporting, so the timeout wraps it rather than needing a second
-invocation path. On timeout, return a normal `AgentResponse`, not an HTTP
-error — Power Apps needs no new UI code for it. Cancellation propagation
-details are in `.claude/rules/orchestrator.md`.
-
-**Starting point, deliberately flexible** — tune the granularity once you see
-real turns. Not a contract:
-
-| Stage | Status string |
-|---|---|
-| Reasoning, pre-tool | *(none — the always-visible thinking icon covers it)* |
-| Dispatching **one** tool | `f"{FRIENDLY_TOOL_NAMES[tool]}..."` |
-| Dispatching **several** (batch) | `f"Gathering information from {n} sources..."` |
-| Verification running | `"Verifying results..."` |
-| Verification retry | `"Double-checking the answer..."` |
-| Final synthesis | `"Preparing your answer..."` |
-
-```python
-FRIENDLY_TOOL_NAMES = {
-    "run_bigquery_sql": "Querying the database",
-    "run_dax_query":    "Querying the semantic model",
-    "search_docs":      "Searching project documentation",
-    "get_page_info":    "Reading the dashboard page info",
-    "get_measure_dax":  "Looking up a measure",
-    "list_repo_files":  "Looking through the code",
-    "read_repo_file":   "Reading the code",
-    "generate_chart":   "Generating a chart",
-}
-```
-
-**Batches get a generic count, not a list of names.** Joining friendly names
-("Querying the database and Searching documentation and...") needs real grammar
-handling past two items for no real gain. One honest line covers it.
-
-**Retry wording is abstracted on purpose** — `"Double-checking the answer"`,
-not `"retrying failed verification"`. Internal mechanics aren't the user's
-concern.
-
-**The approval pause needs no status string.** When a query trips the cost
-threshold, `/ask` returns immediately with the approval card — polling covers
-the *waiting* period, and the waiting is over. Status polling and the approval
-card are two different UI states, not one flowing into the other.
-
-**`set_status` writes to `live_turns/{conversation_id}`** — the same Firestore
-document backing `/ask/status`, which also holds `pending_approval` and the
-`cancel_requested` flag. Not process memory, and not an asyncio `Task`: cancel
-is a polled flag (see above).
+**Deferred:** cancellation (item 15) extends this section when it lands --
+the approval states (item 14) are built; see `docs/approval-workflow.md`.
 
 ## Returning a response — errors and what the caller gets
 

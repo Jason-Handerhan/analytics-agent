@@ -46,9 +46,20 @@ GITHUB_REPO_BRANCH = "main"
 MAX_REPO_FILE_CONTENT_CHARS = 300_000  # final cap on returned text, after any stripping
 
 # Conversation history
-HISTORY_TURN_COUNT = 5    # sessions.history_messages FIFO length
+HISTORY_TURN_COUNT = 3    # sessions.history_messages FIFO length (testing; 5 for prod)
+SESSIONS_TTL_DAYS = 30    # sessions documents auto-delete this many days after last_activity_at
+
+# Live status
+STATUS_MAX_NAMED_SOURCES = 3    # call_tool status names up to this many sources, then a count
 
 # Orchestrator loop guardrail settings
+
+# Tools whose numbers verify_node checks against -- queries, plus combine_results,
+# which only recombines them (including null-to-0 fills). Used by build_numeric_pool
+# (orchestrator.py) and rebuild_paused_messages (entry_exit.py) -- shared data, not
+# config in the traditional sense, but pure and dependency-free either way.
+NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
+
 MAX_ANSWER_CHARS = 6000
 MAX_ANSWER_TABLE_ROWS = 25  # cap on any single markdown table in an answer -- a display limit, not a fetch limit
 MAX_LENGTH_RETRIES = 2
@@ -74,8 +85,9 @@ MCP_SERVER_NAME = "analytics"
 
 # BigQuery cost guardrails
 BIGQUERY_PRICE_PER_TIB = 6.25  # dollars per TiB (2**40 bytes) -- BigQuery bills in binary TiB, not decimal TB
-MAX_BYTES_BILLED = 2 * 1024 ** 3  # 2 GiB -- per-query engine-level fail-safe (maximum_bytes_billed)
-ABSOLUTE_CAP = 3 * 1024 ** 3  # 3 GiB -- turn-cumulative cap, hard-declines further queries once hit
+ABSOLUTE_CAP = 4 * 1024 ** 3  # 4 GiB -- turn-cumulative cap, hard-declines further queries once hit
+MAX_BYTES_BILLED = ABSOLUTE_CAP  # per-query fail-safe (maximum_bytes_billed)
+PENDING_APPROVAL_THRESHOLD = ABSOLUTE_CAP // 2  # batch bytes above this pause for approval
 
 # LangSmith tracing
 LANGSMITH_TRACING = "true"

@@ -26,6 +26,7 @@ def _serialize_tool_call(tc: dict) -> dict:
         "result": json.dumps(tc["result"]),
         "success": tc["success"],
         "error": tc["error"],
+        "bytes_billed": tc["bytes_billed"],
     }
 
 
@@ -55,6 +56,7 @@ def build_telemetry_row(
     completion_tokens: int,
     llm_calls: int,
     bytes_consumed: int,
+    bytes_consumed_baseline: int,
     iteration_count: int,
     verified: bool,
     verification_retry_count: int,
@@ -65,16 +67,18 @@ def build_telemetry_row(
     iteration_cap_hit: bool,
     estimated_cost: str | None,
     pending_queries: list[dict],
+    largest_pending_query: str | None,
+    approval_decision: str | None,
     deferred_dax: list[dict],
     chart_urls: list[str],
     suggested_follow_ups: list[str],
     all_prose_numeric_claims: list[float],
+    clarifying_question: str = "",
 ) -> dict:
     """Full agent_telemetry row. `pending_query` and `approval_decision` stay
     null -- nothing produces them yet (route_entry/execute_approved and the
     approval response path respectively), so there's no AgentState field to
     pass through for them."""
-    pending_query = max((pq["query"] for pq in pending_queries), key=len, default=None)
     return {
         "conversation_id": conversation_id,
         "user_id": user_id,
@@ -84,11 +88,11 @@ def build_telemetry_row(
         "turn_completed_at": turn_completed_at,
         "filter_context": json.dumps(filter_context),
         "active_page": active_page,
-        "pending_query": pending_query,
+        "pending_query": largest_pending_query,
         "pending_queries": pending_queries,
         "deferred_dax": deferred_dax,
         "estimated_cost": estimated_cost,
-        "approval_decision": None,
+        "approval_decision": approval_decision,
         "chart_urls": chart_urls,
         "verified": verified,
         "verification_retry_count": verification_retry_count,
@@ -98,7 +102,7 @@ def build_telemetry_row(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "llm_calls": llm_calls,
-        "bytes_consumed": bytes_consumed,
+        "bytes_consumed": bytes_consumed - bytes_consumed_baseline,
         "iteration_count": iteration_count,
         "cancelled": cancelled,
         "iteration_cap_hit": iteration_cap_hit,
@@ -106,6 +110,7 @@ def build_telemetry_row(
         "errors": [_serialize_error(e) for e in errors],
         "suggested_follow_ups": suggested_follow_ups,
         "all_prose_numeric_claims": all_prose_numeric_claims,
+        "clarifying_question": clarifying_question or None,
     }
 
 

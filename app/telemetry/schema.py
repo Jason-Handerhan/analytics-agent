@@ -16,6 +16,7 @@ TOOL_CALL_FIELDS = [
     bigquery.SchemaField("result", "STRING", mode="REQUIRED"),     # json.dumps'd
     bigquery.SchemaField("success", "BOOLEAN", mode="REQUIRED"),
     bigquery.SchemaField("error", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("bytes_billed", "INTEGER", mode="NULLABLE"),  # None for non-BigQuery or failed calls
 ]
 
 ERROR_FIELDS = [
@@ -36,6 +37,7 @@ ERROR_FIELDS = [
 PENDING_QUERY_FIELDS = [
     bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("query", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("estimated_bytes", "INTEGER", mode="NULLABLE"),  # dry-run estimate
 ]
 
 DEFERRED_DAX_FIELDS = [
@@ -58,6 +60,7 @@ SCHEMA = [
     bigquery.SchemaField("pending_query", "STRING", mode="NULLABLE"),   # the largest pending query
     bigquery.SchemaField("estimated_cost", "STRING", mode="NULLABLE"),  # display dollars, not numeric
     bigquery.SchemaField("approval_decision", "STRING", mode="NULLABLE"),  # "approved" | "rejected"
+    bigquery.SchemaField("clarifying_question", "STRING", mode="NULLABLE"),  # set only on question turns
 
     # --- Required, writer defaults to False/0 until Phase 3 ---
     bigquery.SchemaField("verified", "BOOLEAN", mode="REQUIRED"),

@@ -51,7 +51,10 @@ def test_clean_label_and_format_value():
     assert spec._clean_label("evaluation_metrics[Model]") == "evaluation_metrics[Model]"
     assert spec._clean_label("'evaluation_metrics'[Recall]") == "'evaluation_metrics'[Recall]"
 
-    assert spec._format_value(5231, "auto") == "5,231"
+    assert spec._format_value(5231, "auto") == "5.2K"
+    assert spec._format_value(11_129, "auto") == "11.1K"
+    assert spec._format_value(1000, "auto") == "1K"
+    assert spec._format_value(977_542, "auto") == "977.5K"
     assert spec._format_value(50_000_000, "auto") == "50M"
     assert spec._format_value(1_234_567_890, "auto") == "1.2B"
     assert spec._format_value(0.5, "percent") == "50.0%"

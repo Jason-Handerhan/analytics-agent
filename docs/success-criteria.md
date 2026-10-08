@@ -16,14 +16,14 @@ doc set for personal reference, and is not part of the build.
 
 | Component | Verified by | Where |
 |---|---|---|
-| Authentication accepts valid creds, rejects invalid | Automated | `test_gateway_auth.py` |
-| One user can't reach another's conversation (404, not 403) | Automated | `test_gateway_auth.py` |
+| Authentication accepts valid creds, rejects invalid | Automated | `test_gateway.py` |
+| One user can't reach another's conversation (404, not 403) | Automated | `test_gateway.py` |
 | Static context has all seven components, with no DAX bodies in the measure registry | Automated | `test_static_context.py` |
 | Model schema assembles to the expected artifact — values, not just shape | Automated | `test_model_schema_build.py` |
 | Static context actually caches (`cache_read` non-zero on turn 2) | **Manual** — needs two real turns | Phase 3 |
 | All 8 tools return a sensible result, called through the MCP server | Automated (parametrized) | `test_tools.py` |
-| Chat history reaches the assembled prompt | Automated | `test_conversation_state.py` |
-| Stored queries + filter context reach the prompt; truncation preserves numbers | Automated | `test_conversation_state.py` |
+| Chat history reaches the assembled prompt | Automated | `test_entry_exit.py` |
+| Stored queries + filter context reach the prompt; truncation preserves numbers | Automated | `test_entry_exit.py` |
 | Caching dispatch matches the model (switching models stays a config change) | Automated | `test_static_context.py` |
 | Chart tool preserves the discriminator; dispatch renders | Automated | `test_chart_tool.py` |
 | Every turn logs telemetry with all required fields | Automated | `test_telemetry.py` |
@@ -192,18 +192,21 @@ A phase isn't done because the code runs — it's done when the guarantee holds.
       silently does nothing if it was skipped.
 
 *Approval workflow*
-- [ ] **Exercise `POST /ask/respond` directly with curl or a script** — the
-      approve/reject buttons don't exist until Phase 4, but the resume
-      logic is built now and shouldn't go a whole phase untested. Same
-      pattern as Phase 0's `executeQueries` smoke test. Using a
-      `conversation_id` from a real paused turn, confirm:
-      - **approve** executes *every* pending query (not just the displayed
-        one) and the answer covers **both** halves of a compound question
-        — proving pre-pause `tool_calls` survived the pause;
-      - **reject** runs no query (check BigQuery job history, don't
-        assume) and still returns a partial answer naming what it skipped.
-- [ ] **Approve a query that isn't the last step**, and confirm the resumed
-      turn calls more tools rather than answering from partial data.
+- [x] **Exercise the real `POST /ask` route with `approval_decision` set**
+      directly (no buttons needed — they land in Phase 4; there is no
+      separate respond endpoint, `docs/approval-workflow.md`). Done via
+      `notebooks/phase3_gateway_e2e.ipynb`'s resume section, real HTTP
+      routes throughout. Confirmed:
+      - **approve** resumes correctly, including a `TABLESAMPLE`-forced
+        batch pausing *multiple times in the same turn* — every pause
+        approved in sequence, each resolved correctly, telemetry accurate
+        for every row;
+      - **reject** runs no query and returns the flat cancellation message
+        (not a partial answer — rejection never re-synthesizes from
+        whatever ran before the pause);
+      - the absolute cap produced a correct partial answer, and the
+        dry-run-failure decline path works, both independent of the
+        approval gate itself.
 - [ ] **Abandon an approval** (close the app without deciding), then query
       for pause rows with no matching response row — it should appear.
 

@@ -4,8 +4,9 @@ paths:
   - 'app/model_schema.py'
   - 'app/exceptions.py'
   - 'tests/test_guardrails.py'
+  - 'tests/test_orchestrator.py'
+  - 'tests/test_submit_answer.py'
   - 'tests/test_e2e.py'
-  - 'tests/test_approval_e2e.py'
   - 'tests/test_static_context.py'
 ---
 
@@ -27,17 +28,16 @@ Reasoning below, under "Not citation, not regex-scanned prose."
 
 ```python
 class SubmitAnswerArgs(BaseModel):
-    answer_markdown: str = Field(min_length=1)  # non-empty is what lets
-                                                 # verify_node's model_validate
-                                                 # tell "never submitted" apart
-                                                 # from a real answer
+    answer_markdown: str = ""  # empty only when clarifying_question is set
     all_prose_numeric_claims: list[float]  # every number stated in PROSE as
                                             # fact -- table cells are checked
                                             # separately by extract_table_values,
-                                            # not re-declared here. No min,
-                                            # empty is legitimate for a purely
+                                            # not re-declared here. Empty is
+                                            # legitimate for a purely
                                             # qualitative answer
-    suggested_follow_ups: list[str] = []   # no min, same reasoning
+    suggested_follow_ups: list[str] = []   # cleared by call_tool_node on question turns
+    clarifying_question: str = ""  # set INSTEAD of answer_markdown; exactly one
+                                   # of the two is set (model validator)
 
 class AgentResponse(BaseModel):
     answer_markdown: str
@@ -83,15 +83,18 @@ class ToolCallRecord(TypedDict):
     success: bool
     error: str | None    # WHICH failure — agent retry behavior distinguishes
                          # ToolError from ToolTimeoutError; `success` alone loses that
-    ref_id: str | None    # set only for a successful run_bigquery_sql/run_dax_query
-                          # call -- "ref_1", "ref_2", ... -- what generate_chart's
-                          # source_ref resolves against ("Batch ordering" below)
+    ref_id: str | None    # set only for a successful run_bigquery_sql/run_dax_query/
+                          # combine_results call -- "ref_1", "ref_2", ... -- what
+                          # generate_chart's source_ref and combine_results'
+                          # source_refs resolve against ("Batch ordering" below)
+    bytes_billed: int | None  # from the tool's artifact; None for non-BigQuery
+                              # or failed calls
     started_at: datetime
     completed_at: datetime
 
 class TurnError(TypedDict):
-    stage: str                # a node name: "execute_approved" | "agent" |
-                              # "call_tool" | "check_length" | "verify"
+    stage: str                # a node name: "agent" | "call_tool" |
+                              # "check_length" | "verify"
     error_type: str
     message: str
     occurred_at: datetime
@@ -125,7 +128,7 @@ class AgentState(TypedDict):
     # Reconstructed history (`build_history_messages()`, `.claude/rules/gateway.md`),
     # set once at invocation. Kept OUT of `messages` deliberately: `messages`
     # gets written back to Firestore each turn as messages_to_dict(state["messages"])
-    # (one new sessions.recent_messages entry per turn) — if history were seeded
+    # (one new sessions.history_messages entry per turn) — if history were seeded
     # into `messages` too, every stored turn would recursively contain every
     # prior one, growing unbounded instead of staying FIFO-trimmed. Prepended
     # at LLM-call time only, same as the static system prompt:
@@ -162,9 +165,15 @@ class AgentState(TypedDict):
     bytes_consumed: int          # Cumulative across EVERY tool loop this turn,
                                  # and carried through an approval pause. The
                                  # absolute cap compares against this; the
-                                 # per-batch BIG_QUERY_THRESHOLD does not. Must
-                                 # be summed live -- per-call figures are gone
-                                 # by the time telemetry writes.
+                                 # per-batch PENDING_APPROVAL_THRESHOLD does not.
+                                 # Must be summed live -- per-call figures are
+                                 # gone by the time telemetry writes.
+    bytes_consumed_baseline: int  # bytes_consumed's value at this phase's start --
+                                  # 0 for a fresh turn, seeded from PendingApproval
+                                  # on resume. finalize subtracts it so telemetry
+                                  # reports only this phase's bytes, never the
+                                  # whole cumulative total a pause row already
+                                  # reported (`.claude/rules/telemetry.md`).
     prompt_tokens: int           # Set once, in finalize -- sum_token_usage()
     completion_tokens: int       # walks state["messages"] for every AIMessage's
                                  # usage_metadata and totals input/output tokens.
@@ -189,12 +198,21 @@ class AgentState(TypedDict):
 
     # Guardrail outcomes
     needs_approval: bool
-    pending_queries: list[dict]    # {id, query} — every BigQuery call to run
-                                   # on approve. Also the route_entry branch:
-                                   # non-empty means this is a resumed turn.
-    deferred_dax: list[dict]       # {id, dax} — deferred at the pause (its
-                                   # results would otherwise sit in Firestore).
-                                   # Seeded from PendingApproval on resume.
+    approved_batch: bool            # True on a resumed turn's first batch only --
+                                    # lets it skip the pause gate once; reset to
+                                    # False in the same call_tool_node return
+    approval_decision: str | None   # "approved" | "rejected"; None until resumed
+    pending_queries: list[dict]     # {id, query, estimated_bytes} -- every
+                                    # BigQuery call in a paused batch. Display/
+                                    # telemetry only; resume doesn't dispatch
+                                    # from this (`docs/approval-workflow.md`)
+    largest_pending_query: str | None  # the query the approval card shows --
+                                       # largest estimated_bytes, re-derived by
+                                       # index, not a lambda
+    paused_at: datetime | None      # set by call_tool_node's pause branch
+    deferred_dax: list[dict]        # vestigial -- carried on AgentState/
+                                    # PendingApproval but never populated
+                                    # (`docs/approval-workflow.md`)
     estimated_cost: str | None
     cost_cap_exceeded: bool
     iteration_cap_hit: bool
@@ -208,6 +226,8 @@ class AgentState(TypedDict):
 
     # Building toward AgentResponse
     answer_markdown: str
+    clarifying_question: str       # "" unless the turn ended on a clarifying question;
+                                   # answer_markdown then holds the same text
     all_prose_numeric_claims: list[float]  # set by call_tool_node from
                                             # submit_answer's args when
                                             # answer_submitted -- verify_node
@@ -274,12 +294,14 @@ transcription-drift risk, and the model doesn't pay extra tokens re-stating
 a table it already wrote.
 
 ```python
-NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
+# NUMERIC_SOURCE_TOOLS lives in app/config.py, not here -- entry_exit.py's
+# rebuild_paused_messages needs it too, and config.py is the shared,
+# dependency-light module both sides can import without pulling in the other.
 
 def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
-    """Every number from this turn's successful BigQuery/DAX query results --
-    the only tools that return genuine queried data, not incidental numbers
-    embedded in code, doc chunks, or metadata."""
+    """Every number from this turn's successful query results, plus
+    combine_results output (which only recombines them, including null-to-0
+    fills) -- never incidental numbers embedded in code, doc chunks, or metadata."""
     pool: set[float] = set()
     for tc in tool_calls:
         if tc["success"] and tc["name"] in NUMERIC_SOURCE_TOOLS:
@@ -337,6 +359,11 @@ def verify_response(state: AgentState) -> tuple[bool, str | None]:
         return False, f"{unmatched} do not match any tool result this turn."
     return True, None
 ```
+
+**`verify_response` checks `answer_markdown` only, never `clarifying_question`.**
+On a question turn, `answer_markdown` already holds the question (copied in
+`call_tool_node`), so passing both fields here would trip the exactly-one
+validator and reject a valid question.
 
 On failure: retry with a corrective message, **max 1–2**, then return an honest
 "no verified figure for that." Never emit the number.
@@ -715,6 +742,7 @@ SOURCE_LABELS = {
     "read_repo_file":   "Read code",
     "search_docs":      "Doc Search",
     "generate_chart":   "Create chart",
+    "combine_results":  "Combine results",
 }
 
 def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
@@ -751,7 +779,7 @@ source the answer rests on. Every attempt is still in `agent_telemetry`.
 
 | Guard | Bounds | Notes |
 |---|---|---|
-| Dry-run → `BIG_QUERY_THRESHOLD` → approval | Summed bytes of **this batch** | In `call_tool_node`, not the tool — only the node sees the batch |
+| Dry-run → `PENDING_APPROVAL_THRESHOLD` (or `TABLESAMPLE`) → approval | Summed bytes of **this batch** | In `call_tool_node`, not the tool — only the node sees the batch |
 | **Absolute byte cap** → hard decline | `AgentState.bytes_consumed`, **cumulative across every loop** and carried through a pause | No approval offered above this |
 | BigQuery row cap (`max_results`) | Rows returned | Orthogonal to cost |
 | DAX row cap (`TOPN` + count check) | Rows returned | Different mechanism than BigQuery |
@@ -886,22 +914,28 @@ touching `call_tool_node`'s cost logic.
 
 **Three things that are easy to get wrong — full design in
 `docs/approval-workflow.md`, read it before building this:**
-1. **The cost gate is in `call_tool_node`, not in the tool.** Three phases:
-   dry-run every BigQuery call, decide once on the **summed** bytes, then
-   execute. Per-tool gating can't see the batch — three individually-cheap
-   queries would each pass while blowing the cap together. Phase 3's
-   `asyncio.gather()` is also the join point: never inspect results as they
-   arrive and return early, or a finished sibling's result is abandoned and
-   the resumed turn re-runs it.
+1. **The cost gate is in `call_tool_node`, not in the tool.** Dry-run every
+   BigQuery call, decide once on the **summed** bytes (plus `TABLESAMPLE`'s
+   unconditional force), then execute. Per-tool gating can't see the batch —
+   three individually-cheap queries would each pass while blowing the cap
+   together. `asyncio.gather()` is also the join point: never inspect
+   results as they arrive and return early, or a finished sibling's result
+   is abandoned and the resumed turn re-runs it.
 2. **The pause caches the whole turn, not just the query.** A compound
    question may have already run `search_docs`; caching only the pending query
    would discard it. Cached in `live_turns/{conversation_id}` in Firestore
    — **not process memory**, which wouldn't survive Cloud Run's multiple
    concurrent instances (`.claude/rules/gateway.md`). Telemetry is never
    read back for this.
-3. **On approve, don't re-run the agent loop** — execute the cached queries,
-   then one `agent` call writes the final answer across old + new results.
-   On reject, reuse the `iteration_cap_hit` partial-answer machinery.
+3. **On approve, resume replays the dangling `AIMessage.tool_calls` through
+   the ordinary graph — no separate execution path.** `route_entry` sends
+   it straight to `call_tool`, which re-dispatches the exact batch that
+   paused (BigQuery and everything else requested alongside it), then the
+   loop continues completely normally from there — `agent` may run once or
+   several more times, exactly as it would for any other turn, not a single
+   special "write the final answer" call. On reject, no graph runs at all —
+   a canned response and a minimal telemetry row, written directly by the
+   gateway (`docs/approval-workflow.md`).
 
 **10 is a calibration starting point, not a tuned value.** Exhaustion degrades
 to a partial answer (below), so a high cap costs nothing — it just reveals how
@@ -965,9 +999,9 @@ returns. A same-batch reference therefore can't resolve at all;
 other unresolvable reference, with no separate ordering check needed:
 
 ```python
-CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query"}
+CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
-def _lookup_chart_source(source_ref: str, prior_tool_calls: list[ToolCallRecord]) -> ToolCallRecord:
+def _lookup_source_ref(source_ref: str, prior_tool_calls: list[ToolCallRecord]) -> ToolCallRecord:
     """Finds the successful, chartable tool call source_ref points at, or
     raises an actionable error if it can't be found."""
     source_tc = next(
@@ -976,15 +1010,15 @@ def _lookup_chart_source(source_ref: str, prior_tool_calls: list[ToolCallRecord]
         None)
     if source_tc is None:
         raise ToolError(
-            f"'{source_ref}' is not a successfully completed run_bigquery_sql or "
-            "run_dax_query call from earlier this turn -- it may not exist, may have failed, "
-            "or may be from later in this same batch and hasn't run yet. Fetch the data "
-            "first, then call generate_chart in a follow-up step.")
+            f"'{source_ref}' is not a successfully completed run_bigquery_sql, "
+            "run_dax_query, or combine_results call from earlier this turn -- it may not "
+            "exist, may have failed, or may be from later in this same batch and hasn't "
+            "run yet. Fetch the data first, then reference it in a follow-up step.")
     return source_tc
 ```
 
 `ref_id` (`"ref_1"`, `"ref_2"`, ...) is assigned only to a successful
-`run_bigquery_sql`/`run_dax_query` result and printed back to the model
+`run_bigquery_sql`/`run_dax_query`/`combine_results` result and printed back to the model
 alongside that result, so it has something real to copy into `source_ref` —
 never the raw tool-call id (`source_tool_call_id`, the field's original name,
 dropped along with the id-based design).
@@ -1105,8 +1139,10 @@ destinations explicit in the code, not just inferable from reading its body.
 ```python
 from langgraph.graph import StateGraph, START, END
 
-def route_after_route_entry(state: AgentState) -> str:
-    return "execute_approved" if state["pending_queries"] else "agent"
+def route_entry(state: AgentState) -> str:
+    # A resumed, approved turn replays its dangling AIMessage.tool_calls
+    # straight into call_tool -- a fresh turn starts at agent as usual.
+    return "call_tool" if state["approved_batch"] else "agent"
 
 def route_after_agent(state: AgentState) -> str:
     return "call_tool" if state["messages"][-1].tool_calls else "check_length"
@@ -1135,19 +1171,14 @@ def route_after_verify(state: AgentState) -> str:
 
 
 g = StateGraph(AgentState)
-g.add_node("route_entry",      route_entry_node)
-g.add_node("execute_approved", execute_approved_node)
 g.add_node("agent",            agent_node)
 g.add_node("call_tool",        call_tool_node)
 g.add_node("check_length",     check_length_node)
 g.add_node("verify",           verify_node)
 g.add_node("finalize",         finalize_node)
 
-g.add_edge(START, "route_entry")
-g.add_conditional_edges("route_entry", route_after_route_entry,
-    {"execute_approved": "execute_approved", "agent": "agent"})
-g.add_edge("execute_approved", "agent")   # even on failure — the agent sees
-                                          # the error and can respond to it
+g.add_conditional_edges(START, route_entry,
+    {"call_tool": "call_tool", "agent": "agent"})
 
 g.add_conditional_edges("agent", route_after_agent,
     {"call_tool": "call_tool", "check_length": "check_length"})
@@ -1207,18 +1238,19 @@ async def agent_node(state: AgentState) -> dict:
 
 | Node | Role |
 |---|---|
-| `route_entry` | Branches on `pending_queries`. Pure routing, no work |
-| `execute_approved` | Runs each `pending_queries` entry directly in Python — no LLM |
 | `agent` | The LLM call, tools bound. Emits tool calls only — `answer_markdown` only ever arrives via `submit_answer` |
-| `call_tool` | Dispatches tools (including `submit_answer`), checks cancel, increments `iteration_count`, sets `answer_submitted` |
+| `call_tool` | Dispatches tools (including `submit_answer`), checks cancel, increments `iteration_count`, sets `answer_submitted`, owns the cost gate |
 | `check_length` | Owns `length_retry_count` |
 | `verify` | `verify_response()`. Owns `verification_retry_count` |
 | `finalize` | Sets `AgentResponse` fields and writes telemetry — six routes in, see below |
 
-- `route_entry` branches on `pending_queries` — a fresh turn's is empty.
-- **Cost gating is not a node** — it lives inside `run_bigquery_sql`, which
-  dry-runs the exact SQL immediately before executing it. `call_tool` routes
-  on what the tool reports back.
+- `route_entry` is a plain function wired straight onto `START`'s
+  conditional edge, not a node — it only inspects `approved_batch`, no work
+  to warrant one.
+- **Cost gating is not a node** — it lives inside `call_tool_node`, which
+  dry-runs every BigQuery call in the batch before dispatching anything
+  (`docs/approval-workflow.md`). `call_tool` routes on what that decision
+  produces.
 - `check_length` before `verify` — cheap check first; no point walking the
   answer's numbers against tool data if it can't be displayed regardless.
 - `finalize` is the **single exit** — full breakdown below.
@@ -1253,52 +1285,46 @@ this table and the code ever disagree.
 
 | From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
 |---|---|---|---|---|
-| `call_tool` | `cancelled` | Cancelled | `answer_markdown` if `agent` had already set one, else a fixed "this turn was cancelled" message | Normal row, `cancelled: True` |
-| `call_tool` | `needs_approval` | Approval pause | `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
+| `call_tool` | `cancelled` | Cancelled | `answer_markdown` if `agent` had already set one, else `CANCELLED_MESSAGE` | Normal row, `cancelled: True` |
+| `call_tool` | `needs_approval` | Approval pause | `answer_markdown` = `PENDING_APPROVAL_MESSAGE`; `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
 | `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question | Normal row |
 | `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit`/`cost_cap_exceeded` set `True` if either is how this turn got here | Normal row |
-| `verify` | failed, `verification_retry_count` exhausted | Honest decline | "No verified figure for that" — no unverified number emitted | Normal row |
+| `verify` | failed, `verification_retry_count` exhausted | Honest decline | `VERIFICATION_FAILURE_MESSAGE` — no unverified number emitted | Normal row |
 
-**`finalize` never touches `live_turns` — every write to it lives in the
-gateway's `run_agent_turn` instead.** `live_turns` is gateway-owned
+`answer_markdown`'s four canned-message constants (`VERIFICATION_FAILURE_MESSAGE`,
+`PENDING_APPROVAL_MESSAGE`, `CANCELLED_MESSAGE`, plus the success case's real
+text) are picked by one `if`/`elif`/`elif`/`else` chain in `finalize_node`,
+in that priority order — `needs_approval` first, then `cancelled` (checked
+*before* the verification-failure case, or a cancelled-but-never-verified
+turn would wrongly show the verification message instead), then
+`not verified`, then the real answer.
+
+**`finalize` never touches `live_turns` — that lives in `consume_graph`
+(`app/gateway/gateway.py`) instead.** `live_turns` is gateway-owned
 (`.claude/rules/gateway.md`); splitting its writes across two modules risks
 drift. `finalize` only sets the `AgentState` fields above and writes
-`agent_telemetry` (BigQuery — unchanged). The gateway acts on `final_state`
-once the loop ends:
+`agent_telemetry`. `consume_graph`'s own `finally` block, after the `astream`
+loop ends, decides what happens to the document:
 
 ```python
-def build_pending_approval(state: AgentState) -> PendingApproval:
-    """Pure, no I/O — called from the gateway, not from finalize."""
-    return PendingApproval(
-        conversation_id=state["conversation_id"],
-        filter_context=state["filter_context"],
-        active_page=state["active_page"],
-        messages=messages_to_dict(state["messages"]),
-        pending_queries=state["pending_queries"],
-        deferred_dax=state["deferred_dax"],
-        tool_calls=state["tool_calls"],
-        iteration_count=state["iteration_count"],
-        bytes_consumed=state["bytes_consumed"],
-        estimated_cost=state["estimated_cost"],
-        paused_at=now(),
-    )
+try:
+    ...
+finally:
+    if final_state is not None and final_state["needs_approval"]:
+        await live_turns_doc.set({"pending_approval": build_pending_approval(final_state)})
+    else:
+        await live_turns_doc.delete()
 ```
 
-```python
-# app/gateway/ — run_agent_turn, after the astream loop ends
-if final_state["needs_approval"]:
-    pending = build_pending_approval(final_state)
-    await live_turns_doc(conversation_id).set({"pending_approval": pending}, merge=True)
-else:
-    await live_turns_doc(conversation_id).delete()
-return build_agent_response(final_state)
-```
+`build_pending_approval` (`app/gateway/entry_exit.py`) is pure, no I/O — the
+schema and carry rule are in `.claude/rules/gateway.md`. No `merge=True`:
+nothing else in the document matters once paused, so a full replace is
+simpler and smaller than merging.
 
 **Why not in `finalize`:** `astream` yields a node's update only after it
-finishes. A `finalize`-side clear would run *before* the gateway's own
-`elif node == "finalize": set_status(...)` below — which would then
-re-create the document via its `merge=True` upsert, orphaned with no TTL
-(`live_turns` has none, unlike `sessions`).
+finishes. A `finalize`-side write would run *before* `consume_graph`'s own
+per-node status write for that same step, which would then re-create the
+document, orphaned with no TTL (`live_turns` has none, unlike `sessions`).
 
 ### Node names are a design decision, and status depends on them
 
@@ -1316,8 +1342,8 @@ change in the same step.
 - **`AgentState` doesn't carry raw results across turns** — `messages` and
   `tool_calls` are seeded fresh at each invocation; nothing accumulates
   turn over turn in memory. What a later turn sees of an earlier one is only
-  what's reconstructed from Firestore, deliberately bounded
-  (`HISTORY_ROW_CAP`, `HISTORY_TURN_COUNT` — `.claude/rules/gateway.md`).
+  what's reconstructed from Firestore, deliberately bounded by
+  `HISTORY_TURN_COUNT` and per-turn redaction (`.claude/rules/gateway.md`).
 - **Confirm parallel dispatch isn't accidentally serialized** — LangGraph runs
   multiple tool calls concurrently by default. A free win, not something to
   build.

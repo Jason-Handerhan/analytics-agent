@@ -1,16 +1,33 @@
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, model_validator
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = ""
     image_base64: str | None = None
     filter_context: list[dict] = []
     active_page: str | None = None
     conversation_id: str
+    approval_decision: Literal["approved", "rejected"] | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_of_question_or_decision(self) -> "AskRequest":
+        has_question = bool(self.question.strip())
+        has_decision = self.approval_decision is not None
+        if has_question == has_decision:
+            raise ValueError("Provide exactly one of question or approval_decision.")
+        return self
 
 
 class ConversationResponse(BaseModel):
     conversation_id: str
+
+
+class StatusResponse(BaseModel):
+    """Live progress for a turn in flight. status is None when no turn is running."""
+    status: str | None
+    thinking_log: list[dict]
 
 
 class AgentResponse(BaseModel):

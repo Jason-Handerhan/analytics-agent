@@ -36,7 +36,6 @@ reading its own report, which you do every run anyway.
 | `mock_graph_yielding(nodes)` | Fake graph whose `astream` yields given nodes |
 | `build_telemetry_row(**kwargs)` | One `agent_telemetry` row dict |
 | `seed_telemetry_rows(rows)` | Writes rows the judge test reads back |
-| `save_message` / `get_recent_messages` | Thin Firestore wrappers, mocked client |
 | `build_mock_query_result(total_rows)` | Mock BigQuery result with `.total_rows` |
 | `build_mock_dax_response(row_count)` | Dict shaped like `executeQueries`' JSON — **confirm the real nesting first** (open items) |
 | `sample_chart_df()` | Small DataFrame for chart dispatch tests |
@@ -45,9 +44,8 @@ reading its own report, which you do every run anyway.
 | `tests/fixtures/model_schema/` | Small, hand-trimmed `INFO.VIEW.*`/Scanner API response shapes — plus the hand-verified expected artifact |
 | `create_conversation(as_user)` | Calls `POST /conversation` as a given identity |
 | `get_status(conv_id, as_user)` | Calls `GET /ask/status` as a given identity |
-| `respond_to_approval(conv_id, decision)` | Calls `POST /ask/respond` |
+| `respond_to_approval(conv_id, decision)` | Calls `POST /ask` with `approval_decision` set, no `question` |
 | `call_tool(name, args)` | Invokes one tool through the MCP server |
-| `build_prompt(conv_id, question)` | Assembles the prompt exactly as a turn would |
 | `build_spec(chart_type, **kw)` | A minimal valid `ChartSpec` of the given type |
 | `generate_chart_with_df(spec, df)` | Renders a spec against a supplied DataFrame |
 | `run_judge(rows)` | Runs the judge over seeded telemetry rows |
@@ -55,7 +53,7 @@ reading its own report, which you do every run anyway.
 ## 1. Authentication
 
 ```python
-# tests/test_gateway_auth.py
+# tests/test_gateway.py
 @pytest.mark.parametrize("token,api_key,expected", [
     (VALID, VALID,   200),
     (BAD,   VALID,   401),
@@ -142,37 +140,53 @@ there rather than silently passing with an absent key.
 and Scanner API calls succeeding against the real dataset — that needs the
 real dashboard to investigate, not something a fixture can stand in for.
 
-## 4. Chat history reaches the prompt via Firestore
+## 4. Chat history — redaction, FIFO trim, and round-trip
+
+Pure functions over plain dicts/`BaseMessage` — no Firestore, no mocking.
+`fetch_history_messages`/`write_history_messages` (the actual Firestore I/O,
+in `app/gateway/gateway.py`) are deliberately NOT unit-tested: mocking their
+one dependency (`get_firestore_client()`) would just assert the mock does what the mock
+was told to do, nothing real exercised. They're proven live instead, in
+`notebooks/phase3_gateway_e2e.ipynb`.
+
+One scenario covers three behaviors together, rather than one test each —
+they're not independent properties; round-tripping the trimmed/redacted
+output back through `build_history_messages` *is* the real end-to-end check:
 
 ```python
-# tests/test_conversation_state.py
-async def test_recent_messages_reach_the_prompt():
-    """The exact bug this project actually hit: storing history in
-    Firestore and never reading it back. Save a message, start a new turn
-    in the same conversation, confirm the prior answer's content is in
-    what actually gets sent to the model — not just that Firestore has it."""
-    await save_message(CONV, question="what was recall?", answer="0.367")
-    prompt = await build_prompt(CONV, question="what about last quarter?")
-    assert "0.367" in prompt
-
-async def test_queries_and_filters_reach_the_prompt():
-    """A stored query is only safe to adapt if its filter context comes with
-    it — one composed under Region=West is wrong under different slicers."""
-    await save_message(CONV, question="q", answer="a",
-                       queries=["EVALUATE TOPN(...)"],
-                       filter_context=[{"target": {"table": "Region"},
-                                        "values": ["West"]}])
-    prompt = await build_prompt(CONV, question="what about East?")
-    assert "EVALUATE TOPN" in prompt
-    assert "West" in prompt
-
-def test_truncation_never_splits_a_number():
-    """A character cut turns 0.367 into 0.36 — a WRONG number in history.
-    A naive [.!?]\s regex survives that but dies on abbreviations."""
-    text = "Approx. 0.367 recall. " + "x" * 600
-    assert "0.36 " not in truncate_at_sentence(text)
-    assert "0.367" in truncate_at_sentence(text)
+# tests/test_entry_exit.py
+def test_build_updated_history_redacts_trims_and_round_trips():
+    """One realistic turn exercises all three behaviors together: selective
+    redaction (success-gated, not just name-gated — an error-status
+    ToolMessage is left untouched), FIFO trim to HISTORY_TURN_COUNT, and
+    round-tripping the result back through build_history_messages. The
+    sample data is deliberately varied (a successful run_bigquery_sql call,
+    a successful other-tool call, a failed call, and submit_answer) so a bug
+    that redacted indiscriminately would actually fail this, not pass by
+    accident."""
 ```
+
+No separate test for answer truncation — `gateway.md`'s "Conversation
+history" section explains why it was decided against entirely, not just
+deferred: redacted tool results are now the size pressure that would have
+motivated it, and they're already small and fixed-size.
+
+## 4b. Gateway -- auth, endpoints, and live status
+
+```python
+# tests/test_gateway.py
+def test_expired_token_rejected(...)          # one per auth failure mode
+async def test_wrong_owner_rejected(...)     # 404 for someone else's conversation
+def test_post_conversation_success(...)
+def test_post_ask_success(...)               # the turn writes live_turns, then deletes it
+def test_question_too_long_rejected(...)
+async def test_consume_graph_writes_status_and_cleans_up(...)  # the whole live_turns write sequence
+def test_get_ask_status_returns_live_progress(...)
+```
+
+`session_doc` and `live_turn_doc` are monkeypatched to a recording `_Doc`, so no Firestore
+client is built. The `consume_graph` test asserts every write in order, including the final
+delete, so the status sequence and the cleanup are both covered.
 
 ## 5. Every tool works, called through the MCP server
 
@@ -217,6 +231,39 @@ def test_chart_dispatch_renders(chart_type, sample_chart_df):
     assert generate_chart_with_df(spec, sample_chart_df).chart_url
 ```
 
+## 6b. Combine tool - stack/join, guardrails
+
+```python
+# tests/test_combine_tool.py
+def test_combine_results_stack_join_and_guardrails():
+    """Stack and join success paths (out-of-order keys, composite keys,
+    left-join fills) and every guardrail's error, in one batch of cases."""
+```
+
+Ref resolution for `generate_chart` and `combine_results` lives in `tests/test_orchestrator.py`, next to the other orchestrator functions:
+
+```python
+# tests/test_orchestrator.py
+def test_resolve_chart_and_combine_data():
+    """Ref resolution into real-tool args for charts and combines, plus every
+    resolve error path (unknown, failed, non-chartable, too few refs)."""
+```
+
+## 6c. Submit answer -- validators and question normalization
+
+```python
+# tests/test_submit_answer.py
+def test_submit_answer_args_validators():
+    """Exactly-one answer/question rule, literal-newline unescape, leaked-tag strip,
+    and markdown structure checks."""
+
+# tests/test_orchestrator.py
+@pytest.mark.asyncio
+async def test_call_tool_node_submit_answer_branch():
+    """A question turn copies the question into answer_markdown and clears
+    follow-ups; an answer turn passes its answer and follow-ups through."""
+```
+
 ## 7. Telemetry — every turn logs a complete row
 
 ```python
@@ -227,6 +274,9 @@ def test_every_turn_logs_a_row_with_every_required_field():
         assert field in row
 
 ```
+
+`test_write_telemetry_row_success` is parametrized on `clarifying_question`:
+an empty value is written as NULL, and a question passes through as text.
 
 ## 8. Guardrails — one per category, not per edge case
 
@@ -244,17 +294,15 @@ def test_verification_checks_table_values_without_redeclaring_them():
     """A number only inside a markdown table (not in all_prose_numeric_claims)
     still gets checked -- extract_table_values, not the model, is the source."""
 
-def test_cost_threshold_triggers_approval():
-
 def test_batch_sums_before_deciding():
-    """Three queries each under BIG_QUERY_THRESHOLD, over it combined.
+    """Three queries each under PENDING_APPROVAL_THRESHOLD, over it combined.
     Per-tool gating would pass all three (docs/approval-workflow.md)."""
 
 def test_hard_decline_dispatches_nothing():
     """Over the absolute cap, no tool runs — not even the cheap ones."""
 
 def test_per_turn_byte_budget_sums_across_calls():
-    """Distinct from BIG_QUERY_THRESHOLD: three individually-cheap
+    """Distinct from PENDING_APPROVAL_THRESHOLD: three individually-cheap
     queries can still blow the turn budget. Only the SUM catches that."""
 
 def test_slicer_state_reaches_filter_context():
@@ -292,35 +340,50 @@ def test_cancel_kills_the_bigquery_job(mock_bq_client):
 
 ```
 
-## 9. Approval workflow, end to end
+## 9. Approval workflow
+
+Built, Layer 1 tested, and live-verified — not the aspirational sketch this
+section once was. The pause itself (the gate deciding `needs_approval`) is a
+guardrail test, covered under §8:
+`test_call_tool_node_pauses_over_threshold` (`tests/test_orchestrator.py`) —
+a batch over `PENDING_APPROVAL_THRESHOLD` pauses before any tool runs, and
+the card's query is the one with the largest estimate. This section is
+everything *after* the pause.
 
 ```python
-# tests/test_approval_e2e.py
-async def test_approve_resumes_and_returns_a_real_answer():
-    """Not just that the pause fires (covered under guardrails) — that
-    responding to it actually produces a complete, correct answer."""
-    paused = await run_agent_turn(EXPENSIVE_QUESTION, conversation_id=CONV)
-    assert paused.needs_approval
-    resumed = await respond_to_approval(CONV, decision="approve")
-    assert resumed.answer_markdown
+# tests/test_gateway.py
+def test_post_ask_resume_approved_seeds_state(monkeypatch, patch_jwks, auth_headers):
+    """Approving a pending approval rebuilds initial_state from the stored
+    PendingApproval, not from the request body -- question, filter_context,
+    active_page, tool_calls, iteration_count, bytes_consumed/_baseline,
+    approved_batch, approval_decision, and the rebuilt messages. A recording
+    fake graph captures the initial_state call_tool_node would actually see."""
 
-async def test_resumed_turn_can_still_call_tools():
-    """The approved query isn't necessarily the last thing needed. A resumed
-    turn that synthesizes immediately would answer from incomplete data."""
-    await run_agent_turn(MULTI_STEP_EXPENSIVE_QUESTION, conversation_id=CONV)
-    resumed = await respond_to_approval(CONV, decision="approve")
-    tool_names = {tc["name"] for tc in resumed.tool_calls}
-    assert tool_names - {"run_bigquery_sql"}   # called something beyond the approved query
+def test_post_ask_resume_rejected_returns_message(monkeypatch, patch_jwks, auth_headers):
+    """Rejecting returns REJECTED_MESSAGE and no graph runs -- the telemetry
+    write itself is mocked out here (that's build_telemetry_row's test to
+    cover, not this one's) and live_turns is confirmed cleared."""
 
-def test_pause_and_response_rows_do_not_double_count():
-    """Pause row records pre-pause work; response row records post-approval
-    only. Summing gives the turn total (.claude/rules/telemetry.md)."""
-    pause, response = telemetry_rows_for(CONV)
-    assert pause["approval_decision"] is None
-    assert pause["prompt_tokens"] > 0
-    assert response["approval_decision"] == "approved"
-    assert response["prompt_tokens"] < pause["prompt_tokens"] + response["prompt_tokens"]
+# tests/test_entry_exit.py
+def test_rebuild_paused_messages():
+    """A numeric success gets its labeled content restored from the
+    ToolCallRecord (same ref_id); a numeric error, a non-numeric success,
+    and submit_answer all pass through exactly as stored."""
+
+# tests/test_telemetry.py
+async def test_write_telemetry_row_success(...):
+    """Includes the bytes_consumed_baseline subtraction: bytes_consumed=900_000_000,
+    bytes_consumed_baseline=100_000_000 in, row["bytes_consumed"] == 800_000_000 out --
+    proves a resumed turn's response row doesn't double-count what its pause
+    row already reported."""
 ```
+
+**Live-verified in `notebooks/phase3_graph.ipynb`, `phase3_orchestrator_e2e.ipynb`,
+and `phase3_gateway_e2e.ipynb`** (the last one through real HTTP routes, no
+notebook-local shortcuts) — approve, reject, a `TABLESAMPLE`-forced batch
+pausing multiple times in one turn (all approved, telemetry correct for
+every row), the absolute cap producing a correct partial answer, and the
+dry-run-failure decline path.
 
 ## 10. End-to-end: request to response
 

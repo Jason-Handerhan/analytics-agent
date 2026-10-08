@@ -54,6 +54,7 @@ TITLE_FONTSIZE       = 16
 AXIS_LABEL_FONTSIZE  = 14
 TICK_LABEL_FONTSIZE  = 10
 LEGEND_FONTSIZE      = 10
+LEGEND_MAX_COLUMNS   = 4      # legend sits in a row below the plot; wraps past this
 
 # Bar/segment value labels (_annotate_values, _annotate_segments) -- drawn
 # mid-render, not part of _finish()'s chrome hierarchy above. Heatmap's cell
@@ -77,6 +78,7 @@ class ChartSpecBase(BaseModel, ABC):
     def render(self, df: pd.DataFrame) -> plt.Figure: ...
 
     def _setup(self) -> tuple[plt.Figure, plt.Axes]:
+        # Apply the shared seaborn theme.
         sns.set_theme(style=STYLE, context=CONTEXT, palette=PALETTE)
         return plt.subplots(figsize=FIGSIZE, dpi=DPI)
 
@@ -87,35 +89,52 @@ class ChartSpecBase(BaseModel, ABC):
 
     def _style_legend(self, ax: plt.Axes) -> None:
         legend = ax.get_legend()
+        # Legend title and entry font sizes.
         legend.set_title(self._clean_label(legend.get_title().get_text()),
                           prop={"size": LEGEND_FONTSIZE})
         for text in legend.get_texts():
             text.set_fontsize(LEGEND_FONTSIZE)
 
     def _finish(self, fig: plt.Figure, ax: plt.Axes) -> plt.Figure:
+        # Title and axis labels, bracket aliases stripped.
         ax.set_title(self._clean_label(self.title), pad=12, fontsize=TITLE_FONTSIZE)
         ax.set_xlabel(self._clean_label(self.x_label), fontsize=AXIS_LABEL_FONTSIZE)
         ax.set_ylabel(self._clean_label(self.y_label), fontsize=AXIS_LABEL_FONTSIZE)
+        # Tick label size.
         ax.tick_params(axis="both", labelsize=TICK_LABEL_FONTSIZE)
+        # Legend below the plot, then styled.
         if ax.get_legend():
+            entries = ax.get_legend().get_texts()
+            sns.move_legend(ax, "lower center", bbox_to_anchor=(0.5, 0), bbox_transform=fig.transFigure,
+                            ncol=min(len(entries), LEGEND_MAX_COLUMNS), frameon=False, borderpad=0.1)
             self._style_legend(ax)
+        # Gridlines, then remove top and right spines.
         ax.grid(True, alpha=GRID_ALPHA)
         sns.despine(ax=ax)
 
+        # Rotate x labels 45 degrees when there are many or long ones.
         labels = [tick.get_text() for tick in ax.get_xticklabels()]
         if labels and (len(labels) > 6 or max(len(l) for l in labels) > 10):
             plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
+        # Fit the figure around the labels.
         fig.tight_layout()
+        # Raise the axes by the legend's height so it clears the x-axis labels.
+        if ax.get_legend():
+            fig.canvas.draw()
+            legend_height = ax.get_legend().get_window_extent().transformed(fig.transFigure.inverted()).height
+            fig.subplots_adjust(bottom=fig.subplotpars.bottom + legend_height)
         return fig
 
     def _annotate_values(self, ax: plt.Axes) -> None:
         """Bar value labels -- skipped entirely once any container holds more
         than MAX_LABELED_BARS bars, so every caller (present and future) gets
         the same overcrowding protection with no per-call-site threshold."""
+        # Skip labels when any bar container is too crowded.
         if any(len(container) > MAX_LABELED_BARS for container in ax.containers):
             return
         value_format = getattr(self, "value_format", "auto")
+        # Label each bar container with its formatted value.
         for container in ax.containers:
             ax.bar_label(container, fmt=lambda v: self._format_value(v, value_format),
                         padding=2, fontsize=VALUE_ANNOTATION_FONTSIZE)
@@ -123,24 +142,28 @@ class ChartSpecBase(BaseModel, ABC):
     def _format_value(self, value: float, value_format: str) -> str:
         """Formats one value for an axis tick or bar label. 'auto' picks based
         on magnitude"""
+        # Fraction to one-decimal percent.
         if value_format == "percent":
             return f"{value:.1%}"
+        # Dollar sign for currency.
         prefix = "$" if value_format == "currency" else ""
         abs_value = abs(value)
-        for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M")):
+        # Abbreviate billions, millions, and thousands, dropping a trailing .0.
+        for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
             if abs_value >= threshold:
                 text = f"{value / threshold:.1f}"
                 return f"{prefix}{text[:-2] if text.endswith('.0') else text}{suffix}"
-        if abs_value >= 1000:
-            return f"{prefix}{value:,.0f}"
+        # Two decimals for currency under 1,000.
         if value_format == "currency":
             return f"{prefix}{value:,.2f}"
+        # Up to four significant digits otherwise.
         return f"{value:,.4g}"
 
     def _apply_value_format(self, ax: plt.Axes, axis: Literal["x", "y"]) -> None:
         """Formats an axis's tick labels using self.value_format, defaulting
         to 'auto' for a class that has no such field."""
         value_format = getattr(self, "value_format", "auto")
+        # Set the tick formatter on that axis.
         getattr(ax, f"{axis}axis").set_major_formatter(
             FuncFormatter(lambda v, pos: self._format_value(v, value_format)))
 
@@ -207,6 +230,7 @@ class BarChartSpec(ChartSpecBase, FormattedValueSpec):
     def render(self, df: pd.DataFrame) -> plt.Figure:
         self._check_no_duplicate_grain(df, [self.x_field])
         self._check_max_categories(df[self.x_field].nunique(), MAX_BAR_CATEGORIES, "categories")
+        # Sort by y_field, if requested.
         if self.sort_order is not None:
             if self.sort_order == "asc":
                 df = df.sort_values(self.y_field, ascending=True)
@@ -214,6 +238,7 @@ class BarChartSpec(ChartSpecBase, FormattedValueSpec):
                 df = df.sort_values(self.y_field, ascending=False)
         fig, ax = self._setup()
         sns.barplot(data=df, x=self.x_field, y=self.y_field, ax=ax)
+        # Bar value labels, then y-axis format.
         self._annotate_values(ax)
         self._apply_value_format(ax, "y")
         return self._finish(fig, ax)
@@ -245,6 +270,7 @@ class HorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
         self._check_no_duplicate_grain(df, [self.y_field])
         self._check_max_categories(df[self.y_field].nunique(), MAX_BAR_CATEGORIES, "categories")
         self._check_max_label_length(df[self.y_field], self.y_field)
+        # Sort by x_field, if requested.
         if self.sort_order is not None:
             if self.sort_order == "asc":
                 df = df.sort_values(self.x_field, ascending=True)
@@ -252,6 +278,7 @@ class HorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
                 df = df.sort_values(self.x_field, ascending=False)
         fig, ax = self._setup()
         sns.barplot(data=df, x=self.x_field, y=self.y_field, ax=ax)
+        # Bar value labels, then x-axis format.
         self._annotate_values(ax)
         self._apply_value_format(ax, "x")
         return self._finish(fig, ax)
@@ -284,6 +311,7 @@ class GroupedBarChartSpec(ChartSpecBase, FormattedValueSpec):
         fig, ax = self._setup()
         sns.barplot(data=df, x=self.x_field, y=self.y_field,
                     hue=self.hue_field, ax=ax)
+        # Bar value labels, then y-axis format.
         self._annotate_values(ax)
         self._apply_value_format(ax, "y")
         return self._finish(fig, ax)
@@ -321,9 +349,11 @@ class StackedHorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
     def _annotate_segments(self, ax: plt.Axes, containers: list) -> None:
         """Labels each segment at its center, in white -- skipped for any
         segment narrower than 10% of the AXIS range"""
+        # Axis range, so narrow segments can be skipped.
         axis_min, axis_max = ax.get_xlim()
         axis_range = axis_max - axis_min
         value_format = getattr(self, "value_format", "auto")
+        # Center white labels on each segment.
         for container in containers:
             ax.bar_label(
                 container, label_type="center", color="white", fontsize=VALUE_ANNOTATION_FONTSIZE,
@@ -338,6 +368,7 @@ class StackedHorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
                                     MAX_STACKED_BAR_SEGMENTS, "segments")
         self._check_max_label_length(df[self.category_field], self.category_field)
         # Pivot to wide, then stack bars using a running left offset.
+        # Long to wide, with missing segments as 0.
         grid = df.pivot(index=self.category_field, columns=self.segment_field,
                         values=self.value_field).fillna(0)
         fig, ax = self._setup()
@@ -346,8 +377,9 @@ class StackedHorizontalBarChartSpec(ChartSpecBase, FormattedValueSpec):
         for segment in grid.columns:
             containers.append(ax.barh(grid.index, grid[segment], left=left, label=str(segment)))
             left += grid[segment]
-        ax.legend(title=self.segment_field, bbox_to_anchor=(1.02, 1),
-                  loc="upper left")     # legend outside the plot area -- _finish() cleans/sizes it
+        # Legend keyed by segment name.
+        ax.legend(title=self.segment_field)
+        # X-axis format, then segment labels.
         self._apply_value_format(ax, "x")
         self._annotate_segments(ax, containers)
         return self._finish(fig, ax)
@@ -384,6 +416,7 @@ class LineChartSpec(ChartSpecBase, FormattedValueSpec):
         self._check_max_categories(df[self.x_field].nunique(), MAX_LINE_POINTS, "x-axis points")
         if self.hue_field is not None:
             self._check_max_categories(df[self.hue_field].nunique(), MAX_LINE_HUE_GROUPS, "hue groups")
+        # Sort by x_field, descending if requested.
         if self.sort_order == "desc":
             s = df.sort_values(self.x_field, ascending=False)
         else:
@@ -391,6 +424,7 @@ class LineChartSpec(ChartSpecBase, FormattedValueSpec):
         fig, ax = self._setup()
         sns.lineplot(data=s, x=self.x_field, y=self.y_field,
                      hue=self.hue_field, marker="o", ax=ax)
+        # Y-axis format.
         self._apply_value_format(ax, "y")
         return self._finish(fig, ax)
 
@@ -424,10 +458,12 @@ class HistogramChartSpec(ChartSpecBase):
         # Bars drawn from pre-binned data, not sns.histplot.
         s = df.sort_values(self.bucket_field)
         fig, ax = self._setup()
+        # Bar width from the smallest bucket gap.
         width = (s[self.bucket_field].diff().dropna().min()
                  if len(s) > 1 else 1)
         ax.bar(s[self.bucket_field], s[self.count_field],
                width=width * 0.9, align="edge")
+        # Y-axis format.
         self._apply_value_format(ax, "y")
         return self._finish(fig, ax)
 
@@ -471,6 +507,7 @@ class BoxChartSpec(ChartSpecBase, FormattedValueSpec):
     def render(self, df: pd.DataFrame) -> plt.Figure:
         self._check_no_duplicate_grain(df, [self.category_field])
         self._check_max_categories(df[self.category_field].nunique(), MAX_BOX_CATEGORIES, "categories")
+        # Sort by median, if requested.
         if self.sort_order is not None:
             if self.sort_order == "asc":
                 df = df.sort_values(self.med_field, ascending=True)
@@ -487,6 +524,7 @@ class BoxChartSpec(ChartSpecBase, FormattedValueSpec):
                  for _, r in df.iterrows()]
         fig, ax = self._setup()
         ax.bxp(stats, showfliers=False)
+        # Y-axis format.
         self._apply_value_format(ax, "y")
         return self._finish(fig, ax)
 
@@ -514,12 +552,16 @@ class HeatmapChartSpec(ChartSpecBase):
         self._check_no_duplicate_grain(df, [self.x_field, self.y_field])
         self._check_max_categories(df[self.x_field].nunique(), MAX_HEATMAP_AXIS, "x-axis categories")
         self._check_max_categories(df[self.y_field].nunique(), MAX_HEATMAP_AXIS, "y-axis categories")
+        # Long to wide grid, one cell per x/y pair.
         grid = df.pivot(index=self.y_field, columns=self.x_field,
                         values=self.value_field)
         fig, ax = self._setup()
+        # Cell size from figure size and grid shape.
         cell_width = FIGSIZE[0] / grid.shape[1]
         cell_height = FIGSIZE[1] / grid.shape[0]
+        # Annotation font scales with cell size, capped.
         fontsize = min(min(cell_width, cell_height) * HEATMAP_FONT_FACTOR, MAX_HEATMAP_ANNOT_FONTSIZE)
+        # Hide annotations when too small to read.
         annot = fontsize >= MIN_HEATMAP_ANNOT_FONTSIZE
         sns.heatmap(grid, annot=annot, fmt=".4g", cmap="Blues", ax=ax,
                     annot_kws={"fontsize": fontsize} if annot else None)
@@ -598,6 +640,7 @@ class ConcentrationChartSpec(ChartSpecBase):
         """Draws exactly one guide line -- horizontal if highlight_at_cum_pct was
         set, vertical if highlight_at_rank_pct was -- labeling only the value
         that line's own position doesn't already show."""
+        # Crossing point, then its guide line and label.
         x, y = self._find_crossing(rank_pct, cum_pct)
         if self.highlight_at_cum_pct is not None:
             ax.axhline(y, linestyle="--", color="gray")
@@ -616,20 +659,25 @@ class ConcentrationChartSpec(ChartSpecBase):
                 f"5% bucket. Got {len(df)}. Query with NTILE({CONCENTRATION_BUCKETS}) OVER "
                 f"(ORDER BY <value> DESC), then multiply the bucket by 5 to get {self.percentile_field} "
                 "-- the real percent of the ranked population, not the raw bucket index.")
+        # Rank order, with a fresh index.
         s = df.sort_values(self.percentile_field).reset_index(drop=True)
         rank_pct = s[self.percentile_field].to_numpy()
         cum_pct = s[self.cumulative_pct_field].to_numpy()
+        # Each bucket's own share, from successive cumulative values.
         bucket_share = np.diff(cum_pct, prepend=0.0)
+        # Cumulative curve, starting at (0, 0).
         curve_rank = np.concatenate([[0.0], rank_pct])
         curve_cum = np.concatenate([[0.0], cum_pct])
 
         fig, ax1 = self._setup()
+        # Bar width from the smallest bucket gap.
         width = np.diff(rank_pct).min() * 0.9 if len(rank_pct) > 1 else 1
         ax1.bar(rank_pct, bucket_share, width=width)
         ax2 = ax1.twinx()
         ax2.plot(curve_rank, curve_cum, color=self.cumulative_color)
         self._annotate_crossing(ax2, curve_rank, curve_cum)
         ax2.set_ylabel(CUMULATIVE_AXIS_LABEL)
+        # Right-axis grid off; left grid kept.
         ax2.grid(False)
         return self._finish(fig, ax1)
 
@@ -662,10 +710,12 @@ class ParetoChartSpec(ChartSpecBase):
         self._check_no_duplicate_grain(df, [self.category_field])
         self._check_max_categories(df[self.category_field].nunique(), MAX_BAR_CATEGORIES, "categories")
         s = df.sort_values(self.value_field, ascending=False).reset_index(drop=True)
+        # Cumulative percent of the total.
         cum_pct = s[self.value_field].cumsum() / s[self.value_field].sum() * 100
 
         fig, ax1 = self._setup()
         ax1.bar(s[self.category_field], s[self.value_field])
+        # Left-axis format.
         self._apply_value_format(ax1, "y")
         ax2 = ax1.twinx()
         ax2.plot(s[self.category_field], cum_pct,
@@ -673,6 +723,7 @@ class ParetoChartSpec(ChartSpecBase):
         ax2.set_ylabel(CUMULATIVE_AXIS_LABEL)
         ax2.grid(False)
 
+        # Label every point, or an even subset when crowded.
         n = len(s)
         label_indices = (range(n) if n <= MAX_PARETO_LABELS
                          else np.linspace(0, n - 1, MAX_PARETO_LABELS, dtype=int))
@@ -701,6 +752,7 @@ def render_and_upload(fig: plt.Figure, bucket_name: str, storage_backend: str,
         raise ToolError(
             f"Unsupported storage_backend '{storage_backend}'. Only 'gcs' is implemented.")
     buf = io.BytesIO()
+    # Export PNG, trimming whitespace.
     fig.savefig(buf, format="png", dpi=DPI, bbox_inches="tight")
     plt.close(fig)                 
     buf.seek(0)
@@ -734,12 +786,24 @@ def generate_chart(
     must include every field the chosen chart type requires -- see that
     type's own description for its exact shape and grain."""
     df = pd.DataFrame(args.data)
-    
-    #Validate llm input fields for chart are in the data 
+
+    #Validate llm input fields for chart are in the data
     missing = [f for f in args.spec.required_fields() if f not in df.columns]
     if missing:
         raise ToolError(
             f"Field(s) {missing} not in source data. Available: {list(df.columns)}")
+
+    # One check for every chart type, present and future -- required_fields()
+    # is already implemented polymorphically by each spec, so this needs no
+    # per-chart-type null handling. Charts render missing data as gaps or not
+    # at all rather than erroring, so a null here fails silently without this.
+    nulls = [f for f in args.spec.required_fields() if df[f].isna().any()]
+    if nulls:
+        raise ToolError(
+            f"Field(s) {nulls} contain null values -- charts can't render missing "
+            "data meaningfully. Fill them in the query (e.g. COALESCE) or exclude "
+            "those rows, then retry.")
+
     fig = args.spec.render(df)
     return ChartResult(chart_url=render_and_upload(
         fig, bucket_name, storage_backend, expiration_hours,
