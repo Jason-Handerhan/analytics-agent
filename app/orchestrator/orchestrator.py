@@ -11,12 +11,14 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from itertools import groupby
 from operator import itemgetter
 
 import google.auth
 import google.auth.transport.requests
 import mistune
+import msal
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_anthropic import ChatAnthropic, convert_to_anthropic_tool
@@ -56,8 +58,7 @@ from app.config import (
     get_secret,
 )
 from app.orchestrator.context import get_static_context
-from app.orchestrator.power_bi_auth import get_power_bi_token
-from app.orchestrator.shared_helpers import label_chartable_result
+from app.orchestrator.shared_helpers import is_cancelled, label_chartable_result
 from app.orchestrator.state import AgentState, ToolCallRecord, TurnError
 from app.orchestrator.tools import (
     CombineResultsToolCallArgs,
@@ -135,15 +136,35 @@ def format_cost(num_bytes: int) -> str:
     """Byte count as a display dollar string -- display only, not the decision."""
     return f"${(num_bytes / 1024**4) * BIGQUERY_PRICE_PER_TIB:.2f}"
 
+@lru_cache
+def _msal_app() -> msal.ConfidentialClientApplication:
+    return msal.ConfidentialClientApplication(
+        get_secret("power-bi-sp-client-id", GCP_PROJECT_ID),
+        authority=f"https://login.microsoftonline.com/{get_secret('azure-tenant-id', GCP_PROJECT_ID)}",
+        client_credential=get_secret("power-bi-sp-client-secret", GCP_PROJECT_ID),
+    )
+
+
+def get_power_bi_token() -> str:
+    result = _msal_app().acquire_token_for_client(
+        scopes=["https://analysis.windows.net/powerbi/api/.default"]
+    )
+    return result["access_token"]
+
+
 # Inject Dax Args: For llm excluded MCP tool (run_dax_query) args
-def inject_dax_args(tc: dict) -> dict:
+async def inject_dax_args(tc: dict) -> dict:
     """Adds Power BI auth/target/guardrail values to a run_dax_query call --
     excluded from the model's schema (exclude_args)"""
+    try:
+        access_token = await asyncio.to_thread(get_power_bi_token)
+    except Exception as e:
+        raise ToolError(f"Failed to get a Power BI access token: {e}") from e
     return {
         **tc,
         "args": {
             **tc["args"],
-            "access_token": get_power_bi_token(),
+            "access_token": access_token,
             "workspace_id": POWER_BI_WORKSPACE_ID,
             "dataset_id": POWER_BI_DATASET_ID,
             "row_cap": DAX_ROW_CAP,
@@ -152,11 +173,22 @@ def inject_dax_args(tc: dict) -> dict:
     }
 
 
+@lru_cache
+def get_github_token() -> str:
+    """The GitHub read token, fetched once per process -- a static
+    credential, unlike an OAuth access token that expires and needs refreshing."""
+    return get_secret("github-read-token", GCP_PROJECT_ID)
+
+
 def inject_code_search_args(tc: dict) -> dict:
     """Adds GitHub identity/connection values and this project's curated
     file descriptions to a get_repo_contents call -- excluded from the
     model's schema (exclude_args). A different deployer supplies their own
     file_descriptions for their own repo instead."""
+    try:
+        access_token = get_github_token()
+    except Exception as e:
+        raise ToolError(f"Failed to get the GitHub read token: {e}") from e
     return {
         **tc,
         "args": {
@@ -164,7 +196,7 @@ def inject_code_search_args(tc: dict) -> dict:
             "owner": GITHUB_REPO_OWNER,
             "repo": GITHUB_REPO_NAME,
             "branch": GITHUB_REPO_BRANCH,
-            "access_token": get_secret("github-read-token", GCP_PROJECT_ID),
+            "access_token": access_token,
             "file_descriptions": FILE_DESCRIPTIONS,
         },
     }
@@ -172,16 +204,28 @@ def inject_code_search_args(tc: dict) -> dict:
 
 # Chart + combine_results dispatch -- source_ref resolution and GCS args for generate_chart
 
-def get_gcp_access_token() -> str:
-    """An OAuth access token for agent-sa, via ADC."""
+@lru_cache
+def _get_adc_credentials():
     creds, _ = google.auth.default()
-    creds.refresh(google.auth.transport.requests.Request())
+    return creds
+
+
+async def get_gcp_access_token() -> str:
+    """An OAuth access token for agent-sa, via ADC. Refreshes only when the
+    cached credentials have actually expired, not on every call."""
+    creds = _get_adc_credentials()
+    if not creds.valid:
+        await asyncio.to_thread(creds.refresh, google.auth.transport.requests.Request())
     return creds.token
 
 
-def inject_chart_args(tc: dict) -> dict:
+async def inject_chart_args(tc: dict) -> dict:
     """Adds GCS storage/auth values to a generate_chart call -- excluded
     from the model's schema (exclude_args), never stored in ToolCallRecord/telemetry."""
+    try:
+        access_token = await get_gcp_access_token()
+    except Exception as e:
+        raise ToolError(f"Failed to get a GCP access token: {e}") from e
     return {
         **tc,
         "args": {
@@ -189,7 +233,7 @@ def inject_chart_args(tc: dict) -> dict:
             "bucket_name": GCS_CHART_BUCKET,
             "storage_backend": "gcs",
             "expiration_hours": CHART_URL_EXPIRATION_HOURS,
-            "access_token": get_gcp_access_token(),
+            "access_token": access_token,
             "service_account_email": AGENT_SA_EMAIL,
         },
     }
@@ -213,7 +257,10 @@ def _lookup_source_ref(source_ref: str, prior_tool_calls: list["ToolCallRecord"]
 
 def resolve_chart_data(chart_tc: dict, prior_tool_calls: list["ToolCallRecord"]) -> dict:
     """Rewrites a model-facing chart call into the real MCP tool's args shape."""
-    call_args = GenerateChartToolCallArgs.model_validate(chart_tc["args"])
+    try:
+        call_args = GenerateChartToolCallArgs.model_validate(chart_tc["args"])
+    except ValidationError as e:
+        raise ToolError(str(e.errors()[0])) from e
     source_tc = _lookup_source_ref(call_args.source_ref, prior_tool_calls)
     return {
         **chart_tc,
@@ -226,7 +273,7 @@ def resolve_combine_data(combine_tc: dict, prior_tool_calls: list["ToolCallRecor
     try:
         call_args = CombineResultsToolCallArgs.model_validate(combine_tc["args"])
     except ValidationError as e:
-        raise ToolError(str(e.errors()[0]["ctx"]["error"])) from e
+        raise ToolError(str(e.errors()[0])) from e
     source_tcs = [_lookup_source_ref(ref, prior_tool_calls) for ref in call_args.source_refs]
     return {
         **combine_tc,
@@ -332,21 +379,30 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord]) 
                     "this round. Call it alone, with nothing else.",
             name=tc["name"], tool_call_id=tc["id"], status="error")
     if tc["name"] == "run_dax_query":
-        return await ALL_TOOLS[tc["name"]].ainvoke(inject_dax_args(tc))
+        try:
+            full_args = await inject_dax_args(tc)
+        except ToolError as e:
+            return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
     if tc["name"] == "get_repo_contents":
-        return await ALL_TOOLS[tc["name"]].ainvoke(inject_code_search_args(tc))
+        try:
+            full_args = inject_code_search_args(tc)
+        except ToolError as e:
+            return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
     if tc["name"] == "generate_chart":
         try:
-            resolved = resolve_chart_data(tc, prior_tool_calls)
+            args_w_data = resolve_chart_data(tc, prior_tool_calls)
+            full_args = await inject_chart_args(args_w_data)
         except ToolError as e:
             return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
-        return await ALL_TOOLS[tc["name"]].ainvoke(inject_chart_args(resolved))
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
     if tc["name"] == "combine_results":
         try:
-            resolved = resolve_combine_data(tc, prior_tool_calls)
+            full_args = resolve_combine_data(tc, prior_tool_calls)
         except ToolError as e:
             return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
-        return await ALL_TOOLS[tc["name"]].ainvoke(resolved)
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
     return await ALL_TOOLS[tc["name"]].ainvoke(tc)
 
 
@@ -380,8 +436,7 @@ def iteration_cap_update(tool_calls: list[dict], iteration_count: int) -> dict:
     }
 
 
-# Shared GFM table parser -- used by check_table_rows below and by
-# extract_table_values further down (verify_node section).
+# Shared GFM table parser -- used by check_table_rows & extract_table_values
 _markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
 
 
@@ -646,7 +701,11 @@ async def call_tool_node(state: AgentState) -> dict:
             for tc in bq_calls
         ]
     else:
-        bq_messages = await asyncio.gather(*[ALL_TOOLS[tc["name"]].ainvoke(tc) for tc in bq_calls])
+        full_bq_calls = [
+            {**tc, "args": {**tc["args"], "conversation_id": state["conversation_id"]}}
+            for tc in bq_calls
+        ]
+        bq_messages = await asyncio.gather(*[ALL_TOOLS[tc["name"]].ainvoke(tc) for tc in full_bq_calls])
     bq_completed_at = datetime.now(timezone.utc)
 
     ref_counter = sum(1 for r in state["tool_calls"] if r.get("ref_id")) + 1
@@ -669,6 +728,8 @@ async def call_tool_node(state: AgentState) -> dict:
         r["result"]["chart_url"] for r in other_result.records
         if r["name"] == "generate_chart" and r["success"]
     ]
+    cancelled = await is_cancelled(state["conversation_id"])
+
     return {
         "messages": bq_result.display_messages + other_result.display_messages,
         "approved_batch": False,
@@ -678,6 +739,7 @@ async def call_tool_node(state: AgentState) -> dict:
         "estimated_cost": format_cost(batch_bytes) if cost_cap_exceeded else state["estimated_cost"],
         "tool_calls": bq_result.records + other_result.records,
         "errors": bq_result.errors + other_result.errors,
+        "cancelled": cancelled,
         "answer_submitted": False,
         "chart_urls": chart_urls,
     }
@@ -740,11 +802,19 @@ async def verify_node(state: AgentState) -> dict:
 async def finalize_node(state: AgentState) -> dict:
     """Tallies tokens/sources, builds and writes the telemetry row. Each
     terminal state ships its own canned message if the turn has no real
-    answer_markdown yet; a cancelled turn keeps a real answer if it has one."""
-    if state["needs_approval"]:
+    answer_markdown yet; a cancelled turn keeps a real answer only if
+    verify_node already confirmed it this turn."""
+    cancelled = await is_cancelled(state["conversation_id"])
+    # A cancelled turn no longer needs approval -- cancelled overrides it everywhere.
+    needs_approval = False if cancelled else state["needs_approval"]
+    if cancelled:
+        # Only show a real answer if verify_node already confirmed it this turn --
+        # otherwise a cancel arriving right after submit_answer, before verify_node
+        # runs, would display an unverified answer_markdown. Checked before
+        # needs_approval -- a cancel request should win over a fresh pause.
+        answer_markdown = state["answer_markdown"] if state["verified"] else CANCELLED_MESSAGE
+    elif needs_approval:
         answer_markdown = PENDING_APPROVAL_MESSAGE
-    elif state["cancelled"]:
-        answer_markdown = state["answer_markdown"] or CANCELLED_MESSAGE
     elif not state["verified"]:
         answer_markdown = VERIFICATION_FAILURE_MESSAGE
     else:
@@ -772,9 +842,9 @@ async def finalize_node(state: AgentState) -> dict:
         verified=state["verified"],
         verification_retry_count=state["verification_retry_count"],
         length_retry_count=state["length_retry_count"],
-        needs_approval=state["needs_approval"],
+        needs_approval=needs_approval,
         cost_cap_exceeded=state["cost_cap_exceeded"],
-        cancelled=state["cancelled"],
+        cancelled=cancelled,
         iteration_cap_hit=state["iteration_cap_hit"],
         estimated_cost=state["estimated_cost"],
         pending_queries=state["pending_queries"],
@@ -792,30 +862,38 @@ async def finalize_node(state: AgentState) -> dict:
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "sources": sources,
+        "cancelled": cancelled,
+        "needs_approval": needs_approval,
     }
 
 
 # --- Routing functions -----------------------------------------------------
 
-def route_entry(state: AgentState) -> str:
+async def route_entry(state: AgentState) -> str:
     """A resumed, approved turn replays its dangling AIMessage.tool_calls
     straight into call_tool -- a fresh turn starts at agent as usual."""
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     return "call_tool" if state["approved_batch"] else "agent"
 
 
-def route_after_agent(state: AgentState) -> str:
+async def route_after_agent(state: AgentState) -> str:
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     return "call_tool" if state["messages"][-1].tool_calls else "check_length"
 
 
-def route_after_call_tool(state: AgentState) -> str:
-    if state["cancelled"] or state["needs_approval"]:
+async def route_after_call_tool(state: AgentState) -> str:
+    if state["needs_approval"] or await is_cancelled(state["conversation_id"]):
         return "finalize"
     if state["answer_submitted"]:
         return "check_length"
     return "agent"   # also cost_cap_exceeded and iteration_cap_hit
 
 
-def route_after_check_length(state: AgentState) -> str:
+async def route_after_check_length(state: AgentState) -> str:
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     answer = state["answer_markdown"]
     if check_answer_length(answer) and check_table_rows(answer):
         return "verify"
@@ -824,7 +902,9 @@ def route_after_check_length(state: AgentState) -> str:
     return "finalize"
 
 
-def route_after_verify(state: AgentState) -> str:
+async def route_after_verify(state: AgentState) -> str:
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     if state["verified"]:
         return "finalize"
     if state["verification_retry_count"] < MAX_VERIFY_RETRIES:
@@ -843,11 +923,11 @@ g.add_node("finalize",     finalize_node)
 
 #Start
 g.add_conditional_edges(START, route_entry,
-    ["call_tool", "agent"])
+    ["call_tool", "agent", "finalize"])
 
 #Tool Loop
 g.add_conditional_edges("agent", route_after_agent,
-    ["call_tool", "check_length"])
+    ["call_tool", "check_length", "finalize"])
 g.add_conditional_edges("call_tool", route_after_call_tool,
     ["finalize", "agent", "check_length"])
 

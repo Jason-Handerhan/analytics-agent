@@ -294,6 +294,10 @@ not duplicated here.
   not just the price.
 - Per-tool timeout (**40s**) with **explicit** `client.cancel_job(job.job_id)`
   — `asyncio` cancellation alone doesn't stop a running BigQuery job.
+  **A live, user-requested cancel uses the same `cancel_job()` call**, raced
+  against the query via a 1s-polling watcher task — real cancellation,
+  confirmed live, not best-effort; full design and the "not instant" caveat
+  in `.claude/rules/orchestrator.md`'s "Cancellation" section.
 - `bigquery.Client()` needs no explicit credentials; ADC resolves to `agent-sa`
   on Cloud Run and to your personal identity locally, with no code branching.
 - **No tool-layer table allow-list — the boundary is IAM.** `run_bigquery_sql`

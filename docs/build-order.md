@@ -38,27 +38,106 @@ approval card shows) rather than backend code -- the backend already degrades
 safely if that's ever bypassed, since a fresh turn never reads `pending_approval`
 and the next `consume_graph` run overwrites the stale doc regardless.
 
-**Real deviations from the originally-documented design, still to reconcile in
-the docs pass below:** resume replays the dangling `AIMessage.tool_calls`
+**Real deviations from the originally-documented design, reconciled in the
+docs pass below:** resume replays the dangling `AIMessage.tool_calls`
 through the ordinary `call_tool_node`, not a separate `execute_approved` node;
 `PendingApproval.pending_queries` turned out to be informational only for
 resume, not load-bearing; `last_activity_at`'s TTL field was fixed to write a
 real future expiry instead of `now()` (it was expiring sessions almost
 immediately); `get_db` was renamed to `get_firestore_client`.
 
-**Docs pass (step 14 of this item) not yet done** -- `.claude/rules/gateway.md`,
+**Docs pass (step 14 of this item) complete, 2026-10-08** -- `.claude/rules/gateway.md`,
 `.claude/rules/orchestrator.md`, `.claude/rules/telemetry.md`,
-`docs/approval-workflow.md`, `docs/frontend.md`, and `docs/testing.md` all need
-updating to match what's actually built.
+`docs/approval-workflow.md`, `docs/frontend.md`, and `docs/testing.md` all
+reconciled with what's actually built; validated with the
+`doc-consistency-check` skill.
 
-**Item 15 (cancellation) not started** — substantial remaining Phase 3 scope,
-despite every *tool* from the original lineup now being done. All of items
-1-6 promoted
-out of
-the notebooks into real code: `app/orchestrator/orchestrator.py` (state,
-nodes, routing, graph) and `app/orchestrator/tools.py`
-(`run_bigquery_sql`, `dry_run`, `submit_answer`) — verified live end to end
-against a real MCP server, real Claude calls, and a real telemetry write.
+**Item 15 (cancellation) — both layers complete, live-verified, and
+Layer 1 tested, 2026-10-09.** Layer 1:
+`get_firestore_client`/`live_turn_doc`/a new `is_cancelled` moved to
+`app/orchestrator/shared_helpers.py` -- the first time orchestrator-layer
+code reads Firestore directly, not just the gateway. All five routing
+functions (`route_entry`, `route_after_agent`, `route_after_call_tool`,
+`route_after_check_length`, `route_after_verify`) are `async def` now and
+check `is_cancelled` first, routing straight to `finalize` -- covers every
+edge in the graph, not just the slow nodes. `finalize_node` does its own
+live read (not `state["cancelled"]`, which nothing sets until Layer 2
+lands), checked *before* `needs_approval` so a cancel wins a same-tick race
+against a fresh pause, overrides `needs_approval` to `False` in both the
+telemetry row and its own state update, and only shows a real answer if
+`verify_node` already confirmed it -- closes a real gap where a cancel
+landing right after `submit_answer`, before verification ran, would have
+displayed an unverified answer. `consume_graph`'s `finally:` block got the
+matching reorder (`needs_approval and not cancelled`). `get_node_status`
+gained a `"Cancelled"` case plus a generic `"Hit an issue, retrying..."`
+status for an all-error `call_tool` batch (left partial-failure batches
+alone -- lower value, more fiddly). `POST /ask/cancel/{conversation_id}`
+built and live-verified, including mid-flight cancellation and cancelling a
+just-resumed approved turn specifically.
+
+**Two real bugs found and fixed via live testing, not design review:**
+(1) a cancel landing in `route_after_agent` right after `agent_node` added a
+new `tool_use`, with no `call_tool_node` round yet to resolve it, got
+persisted into `sessions.history_messages` -- corrupting the *next* turn's
+first `agent_node` call with Anthropic's "tool_use without tool_result" 400.
+Fixed by excluding `cancelled` turns from history writes, same as
+`needs_approval` already was. (2) resuming an approved turn used two
+non-merged `live_turns.set()` writes (one in `run_agent_turn`, one redundant
+in `consume_graph`'s own first line) that silently erased a
+`cancel_requested` flag written by a concurrent cancel request regardless of
+timing -- a cancel sent right after approving a paused turn was silently
+ignored, the whole graph ran anyway. Fixed with `merge=True` on both.
+Alongside that, the *persisted* pending-approval status text itself
+(`"Needs your approval"`) became the generic `"Approval workflow"`, since
+the race between a status poll and the resume's own status-overwrite has a
+floor set by network latency no backend reordering can close to zero --
+better to make the stale value harmless than keep chasing the window.
+
+Layer 1 tested across `tests/test_orchestrator.py` and `tests/test_gateway.py`
+(60 passing); live-verified end to end in `notebooks/phase3_graph.ipynb` and
+`notebooks/phase3_gateway_e2e.ipynb`, including both bug scenarios above.
+
+**Layer 2 (the BigQuery cancellation race) complete, live-verified, and
+Layer 1 tested, 2026-10-09.** `run_bigquery_sql` (`app/orchestrator/tools.py`)
+races the real query (`_wait_for_query_result`, wrapped in `asyncio.to_thread`
+-- `job.result_async()` doesn't exist, confirmed directly against the
+installed class) against a 1s-polling `watch_for_cancel` watcher; losing
+raises a plain `ToolError` (no `TurnCancelledError`/`ToolTimeoutError` --
+both considered, dropped once Level 1's per-routing-function `is_cancelled`
+check made the exception's *type* unnecessary for the "stop the whole turn"
+guarantee) and calls `cancel_job()`. A separate `except asyncio.CancelledError`
+handler covers the gateway-timeout case. `conversation_id` reaches the tool
+via `Annotated[str, InjectedToolArg]`, injected manually in
+`call_tool_node`'s BQ dispatch -- confirmed live that `Field(exclude=True)`
+does *not* hide an arg from the model-facing schema (only `InjectedToolArg`
+does); this also caught a real porting gap, where that same injection (and
+`call_tool_node` setting `state["cancelled"]` informationally) had only
+ever been applied to the notebook, not `orchestrator.py` itself, surfaced
+by the Layer 1 propagation test below. Live testing against a deliberately
+slow, free `GENERATE_ARRAY`/`CROSS JOIN` query found a real BigQuery
+characteristic worth keeping straight: cancellation is genuinely honored
+(confirmed via the job's own `error_result`), but not instant, and a query
+with no shuffle/sort stage can run to full completion regardless of
+`cancel_job()` succeeding -- details in `.claude/rules/orchestrator.md`'s
+"Cancellation" section. Layer 1 tested (`tests/test_tools.py`, 3 new
+cases against `FakeBQClient`/`FakeJob`, no live credentials), including one
+that drives the *real* compiled `graph` under a short `asyncio.wait_for` to
+settle, for good, whether LangGraph's own `astream`/dispatch internals
+propagate cancellation correctly (previously an open item in CLAUDE.md's
+"Known-unverified" list, now removed from it).
+
+**Docs pass for item 15 complete, 2026-10-09** -- `.claude/rules/gateway.md`,
+`.claude/rules/orchestrator.md`, `docs/testing.md`, and `.claude/rules/tools.md`
+all reconciled with what's actually built; validated with the
+`doc-consistency-check` skill. `docs/frontend.md`'s one targeted note (the
+`null`-status handling rule) from the Layer 1 pass still stands; no further
+frontend changes from Layer 2.
+
+All of items 1-6 promoted out of the notebooks into real code:
+`app/orchestrator/orchestrator.py` (state, nodes, routing, graph) and
+`app/orchestrator/tools.py` (`run_bigquery_sql`, `dry_run`, `submit_answer`)
+— verified live end to end against a real MCP server, real Claude calls, and
+a real telemetry write.
 
 **Clarifying question (folded into `submit_answer`), 2026-10-05** -- `submit_answer`
 takes exactly one of `answer_markdown` or `clarifying_question`. A question turn
@@ -129,7 +208,9 @@ table answer. Real deviations from the doc's original sketch:
   `dataset_id`, `row_cap`, `timeout_seconds`) are genuine per-call tool
   arguments, hidden from the model via `exclude_args`, not baked into the
   tool's own code.** `call_tool_node`'s `inject_dax_args` supplies them from
-  `app.config`/`power_bi_auth.get_power_bi_token()` right before dispatch.
+  `app.config`/`orchestrator.get_power_bi_token()` right before dispatch
+  (moved from its own `power_bi_auth.py` into `orchestrator.py` directly,
+  2026-10-09 -- it had exactly one consumer, same as `get_github_token`).
   `app/mcp_server/dax_tool.py` itself has zero project-specific imports —
   a different deployment could reuse it unmodified under its own credentials.
   Deliberately *not* wired for real per-end-user identity (OAuth
@@ -1214,20 +1295,37 @@ layer failed.
    verified directly via the real `/ask` route in the meantime, same
    pattern as Phase 0's `executeQueries` smoke test.
 15. **User cancellation** — `POST /ask/cancel/{conversation_id}` writing the
-   `cancel_requested` flag, and the node-level checks that route to
-   `finalize`. The per-tool cancellation mechanism already shipped with
-   `run_bigquery_sql` in #5; this is the turn-level path on top of it. The
-   Power Apps button lands in Phase 4.
+   `cancel_requested` flag, read by `is_cancelled` (`app/orchestrator/shared_helpers.py`).
+   **Both layers built and live-verified, 2026-10-09** (see the status block
+   above for the full account, including the real bugs found live, the
+   `InjectedToolArg` mechanism, and the "cancellation is real but not
+   instant" finding) — **deviates from the plan as originally written
+   here**: the per-tool mechanism did *not* already ship with
+   `run_bigquery_sql` in #5 as this entry used to claim; only a
+   timeout-triggered `cancel_job()` existed before this item. No
+   `TurnCancelledError` either — plain `ToolError` covers both the
+   mid-query race and the timeout path, once Level 1's per-routing-function
+   `is_cancelled` check made a distinct exception type unnecessary. The
+   checks that route to `finalize` turned out to live in the five routing
+   functions themselves (`route_entry`, `route_after_agent`,
+   `route_after_call_tool`, `route_after_check_length`, `route_after_verify`),
+   not a separate node-level gate. The Power Apps button lands in Phase 4.
 
-   **When this lands, also make `run_agent_turn`'s own turn-timeout path
-   (`app/gateway/gateway.py`) reuse it.** Today, `asyncio.wait_for`'s timeout
-   only cancels the `asyncio` task locally, which does *not* stop a BigQuery
-   query running inside `run_bigquery_sql`'s `asyncio.to_thread()` call --
-   `asyncio` cancellation can't reach a thread. On timeout, write
-   `cancel_requested: true` to `live_turns/{conversation_id}` (the same flag
-   `POST /ask/cancel` writes) before returning the fallback response, so the
-   real per-tool `cancel_job()` mechanism from #5 actually fires instead of
-   leaving an orphaned query running server-side with nothing watching it.
+   **The turn-timeout reuse note below this entry turned out to be the
+   wrong fix, confirmed before being built, not just a later step.**
+   `run_agent_turn`'s `except asyncio.TimeoutError:` fires *after*
+   `asyncio.wait_for` has already cancelled the whole task tree -- by the
+   time it would write `cancel_requested: true`, nothing is left running to
+   read it; the stale `# TODO(item 15)` comment proposing it was deleted,
+   not implemented. The real fix lives inside `run_bigquery_sql` itself: an
+   `except asyncio.CancelledError: cancel_job(); raise` alongside its
+   existing `except TimeoutError:` handler, reacting to the cancellation
+   the moment it arrives rather than relying on a Firestore flag at all --
+   built, and the propagation all the way from the gateway's own
+   `asyncio.wait_for` through LangGraph's real `astream`/dispatch internals
+   is now a permanent regression test
+   (`test_gateway_timeout_cancellation_reaches_bigquery_job`,
+   `tests/test_tools.py`), not just a live spot-check.
 
 ## Phase 4 — Multimodal grounding & response formatting
 

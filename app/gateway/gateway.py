@@ -28,7 +28,7 @@ from app.gateway.entry_exit import (
     build_updated_history,
     rebuild_paused_messages,
 )
-from app.gateway.models import AgentResponse, AskRequest, ConversationResponse, StatusResponse
+from app.gateway.models import AgentResponse, AskRequest, CancelResponse, ConversationResponse, StatusResponse
 from app.orchestrator.orchestrator import graph, init_orchestrator
 from app.orchestrator.shared_helpers import get_firestore_client, live_turn_doc
 from app.orchestrator.state import AgentState
@@ -171,13 +171,19 @@ def get_node_status(node: str, update: dict) -> str | None:
     """Status text for a finished node, or None if it has none."""
     if node == "call_tool":
         # Batch status from the tools it dispatched, ignoring submit_answer.
-        names = [m.name for m in update.get("messages", []) if m.name != "submit_answer"]
-        return call_tool_status(names)
+        msgs = [m for m in update.get("messages", []) if m.name != "submit_answer"]
+        if msgs and all(m.status == "error" for m in msgs):
+            return "Hit an issue, retrying..."
+        return call_tool_status([m.name for m in msgs])
     if node == "verify":
         # A rejected answer writes nothing, so the agent's thought line stays up.
         return STATUS_BY_NODE["verify"] if update.get("verified") else None
     if node == "finalize":
-        return "Needs your approval" if update.get("needs_approval") else STATUS_BY_NODE["finalize"]
+        if update.get("needs_approval"):
+            return "Needs your approval"
+        if update.get("cancelled"):
+            return "Cancelled"
+        return STATUS_BY_NODE["finalize"]
     return STATUS_BY_NODE.get(node)
 
 
@@ -207,7 +213,7 @@ async def read_live_status(conversation_id: str) -> StatusResponse:
 async def consume_graph(initial_state: AgentState) -> AgentState:
     """Streams the graph, writing status and thinking to live_turns as each node finishes."""
     live_turns_doc = live_turn_doc(initial_state["conversation_id"])
-    await live_turns_doc.set({"status": "Thinking...", "thinking_log": []})
+    await live_turns_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
     final_state = None
     seq = 0
     last_mark = time.monotonic()
@@ -232,9 +238,12 @@ async def consume_graph(initial_state: AgentState) -> AgentState:
             last_mark = now
     finally:
         # Replace live turns doc with pending approval if needs approval,
-        # otherwise delete the live turns doc.
-        if final_state is not None and final_state["needs_approval"]:
-            await live_turns_doc.set({"pending_approval": build_pending_approval(final_state)})
+        # otherwise delete the live turns doc. Cancelled wins over needs_approval.
+        if final_state is not None and final_state["needs_approval"] and not final_state["cancelled"]:
+            await live_turns_doc.set({
+                "status": "Approval workflow",
+                "pending_approval": build_pending_approval(final_state),
+            })
         else:
             await live_turns_doc.delete()
     return final_state
@@ -285,10 +294,9 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
     """Runs one turn through the graph; falls back to a plain AgentResponse
     on timeout or error."""
     await init_orchestrator()
-    history_messages = await fetch_history_messages(body.conversation_id)
 
-    # Approval Workflow: resume (approved or rejected) shares the same
-    # pending-approval read -- then clear it before acting on the decision.
+    # Handle Live Turns doc first if this is an approval resume to ensure
+    # immediate rejection or immediate status update to thinking.
     if body.approval_decision is not None:
         live_doc = live_turn_doc(body.conversation_id)
         snap = await live_doc.get()
@@ -297,14 +305,20 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             # Rare enough (the frontend disables double-submits) not to need
             # its own message -- same fallback as any other unexpected failure.
             return AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE, sources=[])
-        await live_doc.delete()
 
         # Approval Workflow: Rejected Branch -- no graph run, minimal telemetry row.
         if body.approval_decision == "rejected":
+            await live_doc.delete()
             await write_rejected_telemetry(body.conversation_id, user_id, pending)
             return AgentResponse(answer_markdown=REJECTED_MESSAGE, sources=[])
 
-        # Approval Workflow: Approved Branch
+        # Approval Workflow: set status to thinking (mitigate "Needs your approval" status display)
+        await live_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
+
+    history_messages = await fetch_history_messages(body.conversation_id)
+
+    # Build initial state for approved resume
+    if body.approval_decision == "approved":
         initial_state = build_initial_state(
             question=pending["question"],
             conversation_id=body.conversation_id,
@@ -322,7 +336,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
         initial_state["approved_batch"] = True
         initial_state["approval_decision"] = "approved"
 
-    #Standard Branch: No Approval Decision
+    #Build initial state for a normal turn (not an approval resume)
     else:
         initial_state = build_initial_state(
             question=body.question,
@@ -338,9 +352,6 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
     try:
         final_state = await asyncio.wait_for(consume_graph(initial_state), timeout=GATEWAY_TURN_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        # TODO(item 15): also write cancel_requested to live_turns here, so a
-        # BigQuery call in flight gets the real cancel_job() treatment instead
-        # of just being abandoned (docs/build-order.md).
         logger.warning("Turn %s timed out after %ss", body.conversation_id, GATEWAY_TURN_TIMEOUT_SECONDS)
         return AgentResponse(
             answer_markdown="This question took too long to answer. Try narrowing it and asking again.",
@@ -350,7 +361,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
         logger.exception("Turn %s failed unexpectedly", body.conversation_id)
         return AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE, sources=[])
 
-    if not final_state["needs_approval"]:
+    if not final_state["needs_approval"] and not final_state["cancelled"]:
         await write_history_messages(
             body.conversation_id, build_updated_history(history_messages, final_state)
         )
@@ -389,3 +400,16 @@ async def get_ask_status(
     claims = await asyncio.to_thread(validate_entra_token, authorization)
     await assert_owns_conversation(conversation_id, claims)
     return await read_live_status(conversation_id)
+
+
+@app.post("/ask/cancel/{conversation_id}", response_model=CancelResponse)
+async def post_ask_cancel(
+    conversation_id: str, authorization: str = Header(...), x_api_key: str = Header(...)
+):
+    """Flags a turn in progress for cancellation -- writes the flag, doesn't
+    kill anything directly. The graph checks it cooperatively."""
+    validate_api_key(x_api_key)
+    claims = await asyncio.to_thread(validate_entra_token, authorization)
+    await assert_owns_conversation(conversation_id, claims)
+    await live_turn_doc(conversation_id).set({"cancel_requested": True}, merge=True)
+    return CancelResponse(cancel_requested=True)

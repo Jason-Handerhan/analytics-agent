@@ -212,6 +212,19 @@ to the server; it isn't the history, and the server already has its own.
   deleted within a fraction of a second, so a 1-second poll often misses them. Treat
   the final status as best-effort; the answer itself is always in the `PostAsk` response.
 
+  **A `null` status means "nothing new to show," not "something broke" --
+  never render it literally.** Keep displaying the last real value instead.
+  A paused turn no longer produces a `null`: the same write that replaces
+  `live_turns` with the pending approval also carries its own `status: "Needs
+  your approval"` (no duration -- the wait has no fixed length, unlike the
+  per-step writes above), so a poll anywhere during the approval wait always
+  gets a real string (`.claude/rules/gateway.md`). The one remaining gap is at
+  turn end: a normal or cancelled completion deletes the `live_turns` doc
+  outright, and a poll landing in the instant between that delete and the
+  blocking `PostAsk` call itself resolving reads a missing document --
+  structurally unavoidable, not a bug to chase. The answer is already on its
+  way in that case regardless.
+
 - **User-cancel button (Phase 4 — the endpoint lands in Phase 3):** a `Cancel` button shown alongside the thinking icon, `Visible` exactly while a response is in flight. `OnSelect` fires `POST /ask/cancel/{conversation_id}`
   (`.claude/rules/gateway.md`) — fire-and-forget; the original blocked call resolves on its own shortly after. Complements, doesn't replace, the automatic gateway timeout — gives the user control without changing the underlying guardrail.
 

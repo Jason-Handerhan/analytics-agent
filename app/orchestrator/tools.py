@@ -1,16 +1,17 @@
 """Non-MCP tools: run_bigquery_sql, submit_answer, get_measure_dax, get_page_info, search_docs (.claude/rules/tools.md)."""
 import asyncio
 import concurrent.futures
+import logging
 from datetime import date, time
 from decimal import Decimal
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 import google.auth
 import google.auth.impersonated_credentials
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
-from langchain_core.tools import tool, ToolException
+from langchain_core.tools import tool, InjectedToolArg, ToolException
 import mistune
 from pydantic import BaseModel, Field, create_model, field_validator, model_validator
 
@@ -31,6 +32,9 @@ from app.config import (
 )
 from app.mcp_server.chart_tool import GenerateChartArgs
 from app.model_schema import MEASURE_DAX, MEASURE_NAMES
+from app.orchestrator.shared_helpers import is_cancelled
+
+logger = logging.getLogger(__name__)
 
 
 # --- ToolError (shared -- raised here, also used by orchestrator.py's chart dispatch) ---
@@ -52,58 +56,99 @@ class BigQuerySqlArgs(BaseModel):
                                     "LIMIT, which doesn't reduce bytes scanned.")
 
 
+def _wait_for_query_result(job: bigquery.QueryJob) -> tuple[list[dict], dict]:
+    """Blocks on the query job's completion, enforcing the timeout and row
+    cap and converting result rows to JSON-safe types. Synchronous --
+    callers run this in a thread."""
+    try:
+        rows = job.result(timeout=BIGQUERY_TIMEOUT_SECONDS, max_results=BIGQUERY_ROW_CAP)
+    except concurrent.futures.TimeoutError:
+        get_bq_client().cancel_job(job.job_id)
+        raise ToolError(
+            f"Query exceeded the {BIGQUERY_TIMEOUT_SECONDS}s timeout and was "
+            "cancelled. Narrow the query (add a filter or aggregate) and try again.")
+    except GoogleAPICallError as e:
+        #Exceeds maximum_bytes_billed limit
+        if any(err.get("reason") == "bytesBilledLimitExceeded" for err in e.errors):
+            raise ToolError(
+                f"Query would scan more than the {MAX_BYTES_BILLED / 1024**3:.0f} GiB "
+                "safety limit. Add a filter, select fewer columns, or aggregate to "
+                "reduce the data scanned.")
+        # Any other BigQuery-side failure (bad SQL, etc.)
+        raise ToolError(f"BigQuery error: {e}")
+
+    #Row Cap Gaurdrail
+    if rows.total_rows > BIGQUERY_ROW_CAP:
+        raise ToolError(
+            f"Query returned {BIGQUERY_ROW_CAP}+ rows. Add a filter or "
+            "aggregate to narrow it.")
+
+    #Future insurance gaurd if date, time, or Decimal types are returned in the rows
+    def _convert(v):
+        if isinstance(v, Decimal):
+            return float(v)
+        if isinstance(v, (date, time)):
+            return v.isoformat()
+        return v
+
+    result_rows = [
+        {k: _convert(v) for k, v in dict(row).items()}
+        for row in rows
+    ]
+    return result_rows, {"bytes_billed": job.total_bytes_billed}
+
+
+async def watch_for_cancel(conversation_id: str) -> None:
+    """Polls is_cancelled once a second until a user-requested cancel lands."""
+    while not await is_cancelled(conversation_id):
+        await asyncio.sleep(1)
+
+
+def _cancel_job_quietly(job_id: str) -> None:
+    """Cancels a BigQuery job, logging instead of raising on failure."""
+    try:
+        get_bq_client().cancel_job(job_id)
+    except Exception as e:
+        logger.warning("cancel_job failed for %s: %s", job_id, e)
+
+
 @tool(args_schema=BigQuerySqlArgs, response_format="content_and_artifact")
-async def run_bigquery_sql(query: str) -> tuple[list[dict], dict]:
+async def run_bigquery_sql(query: str, conversation_id: Annotated[str, InjectedToolArg]) -> tuple[list[dict], dict]:
     """Runs a SQL query against agent_safe (BigQuery) -- upstream/warehouse data:
     raw order and product features, pre-model. The only dataset this can reach
     (IAM-scoped).
-    
+
     Guardrails: results cap at 1,000 rows -- filter or aggregate rather than
     relying on LIMIT, which reduces rows returned but not bytes scanned;
     queries scanning over 1 GiB fail; 40s timeout.
     """
+    job_config = bigquery.QueryJobConfig(maximum_bytes_billed=MAX_BYTES_BILLED)
+    # client.query() just submits the job -- a network call, but not the slow part.
+    job = await asyncio.to_thread(get_bq_client().query, query, job_config=job_config)
 
-    # bigquery.Client.query() is synchronous, run it in a thread to avoid blocking the event loop.
-    def _run() -> tuple[list[dict], dict]:
-        job_config = bigquery.QueryJobConfig(maximum_bytes_billed=MAX_BYTES_BILLED)
-        job = get_bq_client().query(query, job_config=job_config)
-        try:
-            rows = job.result(timeout=BIGQUERY_TIMEOUT_SECONDS, max_results=BIGQUERY_ROW_CAP)
-        except concurrent.futures.TimeoutError:
-            get_bq_client().cancel_job(job.job_id)
-            raise ToolError(
-                f"Query exceeded the {BIGQUERY_TIMEOUT_SECONDS}s timeout and was "
-                "cancelled. Narrow the query (add a filter or aggregate) and try again.")
-        except GoogleAPICallError as e:
-            #Exceeds maximum_bytes_billed limit
-            if any(err.get("reason") == "bytesBilledLimitExceeded" for err in e.errors):
-                raise ToolError(
-                    f"Query would scan more than the {MAX_BYTES_BILLED / 1024**3:.0f} GiB "
-                    "safety limit. Add a filter, select fewer columns, or aggregate to "
-                    "reduce the data scanned.")
-            # Any other BigQuery-side failure (bad SQL, etc.)
-            raise ToolError(f"BigQuery error: {e}")
+    #Schedule Query and Cancel tasks concurrentl
+    query_task = asyncio.create_task(asyncio.to_thread(_wait_for_query_result, job))
+    cancel_task = asyncio.create_task(watch_for_cancel(conversation_id))
 
-        #Row Cap Gaurdrail
-        if rows.total_rows > BIGQUERY_ROW_CAP:
-            raise ToolError(
-                f"Query returned {BIGQUERY_ROW_CAP}+ rows. Add a filter or "
-                "aggregate to narrow it.")
+    #Race the two tasks and except gateway timeout to cancel both tasks and the job
+    try:
+        first_completed, _ = await asyncio.wait({query_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        # The gateway's own turn timeout, not the watcher -- clean up the same way either way.
+        query_task.cancel()
+        cancel_task.cancel()
+        _cancel_job_quietly(job.job_id)
+        raise
 
-        #Future insurance gaurd if date, time, or Decimal types are returned in the rows
-        def _convert(v):
-            if isinstance(v, Decimal):
-                return float(v)
-            if isinstance(v, (date, time)):
-                return v.isoformat()
-            return v
+    #If cancel_task won the race, the turn is cancelled by the user -- cancel the query & raise ToolError
+    if cancel_task in first_completed:
+        query_task.cancel()
+        _cancel_job_quietly(job.job_id)
+        raise ToolError("Cancelled by user request.")
 
-        result_rows = [
-            {k: _convert(v) for k, v in dict(row).items()}
-            for row in rows
-        ]
-        return result_rows, {"bytes_billed": job.total_bytes_billed}
-    return await asyncio.to_thread(_run)
+    #If query_task won the race, cancel the watcher(cancel_task) and return the result
+    cancel_task.cancel()
+    return await query_task
 
 #Ensures that ToolError exceptions raised in run_bigquery_sql() are converted to a ToolMessage.
 run_bigquery_sql.handle_tool_error = True

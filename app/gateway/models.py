@@ -30,6 +30,11 @@ class StatusResponse(BaseModel):
     thinking_log: list[dict]
 
 
+class CancelResponse(BaseModel):
+    """Confirms the flag was written -- not that the turn has actually stopped."""
+    cancel_requested: bool
+
+
 class AgentResponse(BaseModel):
     """The wire format the gateway returns."""
     answer_markdown: str

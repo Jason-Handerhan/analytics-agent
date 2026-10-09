@@ -81,8 +81,9 @@ class ToolCallRecord(TypedDict):
                             # without parsing JSON out of args.
     result: Any  # shape depends on the tool
     success: bool
-    error: str | None    # WHICH failure — agent retry behavior distinguishes
-                         # ToolError from ToolTimeoutError; `success` alone loses that
+    error: str | None    # WHICH failure — the message text (always ToolError,
+                         # no separate subclasses) is what agent retry behavior
+                         # actually reads; `success` alone loses that
     ref_id: str | None    # set only for a successful run_bigquery_sql/run_dax_query/
                           # combine_results call -- "ref_1", "ref_2", ... -- what
                           # generate_chart's source_ref and combine_results'
@@ -192,8 +193,13 @@ class AgentState(TypedDict):
     # one failure and hit another; the first is often more diagnostic.
     errors: Annotated[list[TurnError], append_list]
 
-    # Written mid-run by a node that finds the Firestore cancel flag set —
-    # never at invocation, where it would always be False. See "Cancellation".
+    # Set False at invocation (build_initial_state) -- a turn can't start
+    # already cancelled. finalize_node overwrites it with its own live
+    # Firestore read; call_tool_node also writes its own live read on every
+    # round, purely informational (nothing routes on either write -- routing
+    # functions check the flag directly via their own live is_cancelled call,
+    # never state["cancelled"], since a routing function can't write state).
+    # See "Cancellation".
     cancelled: bool
 
     # Guardrail outcomes
@@ -714,11 +720,33 @@ that specific shape unsampleable instead.
 
 ## Shared exceptions
 
-`ToolError` and `ToolTimeoutError` are referenced throughout these docs but
-aren't defined anywhere yet. Define them once in a shared module (e.g.
-`app/exceptions.py`) rather than per-tool — the agent's retry behavior depends
-on distinguishing "recoverable, fix your input" from "timed out, try
-narrowing." Confirm the module location before creating it.
+**`ToolError` is built — `app/orchestrator/tools.py`, not a separate
+`app/exceptions.py`.** It subclasses `langchain_core.tools.ToolException`,
+so `handle_tool_error=True` converts it to a `ToolMessage` automatically
+inside a tool's own `.ainvoke()` — but `call_tool_node` also catches it
+explicitly in a couple of places (`resolve_chart_data`/`resolve_combine_data`,
+which run as plain Python *before* any tool's `.ainvoke()`, so nothing
+converts it for them automatically). Naming it `ToolError` rather than
+raising bare `ToolException` is what makes those explicit catches scoped to
+errors this project deliberately raises as recoverable, not any stray
+`ToolException` something else might raise for an unrelated reason.
+
+**Neither `ToolTimeoutError` nor `TurnCancelledError` exist — both were
+considered, neither was built.** The timeout path (`run_bigquery_sql`'s
+`job.result(timeout=...)` + `cancel_job()`) and the Level 2 cancellation
+race (below) both just raise a plain `ToolError`. A distinct, non-
+`ToolException` exception type for cancellation was the original plan, from
+before Level 1's per-routing-function `is_cancelled` check existed — in that
+earlier design, the *only* way the graph would learn about a cancellation
+was whatever `run_bigquery_sql` itself raised, so the exception's type had
+to carry the signal. That stopped being true once every routing function
+got its own independent live Firestore read: the "stop the whole turn"
+guarantee never depends on which exception type `run_bigquery_sql` raises,
+only on the flag `is_cancelled` reads. Reusing `ToolError` also means
+`call_tool_node` needs no special `except` clause around the BQ dispatch
+`gather()` — `handle_tool_error=True` already turns a cancelled call's
+`ToolError` into its own per-call `ToolMessage`, same as any other BQ
+error, for free.
 
 ## `sources` — ordered provenance badges, built in `finalize`
 
@@ -1031,95 +1059,162 @@ concurrent request — Firestore is the mailbox between it and the running
 turn, and it has to be Firestore rather than memory because the two requests
 may land on different Cloud Run instances.
 
-**Level 1 — a gate at the top of each node.** Stops the graph advancing into
-further work. **Set state and let the conditional edge route — don't raise,
-and don't return `Command`.** Raising unwinds the graph, forcing the
-gateway's handler to reconstruct whatever `tool_calls`, tokens, and
-`bytes_consumed` were accumulated; a plain state update keeps it intact so
-telemetry writes the real picture.
-
-**Do not add `Command(goto=...)` to a node that already has a conditional
-edge.** LangChain's docs are explicit — use dynamic routing *or* static
-edges per node, never both — and when both exist, *both* destinations
-execute. The conditional edge below already tests `cancelled`, so the node
-only needs to set it.
+**Level 1 — built, 2026-10-09: a check in every routing function, not a gate
+inside the nodes.** The originally-sketched design here had nodes set
+`state["cancelled"]` and a conditional edge read it. That's not what shipped
+— a routing function can't update state at all (LangGraph conditional edges
+return only a destination string), so there's no way for one node's check to
+hand the *next* routing decision anything. What actually works: every one of
+the five routing functions (`route_entry`, `route_after_agent`,
+`route_after_call_tool`, `route_after_check_length`, `route_after_verify`) is
+`async def` and independently calls `is_cancelled` first, returning
+`"finalize"` directly if it's set — covering every edge in the graph, not
+just the ones leading into slow nodes. `is_cancelled` itself lives in
+`app/orchestrator/shared_helpers.py`, not here — the first thing in this
+whole codebase where orchestrator-layer code reads Firestore directly rather
+than the gateway:
 
 ```python
-async def call_tool_node(state: AgentState) -> dict:
-    if await is_cancelled(state["conversation_id"]):
-        return {"cancelled": True}      # the conditional edge routes to finalize
-    ...
-
 async def is_cancelled(conversation_id: str) -> bool:
-    doc = await firestore_client.collection("live_turns").document(conversation_id).get()
-    return doc.exists and doc.to_dict().get("cancel_requested", False)
+    snap = await live_turn_doc(conversation_id).get()
+    return bool(snap.exists and snap.to_dict().get("cancel_requested", False))
+
+async def route_after_call_tool(state: AgentState) -> str:
+    if state["needs_approval"] or await is_cancelled(state["conversation_id"]):
+        return "finalize"
+    if state["answer_submitted"]:
+        return "check_length"
+    return "agent"   # also cost_cap_exceeded and iteration_cap_hit
 ```
 
-**Level 2 — inside `run_bigquery_sql`.** Node-level checks can't help once
-execution is already *inside* a node awaiting a query. Only this level can
-kill a live BigQuery job, and the `cancel_job()` machinery already exists for
-timeouts — this widens what triggers it.
+Since routing functions can't write `state["cancelled"]`, `finalize_node`
+does its own, separate `is_cancelled` read to decide the canned message and
+populate the telemetry row — same flag, read once more at the one place
+that actually needs to act on it, regardless of which routing function sent
+it there. It also overrides `needs_approval` to `False` whenever cancelled —
+a cancelled turn no longer needs approval for anything, and leaving the old
+value in place would write a self-contradicting telemetry row.
+
+**`Command(goto=...)` still doesn't belong on a node that already has a
+conditional edge**, for whenever Level 2 (below) does add a node-level
+check inside `call_tool_node`. LangChain's docs are explicit — dynamic
+routing *or* static edges per node, never both; when both exist, *both*
+destinations execute.
+
+**Level 2 — built and live-verified, 2026-10-09: inside `run_bigquery_sql`
+itself.** Node-level routing checks can't help once execution is already
+*inside* a node awaiting a query — they only run between nodes. Only this
+level can kill a live BigQuery job, and the `cancel_job()` machinery already
+existed for timeouts; this widens what triggers it rather than building it
+from scratch.
 
 ```python
-# A plain LangChain @tool, not MCP-registered (`.claude/rules/tools.md`) —
-# dispatch is in `docs/approval-workflow.md`.
-@tool
-async def run_bigquery_sql(query: str, conversation_id: str):
+# A plain LangChain @tool, not MCP-registered (`.claude/rules/tools.md`).
+# conversation_id is Annotated[str, InjectedToolArg] -- confirmed live that
+# Field(exclude=True) does NOT hide an arg from the model-facing schema (it
+# only controls .model_dump() serialization); InjectedToolArg does, and the
+# value still reaches the function when injected manually at the call site
+# (call_tool_node's full_bq_calls list), same shape as the MCP tools'
+# exclude_args + injection-function pattern.
+@tool(args_schema=BigQuerySqlArgs, response_format="content_and_artifact")
+async def run_bigquery_sql(query: str, conversation_id: Annotated[str, InjectedToolArg]) -> tuple[list[dict], dict]:
     # maximum_bytes_billed is the hard fail-safe: BigQuery kills the job
     # server-side if it exceeds this, independent of anything below.
-    job = client.query(query, job_config=QueryJobConfig(
-        maximum_bytes_billed=ABSOLUTE_CAP))
-    query_task  = asyncio.create_task(job.result_async())
+    job_config = bigquery.QueryJobConfig(maximum_bytes_billed=MAX_BYTES_BILLED)
+    job = await asyncio.to_thread(get_bq_client().query, query, job_config=job_config)
+
+    query_task = asyncio.create_task(asyncio.to_thread(_wait_for_query_result, job))
     cancel_task = asyncio.create_task(watch_for_cancel(conversation_id))
-
-    done, pending = await asyncio.wait(
-        {query_task, cancel_task}, timeout=40,
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for task in pending:
-        task.cancel()
-
-    # Success wins even if a cancel landed on the same tick — the job already
-    # completed and was already paid for; discarding a ready result to report
-    # "cancelled" is the wrong outcome.
-    if query_task in done:
-        return query_task.result()
-
-    # asyncio cancellation alone won't stop the job — but this call can itself
-    # fail (transient API error). Swallow and log: an unhandled exception here
-    # would mask the real ToolTimeoutError AND leave the job running. Worst
-    # case the scan completes unread, bounded by maximum_bytes_billed.
     try:
-        client.cancel_job(job.job_id)
-    except Exception as e:
-        logger.warning("cancel_job failed for %s: %s", job.job_id, e)
+        first_completed, _ = await asyncio.wait({query_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        query_task.cancel()
+        cancel_task.cancel()
+        _cancel_job_quietly(job.job_id)
+        raise
 
-    raise TurnCancelledError() if cancel_task in done else ToolTimeoutError(
-        "Query exceeded 40s. If the question genuinely needs this much data, "
-        "narrow the date range or aggregate further; otherwise check for a "
-        "missing filter or join condition.")
+    if cancel_task in first_completed:
+        query_task.cancel()
+        _cancel_job_quietly(job.job_id)
+        raise ToolError("Cancelled by user request.")
+
+    cancel_task.cancel()
+    return await query_task
 ```
 
-**Race, don't poll inside the await.** Polling Firestore every second *inside*
-the query's own await path would tax every successful query on the hot path
-to catch a cancel that rarely comes. `watch_for_cancel` still polls
-internally (Firestore listeners are the alternative, with their own
-complexity), but a 2–3s interval is plenty for a human clicking a button, and
-it's cancelled the instant the query wins.
+**No `job.result_async()` — it doesn't exist.** Confirmed directly against
+the installed `QueryJob` class before writing this (an earlier version of
+this section assumed it did): only a sync `result()`. The real race wraps
+that sync call in `asyncio.to_thread` (`_wait_for_query_result`, a plain
+function taking `job` as a real parameter rather than closing over it, so
+it reads as its own step in the race) — the same mechanism the existing
+timeout path already used, nothing native-async to reach for here.
+
+**Poll `is_cancelled` once a second, in its own watcher task — not inside
+the query's own await path.** Checking Firestore on every tick of the
+query's own wait would tax every successful query on the hot path to catch
+a cancel that rarely comes. `watch_for_cancel` is its own small coroutine
+(`while not await is_cancelled(conversation_id): await asyncio.sleep(1)`),
+racing the real query via `asyncio.wait`; it's cancelled the instant the
+query wins. 1s, not 2-3s — matches the frontend's own status-poll cadence
+rather than lagging behind it; the cost is a cheap Firestore read, bounded
+by however long the query itself runs.
 
 **`run_dax_query` is best-effort only** — the Power BI REST path has no
 server-side cancellation, so closing the connection is the only lever and the
 query may keep running regardless (XMLA, the documented backup, would
-support real cancellation — component reference §8). Real for BigQuery, best-effort for
-DAX; document it, don't skip it.
+support real cancellation — component reference §8). `run_bigquery_sql`'s
+cancellation is real, confirmed live — a materially stronger claim than
+DAX's best-effort one, worth stating precisely rather than leaving both
+implied as equivalent.
 
-**`TurnCancelledError` lives in `app/exceptions.py`** beside `ToolError` and
-`ToolTimeoutError`. A cancelled turn still writes telemetry — `cancelled:
-True` plus whatever `tool_calls` completed (`.claude/rules/telemetry.md`).
+**Cancellation is genuinely honored, but not instant — confirmed live, not
+assumed.** A deliberately slow, free-to-run test query (`GENERATE_ARRAY` +
+`CROSS JOIN` over literal arrays, no real table scanned, so `bytes_billed`
+stays 0) surfaced a real BigQuery characteristic worth keeping straight: a
+query with no shuffle/sort/aggregation stage can run to full completion
+*regardless* of `cancel_job()` succeeding — BigQuery checks for a
+cancellation between execution stages, and a single pipelined compute stage
+has none. Adding a `GROUP BY`/`ORDER BY` (forcing real stage boundaries)
+confirmed `cancel_job()` does genuinely stop a job — `error_result` showed
+`{"reason": "stopped", "message": "Job execution was cancelled: User
+requested cancellation"}` directly from BigQuery's own job metadata — but
+the job still took ~21s to actually reach `DONE`, even though the cancel
+request landed only a few seconds after the query started. The turn's
+response to the user is still immediate (this code never waits for
+BigQuery's own confirmation before returning); cost exposure during that
+gap is bounded by the existing `maximum_bytes_billed` fail-safe regardless
+of how long the actual stop takes.
 
-**Confirm at build time:** whether breaking out of `astream` propagates
-cancellation into an in-flight node, or only takes effect at the next
-inter-node checkpoint.
+**`run_bigquery_sql` also needs an `except asyncio.CancelledError:` handler,
+separate from the watcher race above — now a confirmed, not just traced,
+propagation path.** When the *gateway's own* turn timeout fires,
+`asyncio.wait_for` cancels the task directly — confirmed from
+`asyncio.timeouts.Timeout`'s installed source: `_on_timeout` calls
+`self._task.cancel()` where `self._task` is `tasks.current_task()`, not a
+separately-wrapped child, so the signal lands exactly wherever that single
+task is currently suspended. That reaches all the way down through
+`consume_graph` → `graph.astream` → `call_tool_node`'s `asyncio.gather` →
+`.ainvoke()` → `run_bigquery_sql`'s own `await asyncio.wait(...)`, as long
+as nothing in that chain introduces its own `asyncio.create_task` boundary
+— whether LangGraph's own `astream`/node-dispatch internals preserve that
+or quietly break it was an open question (CLAUDE.md's "Known-unverified"
+list had an entry for exactly this). Now settled, with a permanent
+regression test (`test_gateway_timeout_cancellation_reaches_bigquery_job`,
+`tests/test_tools.py`) that drives the *real* compiled `graph` — not a
+bare call to `run_bigquery_sql` — under a short `asyncio.wait_for`, against
+a fake BigQuery client with no live credentials (`approved_batch: True`
+sends `route_entry` straight to `call_tool`, so no real LLM call is
+needed), and confirms the fake job actually gets cancelled. This is also
+*why* an earlier plan to have the gateway's timeout handler write
+`cancel_requested: true` as a fallback was dropped — by the time that
+handler runs, `asyncio.wait_for` has already torn down the task tree,
+including whatever watcher task would have read that flag. Nothing is left
+to act on it; confirmed, the stale `# TODO(item 15)` comment that had
+proposed it was deleted, not implemented.
+
+A cancelled turn still writes telemetry — `cancelled: True` plus whatever
+`tool_calls` completed (`.claude/rules/telemetry.md`).
 
 ### The graph — seven nodes
 
@@ -1139,30 +1234,38 @@ destinations explicit in the code, not just inferable from reading its body.
 ```python
 from langgraph.graph import StateGraph, START, END
 
-def route_entry(state: AgentState) -> str:
+async def route_entry(state: AgentState) -> str:
     # A resumed, approved turn replays its dangling AIMessage.tool_calls
     # straight into call_tool -- a fresh turn starts at agent as usual.
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     return "call_tool" if state["approved_batch"] else "agent"
 
-def route_after_agent(state: AgentState) -> str:
+async def route_after_agent(state: AgentState) -> str:
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     return "call_tool" if state["messages"][-1].tool_calls else "check_length"
 
-def route_after_call_tool(state: AgentState) -> str:
-    if state["cancelled"] or state["needs_approval"]:
+async def route_after_call_tool(state: AgentState) -> str:
+    if state["needs_approval"] or await is_cancelled(state["conversation_id"]):
         return "finalize"
     if state["answer_submitted"]:
         return "check_length"
     return "agent"   # also cost_cap_exceeded and iteration_cap_hit — see
                      # "Hitting max_iterations"; symmetric, no special routing
 
-def route_after_check_length(state: AgentState) -> str:
+async def route_after_check_length(state: AgentState) -> str:
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     if check_answer_displayable(state["answer_markdown"]):
         return "verify"
     if state["length_retry_count"] < MAX_LENGTH_RETRIES:
         return "agent"
     return "finalize"
 
-def route_after_verify(state: AgentState) -> str:
+async def route_after_verify(state: AgentState) -> str:
+    if await is_cancelled(state["conversation_id"]):
+        return "finalize"
     if state["verified"]:
         return "finalize"
     if state["verification_retry_count"] < MAX_VERIFY_RETRIES:
@@ -1177,17 +1280,21 @@ g.add_node("check_length",     check_length_node)
 g.add_node("verify",           verify_node)
 g.add_node("finalize",         finalize_node)
 
+# A list, not a dict path_map, once every value already matches the real
+# node name -- "finalize" appears here even though route_entry/route_after_agent's
+# own logic above never names it directly; it's only ever reached via the
+# shared is_cancelled check each one runs first.
 g.add_conditional_edges(START, route_entry,
-    {"call_tool": "call_tool", "agent": "agent"})
+    ["call_tool", "agent", "finalize"])
 
 g.add_conditional_edges("agent", route_after_agent,
-    {"call_tool": "call_tool", "check_length": "check_length"})
+    ["call_tool", "check_length", "finalize"])
 g.add_conditional_edges("call_tool", route_after_call_tool,
-    {"finalize": "finalize", "check_length": "check_length", "agent": "agent"})
+    ["finalize", "check_length", "agent"])
 g.add_conditional_edges("check_length", route_after_check_length,
-    {"verify": "verify", "agent": "agent", "finalize": "finalize"})
+    ["verify", "agent", "finalize"])
 g.add_conditional_edges("verify", route_after_verify,
-    {"finalize": "finalize", "agent": "agent"})
+    ["finalize", "agent"])
 
 g.add_edge("finalize", END)
 graph = g.compile()
@@ -1239,14 +1346,16 @@ async def agent_node(state: AgentState) -> dict:
 | Node | Role |
 |---|---|
 | `agent` | The LLM call, tools bound. Emits tool calls only — `answer_markdown` only ever arrives via `submit_answer` |
-| `call_tool` | Dispatches tools (including `submit_answer`), checks cancel, increments `iteration_count`, sets `answer_submitted`, owns the cost gate |
+| `call_tool` | Dispatches tools (including `submit_answer`), increments `iteration_count`, sets `answer_submitted`, owns the cost gate |
 | `check_length` | Owns `length_retry_count` |
 | `verify` | `verify_response()`. Owns `verification_retry_count` |
 | `finalize` | Sets `AgentResponse` fields and writes telemetry — six routes in, see below |
 
 - `route_entry` is a plain function wired straight onto `START`'s
-  conditional edge, not a node — it only inspects `approved_batch`, no work
-  to warrant one.
+  conditional edge, not a node — checking `is_cancelled` plus
+  `approved_batch` doesn't warrant one. All five routing functions, not just
+  `call_tool`'s, now check cancellation first (`"Cancellation"` above) —
+  that's the actual cancel check, not a node property.
 - **Cost gating is not a node** — it lives inside `call_tool_node`, which
   dry-runs every BigQuery call in the batch before dispatching anything
   (`docs/approval-workflow.md`). `call_tool` routes on what that decision
@@ -1285,8 +1394,8 @@ this table and the code ever disagree.
 
 | From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
 |---|---|---|---|---|
-| `call_tool` | `cancelled` | Cancelled | `answer_markdown` if `agent` had already set one, else `CANCELLED_MESSAGE` | Normal row, `cancelled: True` |
-| `call_tool` | `needs_approval` | Approval pause | `answer_markdown` = `PENDING_APPROVAL_MESSAGE`; `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
+| any routing function | `is_cancelled` (live Firestore read, not `state["cancelled"]` -- nothing sets that until Layer 2 lands) | Cancelled | `answer_markdown` = real answer only if `verify_node` already confirmed it this turn, else `CANCELLED_MESSAGE`; `needs_approval` forced to `False` regardless of what `call_tool` last set it to | Normal row, `cancelled: True`, `needs_approval: False` |
+| `call_tool` | `needs_approval` (only reached if not also cancelled) | Approval pause | `answer_markdown` = `PENDING_APPROVAL_MESSAGE`; `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
 | `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question | Normal row |
 | `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit`/`cost_cap_exceeded` set `True` if either is how this turn got here | Normal row |
 | `verify` | failed, `verification_retry_count` exhausted | Honest decline | `VERIFICATION_FAILURE_MESSAGE` — no unverified number emitted | Normal row |
@@ -1294,10 +1403,12 @@ this table and the code ever disagree.
 `answer_markdown`'s four canned-message constants (`VERIFICATION_FAILURE_MESSAGE`,
 `PENDING_APPROVAL_MESSAGE`, `CANCELLED_MESSAGE`, plus the success case's real
 text) are picked by one `if`/`elif`/`elif`/`else` chain in `finalize_node`,
-in that priority order — `needs_approval` first, then `cancelled` (checked
-*before* the verification-failure case, or a cancelled-but-never-verified
-turn would wrongly show the verification message instead), then
-`not verified`, then the real answer.
+in that priority order — **`cancelled` first** (a cancel request should win
+over a pause determined in the same tick, and checking it first is also what
+makes the `verify_node`-confirmed gate correct — a cancel landing right
+after `submit_answer`, before verification ran, must not display an
+unverified `answer_markdown`), then `needs_approval`, then `not verified`,
+then the real answer.
 
 **`finalize` never touches `live_turns` — that lives in `consume_graph`
 (`app/gateway/gateway.py`) instead.** `live_turns` is gateway-owned
@@ -1310,11 +1421,24 @@ loop ends, decides what happens to the document:
 try:
     ...
 finally:
-    if final_state is not None and final_state["needs_approval"]:
-        await live_turns_doc.set({"pending_approval": build_pending_approval(final_state)})
+    if final_state is not None and final_state["needs_approval"] and not final_state["cancelled"]:
+        await live_turns_doc.set({
+            "status": "Approval workflow",
+            "pending_approval": build_pending_approval(final_state),
+        })
     else:
         await live_turns_doc.delete()
 ```
+
+**Cancelled wins over needs_approval here too — the same narrow, same-tick
+race as the message-selection chain above.** Without the `not cancelled`
+guard, a cancel landing in the same tick `call_tool_node` sets
+`needs_approval` would still get a `pending_approval` card written for a
+query the user just said to stop, even though the message they saw already
+said "Cancelled." `finalize_node`'s own override of `needs_approval` to
+`False` (above) makes this condition redundant in practice — but it's kept
+anyway, as cheap insurance against anything else ever setting
+`needs_approval` without going through `finalize_node`.
 
 `build_pending_approval` (`app/gateway/entry_exit.py`) is pure, no I/O — the
 schema and carry rule are in `.claude/rules/gateway.md`. No `merge=True`:

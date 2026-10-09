@@ -134,7 +134,7 @@ owner before any turn runs.
 | `POST /conversation` | Mint a `conversation_id`, create its `sessions` doc | No — milliseconds |
 | `POST /ask` | Run one turn end to end, **or** resume/resolve a paused one (`approval_decision`); returns `AgentResponse` | **Yes** — the long one (rejection returns fast, no graph run) |
 | `GET /ask/status/{conversation_id}` | Read the current status string and accumulated `thinking_log` | No — polled every 1–2s |
-| `POST /ask/cancel/{conversation_id}` | Set the cancel flag (Phase 3) | No — returns immediately |
+| `POST /ask/cancel/{conversation_id}` | Set the cancel flag | No — returns immediately |
 
 **Every endpoint except `POST /conversation` takes a `conversation_id` and
 must check ownership** (see below). `POST /ask` and `GET /ask/status` run
@@ -169,11 +169,13 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
   shape, all the way to the screen.
 - `GET /ask/status/{conversation_id}` — `{status: string | null, thinking_log: list[dict]}`,
   backs progress indication. `null` when no turn is running. Reads `live_turns/{conversation_id}` in Firestore (see below).
-- `POST /ask/cancel/{conversation_id}` — Phase 3. No body; returns
-  `{cancel_requested: true}` as soon as the flag is written. **Writes a flag,
-  doesn't kill a task directly** — see the Firestore section below for why.
-  The response confirms the write landed, not that the turn has stopped; the
-  turn ends when the loop next checks (`.claude/rules/orchestrator.md`).
+- `POST /ask/cancel/{conversation_id}` — no body; returns `CancelResponse`
+  (`{cancel_requested: true}`) as soon as the flag is written —
+  `live_turn_doc(conversation_id).set({"cancel_requested": True}, merge=True)`.
+  **Writes a flag, doesn't kill a task directly** — see the Firestore
+  section below for why. The response confirms the write landed, not that
+  the turn has stopped; the turn ends when a routing function next checks
+  (`.claude/rules/orchestrator.md`).
 
 ### Request validation — before any turn work starts
 
@@ -226,7 +228,7 @@ normally.
 
 | Collection | Lifetime | Holds | Read by |
 |---|---|---|---|
-| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 12 fields — schema below**) | `GET /ask/status`, the cancel check, `POST /ask`'s approval-decision branch |
+| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 12 fields — schema below**) | `status`/`thinking_log` by `GET /ask/status`; `pending_approval` by `POST /ask`'s approval-decision branch; `cancel_requested` by `is_cancelled` (`app/orchestrator/shared_helpers.py`), called from the orchestrator's routing functions and `finalize_node` — not read anywhere in this file directly |
 | `sessions/{conversation_id}` | Whole conversation; 30-day TTL | `user_id`, `history_messages`, `last_activity_at` | Prompt assembly, the ownership check |
 
 **`pending_approval` is a field, not a third collection** — it has its own
@@ -486,17 +488,46 @@ live. Why, and the upgrade path: component reference §9.2a.
 
 **Cancel is a signal, not stored state.** An `asyncio.Task` is running code in
 one process's memory — there's nothing JSON-shaped to persist. So
-`POST /ask/cancel` writes `cancel_requested: true`, and the **`astream` loop
-checks that flag each iteration** and stops if set. Cooperative cancellation.
-Cheap because that loop is already writing status to the same document every
-iteration — one more field read, not new plumbing.
+`POST /ask/cancel` writes `cancel_requested: true`, read by `is_cancelled`
+(`app/orchestrator/shared_helpers.py`).
 
-**That flag is also checked deeper than this loop.** Breaking out here stops
-the gateway advancing, but doesn't kill an already-dispatched BigQuery job —
-`run_bigquery_sql` races the query against a cancel watcher and calls
-`client.cancel_job()` itself, raising `TurnCancelledError`
-(`.claude/rules/orchestrator.md`). Real cancellation for BigQuery,
-best-effort for DAX.
+**The check isn't in this file's `astream` loop — an earlier design put it
+there, but that risked abandoning `consume_graph` mid-node with an
+incomplete, possibly-corrupt `final_state` (a dangling `AIMessage.tool_calls`
+with no `ToolMessage` yet to match it).** What actually shipped lives
+entirely on the orchestrator side: all five of the graph's routing functions
+check `is_cancelled` first and route straight to `finalize` if it's set,
+and `finalize_node` does its own separate read to pick the canned message
+and populate telemetry (`.claude/rules/orchestrator.md`'s "Cancellation").
+Because a routing function only ever runs after a node has already returned
+a complete update, `final_state` stays well-formed no matter which edge
+caught the cancellation — `consume_graph` here needs no special-casing at
+all for it.
+
+**Checked deeper than any routing function — built and live-verified,
+2026-10-09.** Routing only runs *between* nodes, so it can't help once
+execution is already inside `run_bigquery_sql`, awaiting a query.
+`run_bigquery_sql` races the query against a 1s-polling cancel watcher and
+calls `client.cancel_job()` itself, raising a plain `ToolError` — no
+separate `TurnCancelledError` (`.claude/rules/orchestrator.md`'s
+"Cancellation" has the full design, including why that distinct exception
+type turned out unnecessary). Real cancellation for BigQuery, confirmed
+live against BigQuery's own job metadata — though not instant, see that
+same section; best-effort for DAX regardless (no confirmed REST equivalent
+to `cancel_job`).
+
+**A real bug this surfaced, already fixed: a cancel landing in
+`route_after_agent`.** That's the one routing function with a genuine gap —
+it runs right after `agent_node`, the only node that can add a brand-new,
+*unresolved* `tool_use` to `state["messages"]`. If cancellation routes away
+before `call_tool_node` ever gets a chance to resolve it, that dangling
+`tool_use` is still well-formed as far as *this* turn's own graph is
+concerned (nothing re-sends it to the model), but it was getting persisted
+into `sessions.history_messages` anyway, corrupting the *next* turn's first
+`agent_node` call with Anthropic's "tool_use without tool_result" 400 —
+confirmed live, not hypothetical. Fixed the same way `needs_approval` is
+already excluded: `run_agent_turn` skips `write_history_messages` whenever
+`final_state["cancelled"]` is set, not just when paused.
 
 **Clear `status` on every exit, not just success** — including error paths. A
 poll arriving just after a turn ends would otherwise show a stale status from
@@ -543,22 +574,71 @@ just finished, so each status describes a step that already happened.
   gives `"Combined results"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
   `app/config.py`) distinct sources, such as `"Gathered results from BigQuery, project
   documentation, and semantic model"`, or `"Gathered results from {n} sources"` above that.
-  Source names come from `SOURCE_NAMES`.
+  Source names come from `SOURCE_NAMES`. **If every call in the batch errored**, this is
+  skipped entirely in favor of a generic `"Hit an issue, retrying..."` — checked before
+  `call_tool_status` even runs, so a dry-run-declined or cost-cap-exceeded batch (same
+  tool name, zero real results) never shows "Gathered results from BigQuery" for a query
+  that didn't execute. A *partial*-failure batch is left alone — same as a full success,
+  named sources and all — differentiating that further was judged not worth the added
+  complexity for a rarer, lower-stakes case.
 - **`verify`:** `"Verified results"` only when verification passes. A rejected answer
   writes nothing, so the agent's `Thought` line stays up until the retry shows its own.
 - **`finalize`:** `"Prepared your answer"` normally, `"Needs your approval"` when the
-  turn just paused (`update.get("needs_approval")`) — otherwise a pause would show the
-  same text as a real final answer, which read as misleadingly final in practice.
+  turn just paused, `"Cancelled"` when it was cancelled (checked first — see
+  `.claude/rules/orchestrator.md`'s priority order) — otherwise a pause or cancellation
+  would show the same text as a real final answer, which read as misleadingly final in
+  practice. This is the *transient* per-node write, suffixed with a duration like every
+  other step; it's distinct from the *persisted* status a paused turn's `live_turns`
+  replacement carries (below), which doesn't get a duration at all.
 - **`route_entry`, `check_length`:** no write.
 
 Each status is suffixed with the seconds since the previous write, for example
 `"Gathered results from BigQuery (1.5s)"`. Silent nodes don't move that timer, so their time
 rolls into the next step.
 
-**The document is deleted when the turn ends, whether it succeeded or failed** (`finally`).
-`live_turns` holds only turns that are running. The last few writes can land within a
-tenth of a second of the delete, so the final statuses are best-effort: a poll may or may
-not catch them. The answer is always in the `POST /ask` response.
+**On a normal or cancelled completion, the document is deleted** (`finally`,
+`not (needs_approval and not cancelled)`). **On a pause, it's replaced** with
+`pending_approval` plus its own persisted status, `"Approval workflow"` — no
+duration suffix, since this one needs to hold for as long as a human takes to
+respond, not describe a step that just finished. `live_turns` holds only
+turns that are running or paused. The last few pre-cleanup writes can land
+within a tenth of a second of the delete/replace, so those final statuses are
+best-effort: a poll may or may not catch them. The answer is always in the
+`POST /ask` response.
+
+**Why `"Approval workflow"`, not `"Needs your approval"`, for the persisted
+version — a deliberate, generic choice, not an oversight.** Once a decision
+is submitted, `run_agent_turn` overwrites this status as close to
+immediately as it can manage — but the floor on that window is network
+latency alone (the time for the decision to even *reach* the backend), which
+no amount of backend reordering can close to zero. A poll landing in that
+gap will always be possible. Rather than keep chasing a window that can't
+fully close, the persisted text itself was made generic enough that seeing
+it briefly *after* a decision was already made isn't actively wrong — just
+less specific than it could be. The transient per-node text above stays
+`"Needs your approval"`, since it's accurate at the moment it's written and
+gone the moment a decision changes anything.
+
+**Resuming an approved turn replaces, not deletes, and uses `merge=True` —
+both fixes found via live testing, not design review.** `run_agent_turn`
+writes `{"status": "Thinking...", "thinking_log": []}` the moment it
+confirms a decision is approved, before doing anything else, so a client
+polling status never sees the stale `"Approval workflow"` value for a
+decision that's already been made (same floor as above — this shrinks the
+window, it doesn't close it). The first version of this fix used a plain,
+non-merged `.set()`, which silently erased any `cancel_requested` flag a
+concurrent cancel request had just written — regardless of which one landed
+first, since `consume_graph`'s own first write (the same
+`{"status": "Thinking...", ...}`, called redundantly moments later) would
+erase it right back. Confirmed live: cancelling a turn immediately after
+approving it did nothing — the whole graph ran anyway. Both of these writes
+now use `merge=True`. No `pending_approval: firestore.DELETE_FIELD` needed
+alongside it — nothing reads `pending_approval` off a *running* turn's
+document (only `run_agent_turn`'s own approval-decision branch reads it, and
+only at the start of a separate, later `/ask` call), and `consume_graph`'s
+own `finally` block unconditionally replaces or deletes the whole document
+by the time this turn ends regardless, so a stale `pending_approval` sitting
+there in the meantime is inert.
 
 **The whole stream runs inside `asyncio.wait_for(consume_graph(...), GATEWAY_TURN_TIMEOUT_SECONDS)`.**
 On timeout or error, `POST /ask` returns a plain `AgentResponse`, not an HTTP error.
@@ -567,9 +647,10 @@ On timeout or error, `POST /ask` returns a plain `AgentResponse`, not an HTTP er
 with `assert_owns_conversation`, and returns `{status, thinking_log}` from
 `live_turns`. With no document it returns `{status: null, thinking_log: []}`.
 `read_live_status(conversation_id)` is the same read, without auth, for the notebook.
-
-**Deferred:** cancellation (item 15) extends this section when it lands --
-the approval states (item 14) are built; see `docs/approval-workflow.md`.
+A `null` here means "nothing to show yet," never "something broke" — the one
+remaining gap (a poll landing between a normal/cancelled turn's own delete and
+the blocking `PostAsk` call itself resolving) is structural, not a bug to
+chase, and `docs/frontend.md` has the client-side handling rule.
 
 ## Returning a response — errors and what the caller gets
 

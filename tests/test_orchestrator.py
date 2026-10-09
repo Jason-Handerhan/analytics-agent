@@ -2,6 +2,7 @@
 plain-dict state only, no LLM/BigQuery/MCP calls (docs/testing.md).
 """
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
@@ -14,6 +15,7 @@ from app.orchestrator.orchestrator import (
     call_tool_node,
     check_table_rows,
     extract_table_values,
+    finalize_node,
     iteration_cap_update,
     resolve_chart_data,
     resolve_combine_data,
@@ -21,6 +23,7 @@ from app.orchestrator.orchestrator import (
     route_after_call_tool,
     route_after_check_length,
     route_after_verify,
+    route_entry,
     verify_response,
 )
 from app.orchestrator.tools import ToolError
@@ -110,52 +113,130 @@ def test_verify_response():
 
 
 # Routing
+# Every routing function reads the live cancel flag via is_cancelled, so each
+# test patches it on the orchestrator module (where the functions look it up)
+# -- False to exercise the pre-existing logic, True to confirm it short-circuits
+# to finalize regardless of anything else in state.
 
-def test_route_after_agent():
-    """Tool call -> call_tool; no tool call -> check_length."""
-    with_tool_call = {"messages": [AIMessage(content="", tool_calls=[
+@pytest.mark.asyncio
+async def test_route_entry(monkeypatch):
+    """Approved batch -> call_tool; fresh turn -> agent; cancelled -> finalize."""
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
+    assert await route_entry({"conversation_id": "c1", "approved_batch": True}) == "call_tool"
+    assert await route_entry({"conversation_id": "c1", "approved_batch": False}) == "agent"
+
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=True))
+    assert await route_entry({"conversation_id": "c1", "approved_batch": False}) == "finalize"
+
+
+@pytest.mark.asyncio
+async def test_route_after_agent(monkeypatch):
+    """Tool call -> call_tool; no tool call -> check_length; cancelled -> finalize."""
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
+    with_tool_call = {"conversation_id": "c1", "messages": [AIMessage(content="", tool_calls=[
         {"name": "run_bigquery_sql", "args": {}, "id": "1", "type": "tool_call"}])]}
-    assert route_after_agent(with_tool_call) == "call_tool"
+    assert await route_after_agent(with_tool_call) == "call_tool"
 
-    without_tool_call = {"messages": [AIMessage(content="done")]}
-    assert route_after_agent(without_tool_call) == "check_length"
+    without_tool_call = {"conversation_id": "c1", "messages": [AIMessage(content="done")]}
+    assert await route_after_agent(without_tool_call) == "check_length"
 
-
-def test_route_after_call_tool():
-    """Cancelled/needs_approval -> finalize; submitted -> check_length; else -> agent."""
-    base = {"cancelled": False, "needs_approval": False, "answer_submitted": False}
-
-    assert route_after_call_tool({**base, "cancelled": True}) == "finalize"
-    assert route_after_call_tool({**base, "needs_approval": True}) == "finalize"
-    assert route_after_call_tool({**base, "answer_submitted": True}) == "check_length"
-    assert route_after_call_tool(base) == "agent"
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=True))
+    assert await route_after_agent(without_tool_call) == "finalize"
 
 
-def test_route_after_check_length():
-    """Displayable -> verify; over cap with retries left -> agent; exhausted -> finalize."""
-    short_answer = {"answer_markdown": "Short answer.", "length_retry_count": 0}
-    assert route_after_check_length(short_answer) == "verify"
+@pytest.mark.asyncio
+async def test_route_after_call_tool(monkeypatch):
+    """Needs_approval -> finalize; submitted -> check_length; else -> agent; cancelled -> finalize."""
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
+    base = {"conversation_id": "c1", "needs_approval": False, "answer_submitted": False}
+
+    assert await route_after_call_tool({**base, "needs_approval": True}) == "finalize"
+    assert await route_after_call_tool({**base, "answer_submitted": True}) == "check_length"
+    assert await route_after_call_tool(base) == "agent"
+
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=True))
+    assert await route_after_call_tool(base) == "finalize"
+
+
+@pytest.mark.asyncio
+async def test_route_after_check_length(monkeypatch):
+    """Displayable -> verify; over cap with retries left -> agent; exhausted -> finalize; cancelled -> finalize."""
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
+    short_answer = {"conversation_id": "c1", "answer_markdown": "Short answer.", "length_retry_count": 0}
+    assert await route_after_check_length(short_answer) == "verify"
 
     # Table row count over cap, well under the character cap
     long_table = {
+        "conversation_id": "c1",
         "answer_markdown": "| A |\n|---|\n" + "\n".join(f"| {i} |" for i in range(30)),
         "length_retry_count": 0,
     }
-    assert route_after_check_length(long_table) == "agent"
+    assert await route_after_check_length(long_table) == "agent"
 
     exhausted = {**long_table, "length_retry_count": MAX_LENGTH_RETRIES}
-    assert route_after_check_length(exhausted) == "finalize"
+    assert await route_after_check_length(exhausted) == "finalize"
+
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=True))
+    assert await route_after_check_length(short_answer) == "finalize"
 
 
-def test_route_after_verify():
-    """Verified -> finalize; not verified with retries left -> agent; exhausted -> finalize."""
-    assert route_after_verify({"verified": True, "verification_retry_count": 0}) == "finalize"
+@pytest.mark.asyncio
+async def test_route_after_verify(monkeypatch):
+    """Verified -> finalize; not verified with retries left -> agent; exhausted -> finalize; cancelled -> finalize."""
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
+    verified = {"conversation_id": "c1", "verified": True, "verification_retry_count": 0}
+    assert await route_after_verify(verified) == "finalize"
 
-    retrying = {"verified": False, "verification_retry_count": 0}
-    assert route_after_verify(retrying) == "agent"
+    retrying = {"conversation_id": "c1", "verified": False, "verification_retry_count": 0}
+    assert await route_after_verify(retrying) == "agent"
 
-    exhausted = {"verified": False, "verification_retry_count": MAX_VERIFY_RETRIES}
-    assert route_after_verify(exhausted) == "finalize"
+    exhausted = {"conversation_id": "c1", "verified": False, "verification_retry_count": MAX_VERIFY_RETRIES}
+    assert await route_after_verify(exhausted) == "finalize"
+
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=True))
+    assert await route_after_verify(retrying) == "finalize"
+
+
+# finalize_node -- message selection
+
+@pytest.mark.asyncio
+async def test_finalize_node_message_selection(monkeypatch):
+    """needs_approval -> pending message; verified -> real answer kept, cancelled
+    or not; unverified and cancelled -> CANCELLED_MESSAGE, never the unverified draft."""
+    monkeypatch.setattr(orchestrator, "build_telemetry_row", lambda **kwargs: kwargs)
+    monkeypatch.setattr(orchestrator, "write_telemetry_row", AsyncMock())
+
+    base = {
+        "conversation_id": "c1", "user_id": "u1", "question": "Q",
+        "turn_started_at": datetime.now(timezone.utc), "filter_context": [], "active_page": None,
+        "messages": [], "tool_calls": [], "errors": [], "llm_calls": 0, "bytes_consumed": 0,
+        "bytes_consumed_baseline": 0, "iteration_count": 0, "verification_retry_count": 0,
+        "length_retry_count": 0, "needs_approval": False, "cost_cap_exceeded": False,
+        "iteration_cap_hit": False, "estimated_cost": None, "pending_queries": [],
+        "largest_pending_query": None, "approval_decision": None, "deferred_dax": [],
+        "chart_urls": [], "suggested_follow_ups": [], "all_prose_numeric_claims": [],
+        "clarifying_question": "", "answer_markdown": "The real, verified answer.", "verified": True,
+    }
+
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
+    update = await finalize_node(base)
+    assert update["answer_markdown"] == "The real, verified answer."
+    assert update["cancelled"] is False
+
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=True))
+    cancelled_but_verified = await finalize_node(base)
+    assert cancelled_but_verified["answer_markdown"] == "The real, verified answer."
+    assert cancelled_but_verified["cancelled"] is True
+
+    # The bug this guards against: a cancel landing right after submit_answer,
+    # before verify_node ever ran, must not display the unverified draft.
+    unverified = {**base, "verified": False, "answer_markdown": "Draft, never verified."}
+    cancelled_and_unverified = await finalize_node(unverified)
+    assert cancelled_and_unverified["answer_markdown"] == orchestrator.CANCELLED_MESSAGE
+
+    monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
+    pending = await finalize_node({**base, "needs_approval": True})
+    assert pending["answer_markdown"] == orchestrator.PENDING_APPROVAL_MESSAGE
 
 
 # Iteration cap guardrail
@@ -276,7 +357,7 @@ async def test_call_tool_node_submit_answer_branch():
 
 def test_resolve_chart_and_combine_data():
     """Ref resolution into real-tool args for charts and combines, plus every
-    resolve error path (unknown, failed, non-chartable, too few refs)."""
+    resolve error path (malformed args, unknown, failed, non-chartable, too few refs)."""
     prior = [
         {"name": "run_bigquery_sql", "ref_id": "ref_1", "success": True, "result": [{"a": 1}]},
         {"name": "run_dax_query", "ref_id": "ref_2", "success": True, "result": [{"a": 2}]},
@@ -301,6 +382,11 @@ def test_resolve_chart_and_combine_data():
     assert combined == {"id": "call_m", "name": "combine_results", "args": {"args": {
         "data": [[{"a": 1}], [{"a": 2}]], "method": "stack", "join_key": None, "join_how": "inner",
     }}}
+
+    malformed_chart_tc = {"id": "call_c", "name": "generate_chart", "args": {
+        "source_ref": "ref_1"}}  # missing required "spec"
+    with pytest.raises(ToolError):
+        resolve_chart_data(malformed_chart_tc, prior)
 
     unknown_chart_tc = {"id": "call_c", "name": "generate_chart", "args": {
         "source_ref": "ref_9",

@@ -327,16 +327,32 @@ def test_cancel_flag_stops_the_loop(mock_graph_yielding):
     Without this, test_cancelled_turn_is_logged passes on a feature that
     never fires."""
 
-def test_cancel_kills_the_bigquery_job(mock_bq_client):
-    """Level 2 — inside the tool, where a node-level check can't reach
-    (.claude/rules/orchestrator.md). asyncio cancellation alone does NOT stop
-    a running BigQuery job, so the explicit call is the whole mechanism.
-    Mocked client: assert cancel_job(job_id) was actually called and
-    TurnCancelledError — not ToolTimeoutError — was raised.
+# Built, 2026-10-09 -- tests/test_tools.py, against FakeBQClient/FakeJob,
+# no mocking library needed. Level 2 -- inside the tool, where a node-level
+# check can't reach (.claude/rules/orchestrator.md). asyncio cancellation
+# alone does NOT stop a running BigQuery job, so the explicit cancel_job()
+# call is the whole mechanism; no TurnCancelledError/ToolTimeoutError --
+# both considered, neither built, plain ToolError covers it (same doc).
+def test_run_bigquery_sql_cancel_wins_race(monkeypatch):
+    """The watcher notices cancel_requested before the query finishes --
+    ToolError, and cancel_job(job_id) was actually called."""
 
-    Layer 1 because the RACE is our code; only the job really dying is
-    BigQuery's. That half is the Phase 3 manual gate (check job status in
-    the console), which this doesn't replace."""
+def test_run_bigquery_sql_query_wins_race(monkeypatch):
+    """A fast query returns its real result before the watcher ever fires --
+    no cancellation, no cancel_job call."""
+
+def test_gateway_timeout_cancellation_reaches_bigquery_job(monkeypatch):
+    """Drives the REAL compiled graph (approved_batch=True skips the agent
+    node, no LLM needed) under a short asyncio.wait_for, proving LangGraph's
+    own astream/dispatch internals propagate cancellation into
+    run_bigquery_sql's handler rather than swallowing it -- a question that
+    was open until this test, not assumed."""
+
+# Layer 1 because the race itself is our code, fully exercised against
+# fakes; only the job genuinely dying inside BigQuery is BigQuery's, and
+# that was confirmed live (not a manual gate) -- see
+# .claude/rules/orchestrator.md's "Cancellation" section for what that live
+# test actually found (cancellation is real but not instant).
 
 ```
 

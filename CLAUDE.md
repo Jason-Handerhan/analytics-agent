@@ -165,13 +165,7 @@ than the task needs.
   today (Premium/Fabric-only API). Not needed: the model writes the DAX.
 - Prompt-caching minimums are **model-specific and move** — Sonnet is 1,024
   tokens, newer Opus/Haiku 4,096. Re-check on any model change (`.claude/rules/gateway.md`).
-- **LangGraph** — whether breaking out of `astream` propagates cancellation
-  into a running node or only at the next node boundary. (Confirmed and
-  already applied: `Command`'s shape, the `astream` `StreamPart` format
-  with `stream_mode="updates", version="v2"`, and `append_list` — the custom
-  reducer replacing `add_messages` — genuinely accumulating across nodes
-  instead of last-write-wins, proven against a real `graph.invoke()` run in
-  `notebooks/phase3_graph.ipynb`.)
+
 ---
 
 ## Commands
