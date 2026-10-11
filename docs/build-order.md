@@ -7,7 +7,11 @@ progress: item 1 (visual grounding) built and live-verified, 2026-10-10;
 item 2's backend half (`answer_html` rendering) built and live-verified,
 2026-10-11, UI work (source badges, approval cards, the actual control
 binding) still open** (see the Phase 4 entries further down, and the
-item-10-area status below for Phase 3's own history). Items 1-8 complete, `POST /ask` wired to the
+item-10-area status below for Phase 3's own history). Gateway redeployed and
+`gateway-swagger2.json`/the live connector refreshed to the current 4-endpoint
+contract, 2026-10-11 — all four operations re-verified live through the
+Power Apps connector (Phase 1 item 4's entry below has the details), so
+frontend UI work is unblocked. Items 1-8 complete, `POST /ask` wired to the
 real graph and verified live, and item 9 fully complete — all three
 remaining tools (`search_docs`, `get_page_info`, `get_repo_contents`) built,
 live-verified, and now Layer 1 tested too (see the entries below item 8).
@@ -593,8 +597,10 @@ ownership check) built and Layer 1 tested (`tests/test_gateway.py`,
 in `docs/auth.md`:
 - FastAPI emits OpenAPI 3.1.0, which Power Platform's importer can't parse
   at all — hand-wrote an equivalent Swagger 2.0 spec instead
-  (`gateway-swagger2.json`, not committed — a one-off Power Platform import
-  artifact, not app code).
+  (`gateway-swagger2.json`, committed — kept in sync with the real contract
+  by hand whenever `AgentResponse`/`AskRequest` or the route list changes,
+  most recently 2026-10-11, when it grew from 2 to the current 4 operations
+  — all four re-verified live through the connector that day).
 - A single self-referencing Entra app (as both OAuth client and resource)
   hit a persistent `AADSTS90008` regardless of permissions/consent — fixed
   by splitting into two apps: `analytics-agent-connector` (resource) and a

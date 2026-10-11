@@ -146,7 +146,7 @@ OpenAPI definition registered in Power Platform, plus auth config.
 artifact that triggers it.
 
 **One connector, not one per endpoint.** It's registered from a single
-spec, and all five gateway endpoints come through as separate operations on
+spec, and all four gateway endpoints come through as separate operations on
 it — `MyConnector.Ask(...)`, `MyConnector.GetStatus(...)`, and so on.
 
 **Two Entra apps, not one — confirmed necessary, not just planned.**
@@ -192,6 +192,15 @@ correct.
    **Don't also define `Authorization` as a manual header parameter** — Power
    Platform reserves it once OAuth 2.0 is configured and rejects the
    definition outright; it injects the bearer token itself.
+
+   **Confirmed this bites on an UPDATE, not just initial creation** — the
+   original spec kept `Authorization` as a manual param on every operation
+   and imported fine, because OAuth wasn't configured on the connector yet
+   at that point. Re-pasting an updated spec afterward, once OAuth already
+   was configured, failed validation on every operation with *"'Authorization'
+   header is not allowed. Use 'API Key' authentication type in the Security
+   tab to set this header."* Fix is the same either way: leave `Authorization`
+   out of the spec entirely, `x-api-key` only.
 4. Define request/response schemas so Power Apps gets typed objects
    (`answer_markdown`, `chart_urls`, etc. bindable directly in the gallery —
    snake_case, straight from the Pydantic model).

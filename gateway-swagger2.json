@@ -3,7 +3,7 @@
   "info": {
     "title": "Analytics Agent",
     "description": "Gateway for the conversational analytics agent",
-    "version": "1.0"
+    "version": "1.1"
   },
   "host": "analytics-gateway-551802026956.us-central1.run.app",
   "basePath": "/",
@@ -16,7 +16,6 @@
         "summary": "Start a new conversation",
         "operationId": "PostConversation",
         "parameters": [
-          { "name": "Authorization", "in": "header", "required": true, "type": "string" },
           { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
         ],
         "responses": {
@@ -29,10 +28,9 @@
     },
     "/ask": {
       "post": {
-        "summary": "Ask a question",
+        "summary": "Ask a question, or respond to a pending approval",
         "operationId": "PostAsk",
         "parameters": [
-          { "name": "Authorization", "in": "header", "required": true, "type": "string" },
           { "name": "x-api-key", "in": "header", "required": true, "type": "string" },
           { "name": "body", "in": "body", "required": true, "schema": { "$ref": "#/definitions/AskRequest" } }
         ],
@@ -43,18 +41,51 @@
           }
         }
       }
+    },
+    "/ask/status/{conversation_id}": {
+      "get": {
+        "summary": "Poll live status for a turn in flight",
+        "operationId": "GetAskStatus",
+        "parameters": [
+          { "name": "conversation_id", "in": "path", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/StatusResponse" }
+          }
+        }
+      }
+    },
+    "/ask/cancel/{conversation_id}": {
+      "post": {
+        "summary": "Request cancellation of a turn in flight",
+        "operationId": "PostAskCancel",
+        "parameters": [
+          { "name": "conversation_id", "in": "path", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/CancelResponse" }
+          }
+        }
+      }
     }
   },
   "definitions": {
     "AskRequest": {
       "type": "object",
-      "required": ["question", "conversation_id"],
+      "required": ["conversation_id"],
       "properties": {
         "question": { "type": "string" },
         "image_base64": { "type": "string" },
         "filter_context": { "type": "array", "items": { "type": "object" } },
         "active_page": { "type": "string" },
-        "conversation_id": { "type": "string" }
+        "conversation_id": { "type": "string" },
+        "approval_decision": { "type": "string", "enum": ["approved", "rejected"] }
       }
     },
     "ConversationResponse": {
@@ -64,29 +95,35 @@
         "conversation_id": { "type": "string" }
       }
     },
-    "Claim": {
-      "type": "object",
-      "required": ["text"],
-      "properties": {
-        "text": { "type": "string" },
-        "numeric_value": { "type": "number" },
-        "source_tool_call_id": { "type": "string" }
-      }
-    },
     "AgentResponse": {
       "type": "object",
-      "required": ["answer_markdown", "sources"],
+      "required": ["answer_markdown", "answer_html", "sources"],
       "properties": {
         "answer_markdown": { "type": "string" },
+        "answer_html": { "type": "string" },
         "sources": { "type": "array", "items": { "type": "string" } },
         "needs_approval": { "type": "boolean" },
-        "chart_url": { "type": "string" },
-        "claims": { "type": "array", "items": { "$ref": "#/definitions/Claim" } },
+        "chart_urls": { "type": "array", "items": { "type": "string" } },
         "suggested_follow_ups": { "type": "array", "items": { "type": "string" } },
         "iteration_cap_hit": { "type": "boolean" },
         "pending_query": { "type": "string" },
         "estimated_cost": { "type": "string" },
         "cost_cap_exceeded": { "type": "boolean" }
+      }
+    },
+    "StatusResponse": {
+      "type": "object",
+      "required": ["status", "thinking_log"],
+      "properties": {
+        "status": { "type": "string" },
+        "thinking_log": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "CancelResponse": {
+      "type": "object",
+      "required": ["cancel_requested"],
+      "properties": {
+        "cancel_requested": { "type": "boolean" }
       }
     }
   }
