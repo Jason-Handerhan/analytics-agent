@@ -2,8 +2,13 @@
 
 ## Current status — update this as we go
 
-**Phase: 3 in progress — items 1-8 complete, `POST /ask` wired to the
-real graph and verified live, and item 9 fully complete** — all three
+**Phase 3 complete** (items 1-15, see the entries below) — **Phase 4 in
+progress: item 1 (visual grounding) built and live-verified, 2026-10-10;
+item 2's backend half (`answer_html` rendering) built and live-verified,
+2026-10-11, UI work (source badges, approval cards, the actual control
+binding) still open** (see the Phase 4 entries further down, and the
+item-10-area status below for Phase 3's own history). Items 1-8 complete, `POST /ask` wired to the
+real graph and verified live, and item 9 fully complete — all three
 remaining tools (`search_docs`, `get_page_info`, `get_repo_contents`) built,
 live-verified, and now Layer 1 tested too (see the entries below item 8).
 **Item 10 (Firestore chat history) complete, 2026-10-04** — ported into
@@ -1329,15 +1334,49 @@ layer failed.
 
 ## Phase 4 — Multimodal grounding & response formatting
 
-1. Screenshot upload through the connector (filters, slicers, and active page
-   already landed in Phase 3). The image is layout/attention only — **never** a source of
-   numeric values.
-2. Response formatting: HTML, source badges, approval cards (incl. the
-   approve/reject buttons for Phase 3's workflow), chart display.
-   **Decide before building chart display**: native `Image` control bound to
-   `chart_url` vs. inline `<img>` embedded in `answer_markdown` (both
-   confirmed to work; the inline option needs `MAX_ANSWER_CHARS` 6000 → 7000
-   and a mistune renderer change) — full write-up in `docs/frontend.md`.
+1. **Visual grounding via `get_page_info` — built and live-verified,
+   2026-10-10, substantially different from the connector-upload plan this
+   item originally described.** `get_page_info` (`.claude/rules/tools.md`)
+   now returns a reference screenshot of each page's general layout
+   alongside its text — on-demand, on every turn that might need it, with
+   no connector/JS capture work and no requiring the user to screenshot
+   anything themselves. `filter_context`-driven selection picks between
+   structural image variants where one exists (Model Performance's
+   bar/beeswarm toggle). Covers the majority use case; the originally-planned
+   live, user-initiated upload (for the rarer case a static reference can't
+   cover — something visually anomalous, or the user specifically pointing
+   at something) is still planned, now scoped as a smaller addition rather
+   than this item's whole content — `AgentState.image_base64` already exists
+   for it but is still unwired (`.claude/rules/gateway.md`).
+
+   Found and fixed in the same pass: a real notebook test-harness bug where
+   `filter_context` was being set on state but never actually reaching the
+   model (`build_human_message` was bypassed by a hand-built `HumanMessage`
+   in both `phase3_graph.ipynb` and `phase3_orchestrator_e2e.ipynb`); field
+   parameters (Evaluation Metric, Ensemble Weight) now captured through the
+   Data well after finding the right DAX pattern — `docs/frontend.md`'s
+   earlier "permanently excluded" conclusion was wrong, corrected; numeric
+   parameters' and several measures' descriptions now reach static context
+   (`.claude/rules/data-pipeline.md`).
+2. **The backend half of response formatting — `answer_html` — built and
+   live-verified, 2026-10-10/11.** `answer_markdown` → `answer_html` via a
+   real custom mistune renderer (`.claude/rules/gateway.md`,
+   `app/gateway/entry_exit.py`), inline-styled throughout (tables, fenced
+   code, inline code, images) since the Power Apps HTML control doesn't
+   reliably honor a `<style>` block; every color/font is a named constant in
+   `app/config.py`, not a hardcoded literal in the renderer. Closes the
+   "decide before building chart display" item this entry used to describe
+   as open — **inline `<img>` won** over a native `Image` control bound to
+   `chart_url` (`docs/frontend.md` has the full decision record);
+   `MAX_ANSWER_CHARS` is 7000. `answer_markdown` stays on `AgentResponse`
+   unchanged alongside the new field — telemetry and the existing
+   notebook/debugging workflow both still read it raw.
+   Layer 1 tested (`tests/test_entry_exit.py`'s `test_build_agent_response`,
+   asserting against the same `app/config.py` constants the renderer uses,
+   not a hardcoded literal, so a future color tweak can't silently drift the
+   two out of sync). **Still entirely open: source badges, approval cards,
+   and the actual Power Apps HTML control binding/UI work** — this item was
+   never about those; `answer_html` is what those will render once built.
 3. **The cancel button** — a Power Apps button firing
    `POST /ask/cancel/{conversation_id}` (`docs/frontend.md`). The endpoint and
    cancellation path shipped in Phase 3; this is the UI half, alongside the
@@ -1346,8 +1385,11 @@ layer failed.
    `thinking_log`/`append_thinking` design (`.claude/rules/gateway.md`,
    `docs/frontend.md`): a new `live_turns` field plus a gallery row per
    summarized-thinking round, styled distinctly from a real answer.
-5. The remaining `generate_chart` spec types beyond Phase 3's three
-   (`docs/chart-tool.md`) — add as real questions call for them.
+5. ~~The remaining `generate_chart` spec types beyond Phase 3's three~~ —
+   **stale, confirmed 2026-10-10: all 10 documented chart types
+   (`docs/chart-tool.md`) are already built**
+   (`app/mcp_server/chart_tool.py` has all 10 spec classes). Nothing left
+   here.
 
 ## Phase 5 — Skipped
 

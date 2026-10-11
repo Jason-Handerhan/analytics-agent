@@ -27,6 +27,7 @@ from app.gateway.entry_exit import (
     build_pending_approval,
     build_updated_history,
     rebuild_paused_messages,
+    render_answer_html,
 )
 from app.gateway.models import AgentResponse, AskRequest, CancelResponse, ConversationResponse, StatusResponse
 from app.orchestrator.orchestrator import graph, init_orchestrator
@@ -304,13 +305,15 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
         if pending is None:
             # Rare enough (the frontend disables double-submits) not to need
             # its own message -- same fallback as any other unexpected failure.
-            return AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE, sources=[])
+            return AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE,
+                                  answer_html=render_answer_html(GENERIC_TURN_ERROR_MESSAGE), sources=[])
 
         # Approval Workflow: Rejected Branch -- no graph run, minimal telemetry row.
         if body.approval_decision == "rejected":
             await live_doc.delete()
             await write_rejected_telemetry(body.conversation_id, user_id, pending)
-            return AgentResponse(answer_markdown=REJECTED_MESSAGE, sources=[])
+            return AgentResponse(answer_markdown=REJECTED_MESSAGE,
+                                  answer_html=render_answer_html(REJECTED_MESSAGE), sources=[])
 
         # Approval Workflow: set status to thinking (mitigate "Needs your approval" status display)
         await live_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
@@ -353,13 +356,16 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
         final_state = await asyncio.wait_for(consume_graph(initial_state), timeout=GATEWAY_TURN_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         logger.warning("Turn %s timed out after %ss", body.conversation_id, GATEWAY_TURN_TIMEOUT_SECONDS)
+        timeout_message = "This question took too long to answer. Try narrowing it and asking again."
         return AgentResponse(
-            answer_markdown="This question took too long to answer. Try narrowing it and asking again.",
+            answer_markdown=timeout_message,
+            answer_html=render_answer_html(timeout_message),
             sources=[],
         )
     except Exception:
         logger.exception("Turn %s failed unexpectedly", body.conversation_id)
-        return AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE, sources=[])
+        return AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE,
+                              answer_html=render_answer_html(GENERIC_TURN_ERROR_MESSAGE), sources=[])
 
     if not final_state["needs_approval"] and not final_state["cancelled"]:
         await write_history_messages(

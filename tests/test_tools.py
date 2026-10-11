@@ -2,6 +2,7 @@
 LLM/BigQuery/MCP calls (docs/testing.md).
 """
 import asyncio
+import base64
 import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -74,13 +75,33 @@ async def test_get_measure_dax(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_page_info():
     """PAGES matches the real committed files, and every page returns its
-    own file's exact content."""
+    own file's text plus a base64-encoded screenshot of the same page, with
+    no filter_context affecting anything except Model Performance's chart
+    plot type."""
     assert PAGES == tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
 
     for page_name in PAGES:
-        expected = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
-        result = await get_page_info.coroutine(page_name=page_name)
-        assert result == {"page_name": page_name, "content": expected}
+        expected_text = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
+        expected_image = base64.b64encode((PAGE_INFO_DIR / f"{page_name}.png").read_bytes()).decode()
+        result = await get_page_info.coroutine(page_name=page_name, filter_context=[])
+        assert result == [
+            {"type": "text", "text": f"Page: {page_name}\n\n{expected_text}"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                          "data": expected_image}},
+        ]
+
+    # Beeswarm selected -- Model Performance's image switches; Financial Impact
+    # (and any other filter_context value) is unaffected.
+    beeswarm_context = [{"filter_column": "Feature_Importance_Chart_Types[Chart_Types]", "value": "Beeswarm"}]
+    expected_beeswarm_image = base64.b64encode(
+        (PAGE_INFO_DIR / "Model Performance Beeswarm.png").read_bytes()).decode()
+    result = await get_page_info.coroutine(page_name="Model Performance", filter_context=beeswarm_context)
+    assert result[1] == {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                       "data": expected_beeswarm_image}}
+
+    result = await get_page_info.coroutine(page_name="Financial Impact", filter_context=beeswarm_context)
+    expected_financial_image = base64.b64encode((PAGE_INFO_DIR / "Financial Impact.png").read_bytes()).decode()
+    assert result[1]["source"]["data"] == expected_financial_image
 
 
 # run_bigquery_sql -- the cancellation race (Level 2)

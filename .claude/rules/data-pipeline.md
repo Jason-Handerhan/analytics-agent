@@ -100,6 +100,27 @@ Scanner API for the same dataset — the Scanner API excludes them on its own.
 **HTML-display measures are still excluded** the same way — manual list as
 the mechanism of record, a `<[a-z]` check on the `Expression` text as backstop.
 
+**A numeric parameter's `value_measure` carries its own `description` now,
+2026-10-10** — `measures_full` already holds every measure's description
+before any filtering happens, so capturing it onto the parameter dict is one
+line, no separate lookup. Authored the same way as any other measure
+description, in Power BI; `app/model_schema.py`'s `_render_parameters`
+surfaces it in the rendered `PARAMETERS` block when present, backward
+compatible with a parameter dict that has no `description` key at all.
+
+**`ACTIVE_PAGE_MEASURES` (renamed from `APP_INTEGRATION_MEASURES`,
+2026-10-10) only excludes the two `Active_Page_*` constants now** — purely
+hardcoded per-page strings read via `PowerBIIntegration.Data`, with no
+semantic content beyond what `active_page` already tells the agent directly.
+The `Selected_*` measures that track live dashboard selections (dataset
+split, model choices, evaluation metric, plot type) used to be excluded
+here too, on the same "integration plumbing, not a real measure" reasoning
+— reversed once those selections' descriptions turned out to matter for
+grounding `run_dax_query` and `get_page_info` correctly
+(`.claude/rules/tools.md`, `.claude/rules/orchestrator.md`), independent of
+whichever tool is actually running. They're ordinary measures now, visible
+in `MEASURE_REGISTRY` with their own descriptions, same as any other.
+
 **One open gap, not yet resolved (`docs/data-pipeline.md`):** no confirmed
 source for a what-if parameter's `range` — the Scanner API shows zero
 calculated tables for this dataset, so the old TMDL parser's

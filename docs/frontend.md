@@ -119,9 +119,13 @@ mode. Stripping `Char(13)`/`Char(10)` to spaces before storing or sending
 decouples them: the box wraps visually, but a manually-typed line break
 never becomes semantically meaningful data.
 
-**Store the gateway's HTML, not `answer_markdown`.** Power Apps can't convert
-Markdown, so the conversion happens once in the gateway and the client holds
-what it renders. Re-deriving it client-side isn't an option.
+**Store `AgentResponse.answer_html`, not `answer_markdown` — built,
+2026-10-10/11.** Power Apps can't convert Markdown, so the conversion
+happens once in the gateway (`render_answer_html`, `.claude/rules/gateway.md`)
+and the client holds what it renders. Re-deriving it client-side isn't an
+option. `answer_markdown` is still sent alongside it (debugging/notebook
+value, `.claude/rules/gateway.md`) but the HTML control binds to
+`answer_html` specifically.
 
 ## Conversation state
 
@@ -270,30 +274,57 @@ captured, matching `model_schema.json`'s `parameters[]`:
   add one small `SELECTEDVALUE(column)` measure per slicer and drag that in.
   Blank on multi-select is a real "no single value" signal, not a bug.
 
-**Field parameters are excluded, permanently — not a gap to revisit.** Any
-`SELECTEDVALUE(...)` measure referencing a field-parameter table (e.g.
-`Evaluation Metric Parameter`) throws "This might be caused by a capacity or
-license issue" when added to the visual's Data well — isolated specifically
-to field-parameter tables, not a total-field-count limit; everything else in
-the well is unaffected. No `Selected_*` measures for these exist in the
-model. **Querying the measure directly via `run_dax_query` isn't a
-workaround either:** that call runs under the service principal through a
-stateless `executeQueries` request, with no attachment to any specific
-user's live report session. `SELECTEDVALUE()` reflects the filter context of
-*that query*, never what a separate, already-open report tab currently has
-selected — there's no shared "current user selection" state living in the
-semantic model at all. Which evaluation metric or ensemble combination is
-currently displayed is simply unrecoverable with this architecture.
+**Field parameters needed a different DAX pattern, not permanent exclusion
+— corrected 2026-10-10.** The original symptom still holds exactly as
+found: a bare `SELECTEDVALUE(...)` directly on a field parameter's label
+column throws "This might be caused by a capacity or license issue" when
+added to the visual's Data well, isolated specifically to field-parameter
+tables. What was wrong was the diagnosis, not the symptom — that error is
+about *reading that one column that way*, not about field parameters being
+unreachable from the Data well at all. `LOOKUPVALUE`, keyed off the
+field parameter's working `[... Fields]` column (the one holding
+`NAMEOF(...)` references, which `SELECTEDVALUE` *can* read directly)
+instead of its label column, resolves it cleanly:
+```
+Selected_Evaluation_Metric =
+LOOKUPVALUE(
+    'Evaluation Metric Parameter'[Evaluation Metric Parameter],
+    'Evaluation Metric Parameter'[Parameter Fields],
+    SELECTEDVALUE('Evaluation Metric Parameter'[Parameter Fields])
+)
+```
+Confirmed live — added to the Data well successfully, reads correctly.
+Same fix for `Selected_Ensemble_Weights_Model`. `Selected_Feature_Importance_Plot`
+needed no workaround at all — it's a plain slicer-bound synthetic table, not
+a field parameter, so a bare `SELECTEDVALUE(Feature_Importance_Chart_Types[Chart_Types])`
+just works, same as any dimensional slicer above.
+
+**Querying the measure directly via `run_dax_query` is still not a
+workaround, for an unrelated reason that was never actually wrong:** that
+call runs under the service principal through a stateless `executeQueries`
+request, with no attachment to any specific user's live report session —
+`SELECTEDVALUE()`/`LOOKUPVALUE()` reflect the filter context of *that
+query*, never what a separate, already-open report tab currently has
+selected. The Data well, reading from the live embedded session, is the
+only path that actually sees a specific user's current selection — that
+reasoning holds regardless of which DAX pattern reads the field parameter.
 
 **`filter_context` is a list of `{filter_column, value}` pairs**, reusing
 `model_schema.json`'s `filter_column` naming so the agent can match a
 captured value straight to its parameter:
 ```json
 [
-  {"filter_column": "Conversion Rate[Conversion Rate]", "value": "0.06"},
-  {"filter_column": "dataset_split_dimension[dataset_split]", "value": "Test"}
+  {"filter_column": "Conversion Rate[Conversion Rate]", "value": "0.08"},
+  {"filter_column": "dataset_split_dimension[dataset_split]", "value": "Test"},
+  {"filter_column": "Evaluation Metric Parameter[Evaluation Metric Parameter]", "value": "NDCG@5"},
+  {"filter_column": "Feature_Importance_Chart_Types[Chart_Types]", "value": "Beeswarm"}
 ]
 ```
+The full set, as actually sent, also includes the remaining four numeric
+sliders, `Ensemble Weight Parameter[Ensemble Weight Parameter]`,
+`base_models_dimension[model_name]`, and `models_dimension[Model]` — eleven
+entries in total; not reproduced in full here to avoid drifting out of sync
+with the real `varFilterContext` formula below.
 Every value is sent as text, numeric ones included — a Power Fx `Table()`
 literal mixing numeric and text values in one column errors rather than
 widening silently, so each is `Text(...)`-coerced first. The agent composes
@@ -304,7 +335,41 @@ row, not the record directly.** `filter_context` is `list[dict]` in
 `AskRequest` — a schemaless array — and Power Apps' connector import
 surfaces that as one `Value` column typed `Dynamic`. Power Fx has no literal
 syntax for `Dynamic`, so each row's real filter object is round-tripped
-through `ParseJSON(JSON(...))` to produce one.
+through `ParseJSON(JSON(...))` to produce one. The `{Value: ...}` wrapping
+is purely this client-side `Table()` construction detail — Power Apps'
+connector serialization strips it back down to the plain array shown above
+by the time it reaches the gateway; confirmed directly against the real
+`varFilterContext` variable's value in Power Apps Studio, which still shows
+the wrapper, versus what `AgentState["filter_context"]` actually holds in
+the notebooks (`notebooks/phase3_graph.ipynb`,
+`notebooks/phase3_orchestrator_e2e.ipynb`), which don't.
+
+The real formula, as it stands 2026-10-10 — eleven rows, one per captured
+value:
+```
+Set(
+    varFilterContext,
+    Table(
+        {Value: ParseJSON(JSON({filter_column: "Conversion Rate[Conversion Rate]", value: Text(First(PowerBIIntegration.Data).'Conversion Rate Value')}))},
+        {Value: ParseJSON(JSON({filter_column: "Churn Rate[Churn Rate]", value: Text(First(PowerBIIntegration.Data).'Churn Rate Value')}))},
+        {Value: ParseJSON(JSON({filter_column: "Conversion Lift per 10% Recall[Conversion Lift per 10% Recall]", value: Text(First(PowerBIIntegration.Data).'Conversion Lift per 10% Recall Value')}))},
+        {Value: ParseJSON(JSON({filter_column: "AOV Lift per 10% Recall[AOV Lift per 10% Recall]", value: Text(First(PowerBIIntegration.Data).'AOV Lift per 10% Recall Value')}))},
+        {Value: ParseJSON(JSON({filter_column: "Churn Reduction per 10% Recall[Churn Reduction per 10% Recall]", value: Text(First(PowerBIIntegration.Data).'Churn Reduction per 10% Recall Value')}))},
+        {Value: ParseJSON(JSON({filter_column: "dataset_split_dimension[dataset_split]", value: First(PowerBIIntegration.Data).Selected_Dataset_Split}))},
+        {Value: ParseJSON(JSON({filter_column: "models_dimension[Model]", value: First(PowerBIIntegration.Data).Selected_Model}))},
+        {Value: ParseJSON(JSON({filter_column: "base_models_dimension[model_name]", value: First(PowerBIIntegration.Data).Selected_Base_Model}))},
+        {Value: ParseJSON(JSON({filter_column: "Evaluation Metric Parameter[Evaluation Metric Parameter]", value: First(PowerBIIntegration.Data).Selected_Evaluation_Metric}))},
+        {Value: ParseJSON(JSON({filter_column: "Ensemble Weight Parameter[Ensemble Weight Parameter]", value: First(PowerBIIntegration.Data).Selected_Ensemble_Weights_Model}))},
+        {Value: ParseJSON(JSON({filter_column: "Feature_Importance_Chart_Types[Chart_Types]", value: First(PowerBIIntegration.Data).Selected_Feature_Importance_Plot}))}
+    )
+);
+```
+The last three rows are the field-parameter/plot-type additions above — same
+row shape as everything else, no special-casing needed once the measure
+itself reads correctly. Adding a new captured value is always one more row
+here, matching the pattern, plus the corresponding entry in
+`model_schema.json`'s `parameters[]` (`.claude/rules/data-pipeline.md`) if
+it's a what-if or field parameter.
 
 **`active_page` can't be a measure — DAX has no concept of report pages.**
 Captured instead via one hardcoded constant measure per page (e.g.
@@ -376,7 +441,17 @@ control**, not a plain `Label` (which shows raw Markdown literally).
   in `finalize` (`.claude/rules/orchestrator.md`), not the client, so the
   React rebuild doesn't reimplement it.
 
-### Chart display — open decision, decide before building this out (2026-09-28)
+### Chart display — decided and built, 2026-10-11 (originally an open decision, 2026-09-28)
+
+**Option B won — inline `<img>`, built and live-verified.** `answer_html`
+(`.claude/rules/gateway.md`) is the real, built custom mistune renderer;
+`submit_answer`'s field description already steered the model to embed
+`chart_url` in prose (built earlier, confirmed still working) — both of
+Option B's two "Requires" items below were already satisfied before this
+decision closed, one from this session's work, one from before it.
+`MAX_ANSWER_CHARS` is 7000, as the "If Option B wins" note below called for.
+The rest of this section is kept as the record of the actual decision, not
+rewritten as if B were the only option considered.
 
 **`chart_urls` stays its own field on the message/response, regardless of
 which option below wins.** `colChat`'s row schema (above) and
@@ -455,12 +530,14 @@ platform limit that turned out not to exist.
   visually marked "partial answer" state, not styled like a complete one. The
   prose already says it's partial; the card catches a user skimming.
 - **Fenced code inside `answer_markdown` needs the same monospace treatment
-  — override mistune's code-block renderer, don't rely on default tags.**
-  The agent emits ```` ```python ````/```` ```sql ```` blocks when answering
-  code questions. Default `<pre><code>` output hits the exact failure solved
-  for `pending_query` below: no inline styles, so no monospace and collapsed
-  line breaks. Reuse the same styling — inline `font-family` plus explicit
-  `white-space: pre-wrap`.
+  — built, 2026-10-10/11, not just planned.** The agent emits
+  ```` ```python ````/```` ```sql ```` blocks when answering code questions;
+  `_AnswerRenderer.block_code` (`.claude/rules/gateway.md`) overrides
+  mistune's default `<pre><code>` output (no inline styles, no monospace,
+  collapsed line breaks) with its own inline-styled version — ended up a
+  dark code-block theme (`ANSWER_CODE_BLOCK_BG`, `app/config.py`) rather
+  than matching `pending_query`'s lighter styling below, confirmed live to
+  look better against a white page than reusing the exact same treatment.
 
   Safe to show verbatim: it's this repo's own code, and `CLAUDE.md` forbids
   secrets in code. The answer-length guardrail already bounds it.
@@ -476,9 +553,11 @@ platform limit that turned out not to exist.
   - **`white-space: pre-wrap` must be set explicitly** — without it, a
     multi-line query's line breaks and indentation collapse into one run-on
     line, defeating the entire point of showing it for review.
-  - The control has a **16,384-character total HTML limit.** A single query
-    is nowhere near this alone, but worth remembering if a future addition
-    ever concatenates several long blocks into one response.
+  - **No platform character limit on the control, corrected here too** — this
+    bullet previously repeated the same "16,384-character" figure the
+    answer-length correction above (2026-09-28) already found unconfirmed
+    and removed; missed in that pass, fixed now. `pending_query` has no
+    length cap of its own to worry about beyond ordinary readability.
   - **Verify visually once built** — same "confirm, don't assume" status as
     every other HTML-rendering detail already flagged as unverified for this
     control (open items, component reference).

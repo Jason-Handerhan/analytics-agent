@@ -6,11 +6,26 @@ functions either side of a turn.
 import json
 from datetime import datetime, timezone
 
+import mistune
 from langchain_core.messages import (
     BaseMessage, HumanMessage, ToolMessage, messages_from_dict, messages_to_dict,
 )
 
-from app.config import HISTORY_TURN_COUNT, NUMERIC_SOURCE_TOOLS
+from app.config import (
+    ANSWER_CODE_BLOCK_BG,
+    ANSWER_CODE_BLOCK_TEXT,
+    ANSWER_CODE_FONT_FAMILY,
+    ANSWER_INLINE_CODE_BG,
+    ANSWER_INLINE_CODE_BORDER,
+    ANSWER_INLINE_CODE_TEXT,
+    ANSWER_TABLE_CELL_BORDER,
+    ANSWER_TABLE_CELL_TEXT,
+    ANSWER_TABLE_HEADER_BG,
+    ANSWER_TABLE_HEADER_BORDER,
+    ANSWER_TABLE_HEADER_TEXT,
+    HISTORY_TURN_COUNT,
+    NUMERIC_SOURCE_TOOLS,
+)
 from app.gateway.models import AgentResponse
 from app.orchestrator.shared_helpers import label_chartable_result
 from app.orchestrator.state import AgentState, PendingApproval, ToolCallRecord
@@ -78,10 +93,89 @@ def build_initial_state(
 
 # --- Turn teardown (graph output -> gateway wire format) -------------------
 
+# <style> blocks aren't reliably honored by the Power Apps HTML text
+# control, so every element that needs styling gets it inline instead.
+class _AnswerRenderer(mistune.HTMLRenderer):
+    def image(self, text: str, url: str, title: str | None = None) -> str:
+        src = self.safe_url(url)
+        alt = mistune.util.striptags(text)
+        return f'<img src="{src}" alt="{alt}" style="max-width: 100%;" />'
+
+    def block_code(self, code: str, info: str | None = None) -> str:
+        escaped = mistune.util.escape(code)
+        return (
+            '<pre style="display: inline-block; max-width: 100%; overflow-x: auto; '
+            f'font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: 0.9em; '
+            f'white-space: pre-wrap; background-color: {ANSWER_CODE_BLOCK_BG}; '
+            f'color: {ANSWER_CODE_BLOCK_TEXT}; padding: 12px 16px; border-radius: 6px; '
+            'line-height: 1.5;">'
+            f'<code>{escaped}</code></pre>\n'
+        )
+
+    def codespan(self, text: str) -> str:
+        escaped = mistune.util.escape(text)
+        return (
+            f'<code style="font-family: {ANSWER_CODE_FONT_FAMILY}; '
+            f'background-color: {ANSWER_INLINE_CODE_BG}; border: 1px solid {ANSWER_INLINE_CODE_BORDER}; '
+            f'color: {ANSWER_INLINE_CODE_TEXT}; padding: 2px 5px; '
+            f'border-radius: 3px;">{escaped}</code>'
+        )
+
+
+def _render_table(renderer, text: str) -> str:
+    return f'<table style="border-collapse: collapse; max-width: 100%;">\n{text}</table>\n'
+
+
+def _render_table_head(renderer, text: str) -> str:
+    return f'<thead>\n<tr>\n{text}</tr>\n</thead>\n'
+
+
+def _render_table_body(renderer, text: str) -> str:
+    return f'<tbody>\n{text}</tbody>\n'
+
+
+def _render_table_row(renderer, text: str) -> str:
+    return f'<tr>\n{text}</tr>\n'
+
+
+def _render_table_cell(renderer, text: str, align: str | None = None, head: bool = False) -> str:
+    tag = "th" if head else "td"
+    if head:
+        style = (f"border: 1px solid {ANSWER_TABLE_HEADER_BORDER}; padding: 6px 10px; "
+                  f"color: {ANSWER_TABLE_HEADER_TEXT}; line-height: 1.3; "
+                  f"background-color: {ANSWER_TABLE_HEADER_BG}; font-weight: bold;")
+    else:
+        style = (f"border: 1px solid {ANSWER_TABLE_CELL_BORDER}; padding: 4px 10px; "
+                  f"color: {ANSWER_TABLE_CELL_TEXT}; line-height: 1.3;")
+    if align:
+        style += f" text-align: {align};"
+    return f'  <{tag} style="{style}">{text}</{tag}>\n'
+
+
+# The table plugin registers its own default render functions onto the
+# renderer by name -- registering these again, after create_markdown(),
+# overrides them with the styled versions above. Same plugin used by
+# orchestrator.py's own verification AST parser, for the same markdown shape.
+_answer_markdown = mistune.create_markdown(renderer=_AnswerRenderer(), plugins=["table"])
+_answer_markdown.renderer.register("table", _render_table)
+_answer_markdown.renderer.register("table_head", _render_table_head)
+_answer_markdown.renderer.register("table_body", _render_table_body)
+_answer_markdown.renderer.register("table_row", _render_table_row)
+_answer_markdown.renderer.register("table_cell", _render_table_cell)
+
+
+def render_answer_html(answer_markdown: str) -> str:
+    """Renders answer_markdown to HTML for the Power Apps HTML text control --
+    inline-styled throughout, since the control doesn't reliably honor a
+    <style> block."""
+    return _answer_markdown(answer_markdown)
+
+
 def build_agent_response(state: AgentState) -> AgentResponse:
     """Converts the graph's final state into the gateway's wire format."""
     return AgentResponse(
         answer_markdown=state["answer_markdown"],
+        answer_html=render_answer_html(state["answer_markdown"]),
         sources=state["sources"],
         needs_approval=state["needs_approval"],
         chart_urls=state["chart_urls"],

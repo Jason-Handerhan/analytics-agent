@@ -654,15 +654,40 @@ chase, and `docs/frontend.md` has the client-side handling rule.
 
 ## Returning a response — errors and what the caller gets
 
-**Markdown → HTML via `mistune` with a custom renderer using inline styles** —
-a `<style>` block isn't reliably honored by the Power Apps HTML control.
-**Override the renderer's fenced-code method too, not just prose elements.**
-The agent writes ```` ```python ````/```` ```sql ```` blocks when answering
-code questions; left to default `<pre><code>` tags they'd hit the same
-no-inline-styles failure already solved for `pending_query` — reuse that exact
-styling, inline `font-family` monospace plus explicit `white-space: pre-wrap`.
-Same 16,384-char control limit applies; the answer-length guardrail already
-covers it.
+**`answer_markdown` → `answer_html` via `mistune` with a custom renderer,
+inline-styled throughout — built and live-verified, 2026-10-10/11.** A
+`<style>` block isn't reliably honored by the Power Apps HTML control, so
+every styled element (`image`, `block_code`, `codespan`, and the table
+plugin's five `table`/`table_head`/`table_body`/`table_row`/`table_cell`
+functions, re-`register()`ed after `create_markdown()` to override its
+defaults) builds its style attribute inline.
+`_AnswerRenderer`/`render_answer_html()` live in `app/gateway/entry_exit.py`;
+every color and font value is a named constant in `app/config.py`
+(`ANSWER_CODE_BLOCK_BG`, `ANSWER_TABLE_HEADER_BG`, etc.), not a hardcoded hex
+literal in the renderer — so a future color tweak is a one-line config.py
+edit, and `tests/test_entry_exit.py` asserts against the same constants
+rather than a literal, so it can't silently drift out of sync.
+
+**A new `AgentResponse` field, `answer_html`, not `answer_markdown` converted
+in place.** `answer_markdown` stays exactly as it always was — raw markdown,
+untouched, still what every notebook test and the e2e checks already read
+directly. Rendering the HTML is a separate, local computation at every
+`AgentResponse` construction site — `build_agent_response`
+(`app/gateway/entry_exit.py`) and the four direct `AgentResponse(...)` calls
+inside `gateway.py` itself (the generic-error fallback, the rejected-approval
+branch, the timeout handler, the unexpected-exception handler) — never
+touching `AgentState` or `agent_telemetry`, which both still only ever see
+raw markdown. Power Apps binds its HTML control to `answer_html`; the
+connector needed regenerating regardless of this field, so adding one more
+to it cost nothing extra.
+
+**No platform character limit on the control — confirmed live, not assumed**
+(same finding as `.claude/rules/orchestrator.md`'s answer-length guardrail:
+Power Fx's Text/HTML text properties have no preset character cap; memory is
+the real constraint). `MAX_ANSWER_CHARS` (7000, raised from 6000 once inline
+`<img>` with signed URLs was chosen over a native `Image` control —
+`docs/build-order.md`) is a readability ceiling, not a workaround for a
+control limit that doesn't exist.
 
 **Return a normal `AgentResponse` wherever possible, not an HTTP error.** Power
 Apps has one response-handling path; an HTTP error needs separate UI code for

@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, ToolMessage, messages_from_dict, messages_to_dict
 
-from app.config import HISTORY_TURN_COUNT
+from app.config import (
+    ANSWER_CODE_BLOCK_BG,
+    ANSWER_INLINE_CODE_BG,
+    ANSWER_TABLE_HEADER_BG,
+    HISTORY_TURN_COUNT,
+)
 from app.gateway.entry_exit import (
     PAUSE_REDACTED_MESSAGE,
     STALE_RESULT_MESSAGE,
@@ -76,9 +81,18 @@ def test_build_initial_state():
 
 
 def test_build_agent_response():
-    """Projects final state into AgentResponse; empty vs. non-empty pending_queries."""
+    """Projects final state into AgentResponse; empty vs. non-empty pending_queries;
+    answer_html renders the real custom styling for tables, code, and images."""
+    answer_markdown = (
+        "The answer.\n\n"
+        "| Metric | Value |\n"
+        "|---|---|\n"
+        "| Recall@5 | 0.68 |\n\n"
+        "```python\nprint('hi')\n```\n\n"
+        "Inline `code` here, and a chart: ![chart](https://example.com/chart.png)"
+    )
     base_state = {
-        "answer_markdown": "The answer.",
+        "answer_markdown": answer_markdown,
         "sources": ["Query warehouse"],
         "needs_approval": False,
         "chart_urls": ["https://example.com/chart.png"],
@@ -90,12 +104,21 @@ def test_build_agent_response():
         "largest_pending_query": None,
     }
     response = build_agent_response(base_state)
-    assert response.answer_markdown == "The answer."
+    assert response.answer_markdown == answer_markdown
     assert response.chart_urls == ["https://example.com/chart.png"]
     assert response.suggested_follow_ups == ["What about last quarter?"]
     assert response.pending_query is None
 
-    # Non-empty pending_queries -- the most recently added one
+    # answer_html rendering assertions
+    html = response.answer_html
+    assert "<table" in html and "max-width: 100%" in html
+    assert ANSWER_TABLE_HEADER_BG in html  # table header background, unique to the header cell style
+    assert '<pre style="display: inline-block' in html  # code block shrinks to content width
+    assert ANSWER_CODE_BLOCK_BG in html
+    assert '<code style="font-family:' in html and ANSWER_INLINE_CODE_BG in html
+    assert '<img src="https://example.com/chart.png"' in html and "max-width: 100%" in html
+
+    # Pending Query test (comes from largest pending query)
     with_pending = {**base_state, "largest_pending_query": "SELECT 2", "pending_queries": [
         {"id": "a", "query": "SELECT 1"}, {"id": "b", "query": "SELECT 2"},
     ]}

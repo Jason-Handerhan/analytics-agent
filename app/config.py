@@ -60,7 +60,7 @@ STATUS_MAX_NAMED_SOURCES = 3    # call_tool status names up to this many sources
 # config in the traditional sense, but pure and dependency-free either way.
 NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
-MAX_ANSWER_CHARS = 6000
+MAX_ANSWER_CHARS = 7000
 MAX_ANSWER_TABLE_ROWS = 25  # cap on any single markdown table in an answer -- a display limit, not a fetch limit
 MAX_LENGTH_RETRIES = 2
 MAX_VERIFY_RETRIES = 3
@@ -92,6 +92,21 @@ PENDING_APPROVAL_THRESHOLD = ABSOLUTE_CAP // 2  # batch bytes above this pause f
 # LangSmith tracing
 LANGSMITH_TRACING = "true"
 LANGCHAIN_PROJECT = "analytics-agent"
+
+# answer_html styling -- Power Apps' HTML text control doesn't reliably
+# honor a <style> block, so every styled element in the custom mistune
+# renderer (app/gateway/entry_exit.py) builds its style inline from these.
+ANSWER_CODE_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
+ANSWER_CODE_BLOCK_BG = "#282c34"
+ANSWER_CODE_BLOCK_TEXT = "#e8e8e8"
+ANSWER_INLINE_CODE_BG = "#e3e5e8"
+ANSWER_INLINE_CODE_BORDER = "#c8cbd0"
+ANSWER_INLINE_CODE_TEXT = "#1a1a1a"
+ANSWER_TABLE_HEADER_BG = "#5a6572"
+ANSWER_TABLE_HEADER_BORDER = "#4a5260"
+ANSWER_TABLE_HEADER_TEXT = "#ffffff"
+ANSWER_TABLE_CELL_BORDER = "#ccc"
+ANSWER_TABLE_CELL_TEXT = "#1a1a1a"
 
 
 def get_secret(secret_id: str, project_id: str, version: str = "latest") -> str:

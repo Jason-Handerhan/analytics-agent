@@ -483,6 +483,17 @@
           "description": "Placeholder column — this table exists only to host measures"
         }
       ]
+    },
+    {
+      "name": "Feature_Importance_Chart_Types",
+      "description": null,
+      "columns": [
+        {
+          "name": "Chart_Types",
+          "type": "Text",
+          "description": null
+        }
+      ]
     }
   ],
   "measures": [
@@ -845,6 +856,42 @@
       "name": "Yaxis_max",
       "description": "Upper bound for the waterfall chart's Y-axis, set just above total annual profit",
       "dax": "[Annual_Profit] *1.017"
+    },
+    {
+      "table": "_SelectionMeasures",
+      "name": "Selected_Dataset_Split",
+      "description": "Currently selected dataset split (Test/Validation)",
+      "dax": "SELECTEDVALUE(dataset_split_dimension[dataset_split])"
+    },
+    {
+      "table": "_SelectionMeasures",
+      "name": "Selected_Model",
+      "description": "Current model filter selection on the financial impact page for the Waterfall chart and profit lift share donut chart pop-up.",
+      "dax": "SELECTEDVALUE(models_dimension[Model])"
+    },
+    {
+      "table": "_SelectionMeasures",
+      "name": "Selected_Base_Model",
+      "description": "Current base model filter selection for the feature importance chart on the Model Performance page.",
+      "dax": "SELECTEDVALUE(base_models_dimension[model_name])"
+    },
+    {
+      "table": "_SelectionMeasures",
+      "name": "Selected_Evaluation_Metric",
+      "description": "Which evaluation metric (Recall@5, NDCG@5, Precision@5, or F1@5) is currently selected for the Model Performance page's '[Metric]@5 by Model' chart",
+      "dax": "\nLOOKUPVALUE(\n    'Evaluation Metric Parameter'[Evaluation Metric Parameter],\n    'Evaluation Metric Parameter'[Parameter Fields], SELECTEDVALUE('Evaluation Metric Parameter'[Parameter Fields])\n)\n\n"
+    },
+    {
+      "table": "_SelectionMeasures",
+      "name": "Selected_Ensemble_Weights_Model",
+      "description": "Which model is currently selected for the Model Performance page's Optimal Ensemble Weights pop-up pie chart.",
+      "dax": "\nLOOKUPVALUE(\n    'Ensemble Weight Parameter'[Ensemble Weight Parameter],\n    'Ensemble Weight Parameter'[Ensemble Weight Parameter Fields], SELECTEDVALUE('Ensemble Weight Parameter'[Ensemble Weight Parameter Fields])\n)\n"
+    },
+    {
+      "table": "_SelectionMeasures",
+      "name": "Selected_Feature_Importance_Plot",
+      "description": "Which plot type (Bar Plot or Beeswarm) the Model Performance page's Feature Importance chart is currently showing.",
+      "dax": "SELECTEDVALUE(Feature_Importance_Chart_Types[Chart_Types])"
     }
   ],
   "relationships": [
@@ -934,6 +981,7 @@
       "type": "numeric",
       "filter_column": "Conversion Rate[Conversion Rate]",
       "value_measure": "Conversion Rate Value",
+      "description": "Current conversion-rate assumption: the slider's selected value, or default value if none is set",
       "default": 0.06,
       "range": {
         "min": 0.0,
@@ -945,6 +993,7 @@
       "type": "numeric",
       "filter_column": "Churn Rate[Churn Rate]",
       "value_measure": "Churn Rate Value",
+      "description": "Current churn-rate assumption: the slider's selected value, or default value if none is set",
       "default": 0.39,
       "range": {
         "min": 0.0,
@@ -956,6 +1005,7 @@
       "type": "numeric",
       "filter_column": "Conversion Lift per 10% Recall[Conversion Lift per 10% Recall]",
       "value_measure": "Conversion Lift per 10% Recall Value",
+      "description": "Current conversion-lift assumption: the slider's selected value, or default value if none is set",
       "default": 0.002,
       "range": {
         "min": 0.0,
@@ -967,6 +1017,7 @@
       "type": "numeric",
       "filter_column": "AOV Lift per 10% Recall[AOV Lift per 10% Recall]",
       "value_measure": "AOV Lift per 10% Recall Value",
+      "description": "Current AOV-lift assumption: the slider's selected value, or default value if none is set",
       "default": 0.05,
       "range": {
         "min": 0.0,
@@ -978,6 +1029,7 @@
       "type": "numeric",
       "filter_column": "Churn Reduction per 10% Recall[Churn Reduction per 10% Recall]",
       "value_measure": "Churn Reduction per 10% Recall Value",
+      "description": "Current churn-reduction assumption: the slider's selected value, or default value if none is set",
       "default": 0.005,
       "range": {
         "min": 0.0,

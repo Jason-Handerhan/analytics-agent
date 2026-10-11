@@ -1,0 +1,33 @@
+<html><body style='font-family: sans-serif; padding: 20px;'><h2>Order Volume Heatmap: Day of Week × Hour of Day</h2>
+<p><img src="https://storage.googleapis.com/instacart-ml-model-charts/charts/ade172ff-5f78-4cf4-8b86-ee35f28a22ff.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&amp;X-Goog-Credential=agent-sa%40instacart-ml-model.iam.gserviceaccount.com%2F20261011%2Fauto%2Fstorage%2Fgoog4_request&amp;X-Goog-Date=20261011T162853Z&amp;X-Goog-Expires=3600&amp;X-Goog-SignedHeaders=host&amp;X-Goog-Signature=3afdafedaa898268794ec01e568e2843bd3204d250ecc41f7642a7df658a4b14694ff4a466ae766b389ada1891bf1f695dd38d4f9e82500f46e956ea9d928737f6a301707384fcfc10965e5960f9d2c2910989a02febb7ef2de0c357e41f23d48d17e7b4f25494dc87df739aede0419a2388c7562c3d0af2daceb6ee97abc94caa6967209dad193e4a1a7bd414344fef3404cdacc51fe775a67717794f4438612c5fbfbcc076b3622b1d8b8b31e1f226a59d51c19dd6ecad0e27900a40e9554d5a4b9a5e79ee2e6ae8ced808d6de2950bf6c7c38335f5b08511238c0f9f45e425ede3d82acbffe6b46ff54fd4241d1ff3cd5977b565fcfb8ffdf95d3d44c7449" alt="Order Volume Heatmap" style="max-width: 100%;" /></p>
+<p>This is built from order counts (distinct orders, not order-lines) grouped by <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">order_dow</code> and <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">order_hour_of_day</code> in <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">product_order_analysis</code>. The pattern is clear: order volume is lowest overnight (roughly midnight–6am across every day), ramps up sharply starting around 7–8am, and peaks in the late morning through mid-afternoon (roughly 10am–3pm), with Sunday and Monday showing the heaviest volumes overall.</p>
+<h2>Yes — a similar chart already exists in the codebase</h2>
+<p>The Preliminary EDA notebook (<code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">Notebooks/EDA/preliminary_eda.ipynb</code>) builds essentially the same visualization under the heading &quot;Day of Week &amp; Time of Day Order Density Heatmap,&quot; titled <strong>&quot;Order Density: Day of Week vs Hour of Day.&quot;</strong> It's one of the project's documented key findings — order density peaks Sunday afternoons and Monday mornings — which directly motivated including cyclical/temporal features (day-of-week and time-of-day affinities) in the downstream feature engineering pipeline.</p>
+<p>Here's the actual code from that notebook:</p>
+<pre style="display: inline-block; max-width: 100%; overflow-x: auto; font-family: Consolas, Monaco, 'Courier New', monospace; font-size: 0.9em; white-space: pre-wrap; background-color: #282c34; color: #e8e8e8; padding: 12px 16px; border-radius: 6px; line-height: 1.5;"><code># Get order count by day of week and time of day
+time_bf = bf_orders.groupby(['order_dow', 'order_hour_of_day']).size().reset_index()
+time_bf.columns = ['order_dow', 'order_hour_of_day', 'order_count']
+
+# Convert to pandas and pivot data
+time_pd = time_bf.to_pandas()
+plot_matrix = time_pd.pivot(index='order_hour_of_day', columns='order_dow', values='order_count')
+
+# Fill nulls with 0 and convert to float
+plot_matrix = plot_matrix.fillna(0).astype(float)
+
+# Create list for day of week labels
+day_labels = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+plt.figure(figsize=(12, 8.5))
+sns.heatmap(plot_matrix, cmap='YlGnBu', xticklabels=day_labels, yticklabels=True, cbar_kws={'label': 'Total Orders'})
+plt.title('Order Density: Day of Week vs Hour of Day', fontsize=14, pad=15)
+plt.xlabel('Day of Week', fontsize=12)
+plt.ylabel('Hour of Day (24hr Clock)', fontsize=12)
+
+# Invert the y-axis so it starts with 0
+plt.gca().invert_yaxis()
+
+plt.show()
+</code></pre>
+<p>One difference worth noting: this notebook version uses <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">bf_orders</code> (the raw, BigFrames-loaded <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">orders</code> table, counted via <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">.size()</code> per group — i.e. order-line/order count straight from source) while the chart above was built from the <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">product_order_analysis</code> warehouse table using <code style="font-family: Consolas, Monaco, 'Courier New', monospace; background-color: #e3e5e8; border: 1px solid #c8cbd0; color: #1a1a1a; padding: 2px 5px; border-radius: 3px;">COUNT(DISTINCT order_id)</code>. Both approaches land on the same underlying order-level grain, so the shapes match.</p>
+</body></html>

@@ -157,10 +157,14 @@ than the task needs.
 - Whether aborting an `executeQueries` REST connection stops the server-side
   query (no confirmed REST equivalent to `cancel_job`).
 - Which HTML tags the Power Apps HTML text control renders reliably.
-  **Confirmed it does NOT render `<iframe>`** (tested directly, even with a
-  plain non-Power-BI URL — `docs/frontend.md`); still open for the actual
-  answer-rendering tags this control needs to handle (headers, lists, code
-  blocks, tables).
+  **Confirmed it does NOT render `<iframe>`**, and **does render a plain
+  `<img src="...">`** from an external HTTPS URL (tested directly in Studio
+  — `docs/frontend.md`). The full renderer for the rest (headers, lists,
+  code blocks, tables) is now built — `answer_html`
+  (`.claude/rules/gateway.md`) — and live-verified against a real browser
+  and the real gateway via `notebooks/phase3_gateway_e2e.ipynb`, but **not
+  yet confirmed inside the actual Power Apps control specifically** — still
+  open until that control is actually wired up and checked.
 - Whether `CUSTOMDATA()`/`customData` ever ships on `executeQueries` — absent
   today (Premium/Fabric-only API). Not needed: the model writes the DAX.
 - Prompt-caching minimums are **model-specific and move** — Sonnet is 1,024

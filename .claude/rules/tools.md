@@ -187,7 +187,7 @@ later changes the URL and adds auth headers — not this file.
 | Tool | Purpose | Authority |
 |---|---|---|
 | `search_docs` | Project methodology — the README's approach/evaluation narrative | Authoritative for *intent*, **never** numbers |
-| `get_page_info` | What a Power BI page shows — returns the page-info text **whole**, no search | Authoritative for dashboard content, **never** numbers |
+| `get_page_info` | What a Power BI page shows — returns the page-info text **whole** plus a reference screenshot, no search | Authoritative for dashboard content/layout, **never** numbers |
 | `run_bigquery_sql` | Warehouse numbers | Only authority for raw/warehouse numbers |
 | `run_dax_query` | Semantic-model numbers | Only authority for measure-level numbers |
 | `get_measure_dax` | One measure's DAX body, by exact name | The *how* behind a measure; names come from the registry in static context |
@@ -799,29 +799,94 @@ schema-valid tool call can still carry a wrong value, which is why
 **Not MCP-hosted** (see the hosting table above) — a plain function in
 `app/orchestrator/tools.py`, same category as `get_measure_dax`/`search_docs`.
 
+**Returns a list of content blocks — page text plus a reference screenshot —
+not a bare dict. A real redesign, 2026-10-10, not the original shape:**
+
 ```python
 PAGES = tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
 if not PAGES:
     raise RuntimeError(f"No page-info files found in {PAGE_INFO_DIR}.")
+_missing_page_images = [p for p in PAGES if not (PAGE_INFO_DIR / f"{p}.png").exists()]
+if _missing_page_images:
+    raise RuntimeError(f"Missing page-info screenshot(s) for: {_missing_page_images}.")
+
+# A second, structural image variant -- not part of PAGES (that's derived
+# from the .txt files, one per page), so it needs its own existence check.
+FEATURE_IMPORTANCE_BEESWARM_IMAGE = "Model Performance Beeswarm"
+if not (PAGE_INFO_DIR / f"{FEATURE_IMPORTANCE_BEESWARM_IMAGE}.png").exists():
+    raise RuntimeError(f"Missing page-info screenshot: {FEATURE_IMPORTANCE_BEESWARM_IMAGE}.png")
 
 
 class GetPageInfoArgs(BaseModel):
     page_name: Literal[PAGES]
 
 
+def resolve_image_name(page_name: str, filter_context: list[dict]) -> str:
+    """Picks the PNG matching the page's current structural state, where a
+    structural (not just data) variant exists."""
+    if page_name == "Financial Impact":
+        image_name = page_name
+    elif page_name == "Model Performance":
+        selected_plot = next(
+            (fc["value"] for fc in filter_context
+             if fc.get("filter_column") == "Feature_Importance_Chart_Types[Chart_Types]"),
+            None,
+        )
+        image_name = FEATURE_IMPORTANCE_BEESWARM_IMAGE if selected_plot == "Beeswarm" else page_name
+    return image_name
+
+
 @tool(args_schema=GetPageInfoArgs)
-async def get_page_info(page_name: Literal[PAGES]) -> dict[str, str]:
-    """Whole-page content for one of this dashboard's two pages. Use the
-    page named in "Current dashboard page" for what the user is currently
-    viewing, or the other one if the question is clearly about it instead.
+async def get_page_info(page_name: Literal[PAGES],
+                         filter_context: Annotated[list[dict], InjectedToolArg]) -> list[dict]:
+    """Whole-page content for one of this dashboard's two pages, plus a
+    reference screenshot of its general layout. Use the page named in
+    "Current dashboard page" for what the user is currently viewing, or the
+    other one if the question is clearly about it instead.
+
+    The screenshot is a static reference for layout only -- never a live
+    capture, never a source of numbers, and never to be described to the
+    user as a screenshot or a "default" state. Several charts are also
+    structurally dynamic (which metric, model, or plot type is rendered
+    changes with a slicer or field parameter) -- the real docstring carries
+    one grounding note per such chart, naming the exact filter_context entry
+    to trust over the screenshot. Not reproduced here; read it directly in
+    `app/orchestrator/tools.py` rather than risking drift between two copies.
     """
     content = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
-    return {"page_name": page_name, "content": content}
+    image_name = resolve_image_name(page_name, filter_context)
+    return [
+        {"type": "text", "text": f"Page: {page_name}\n\n{content}"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                      "data": _page_image_base64(image_name)}},
+    ]
 ```
 
+**`filter_context` is injected the same way `run_bigquery_sql` injects
+`conversation_id`** — `Annotated[..., InjectedToolArg]`, supplied manually
+at the call site, not model-visible. `dispatch_other_call`
+(`.claude/rules/orchestrator.md`) gained its own `get_page_info` branch for
+it; this tool previously fell through to the generic
+`ALL_TOOLS[tc["name"]].ainvoke(tc)` case with nothing injected at all.
+
+**Two things verified mechanically before building this, not assumed:**
+a plain `@tool` function (default `response_format`, same as this one) that
+returns a `list[dict]` of content blocks gets that list preserved exactly
+as `ToolMessage.content` — not JSON-encoded the way a bare dict is (below)
+— and LangChain's Anthropic message formatter then converts it into a
+proper `tool_result` with a nested `image` block, matching Anthropic's real
+API shape. Both checked directly against the installed library, no live
+credentials needed for either.
+
 **`PAGES` is derived from `context/page_info/`'s real files, not a hardcoded
-tuple.** Adding a third page is dropping a new `.txt` file there, no code
-change — the `Literal[PAGES]` schema picks it up automatically.
+tuple.** Adding a third page is dropping a new `.txt` *and* `.png` file
+there, no code change for the simple case — both `Literal[PAGES]` and the
+import-time existence checks pick it up automatically. A page with its own
+structural chart variant (like Model Performance's bar/beeswarm toggle)
+needs one more explicit branch in `resolve_image_name` — deliberately no
+catch-all `else`, so a forgotten branch for a future page fails loudly
+(`NameError`) rather than silently defaulting, and the existing Layer 1 test
+loop over `PAGES` catches it immediately.
 
 **Why an enum, not a system-instruction sentence.** The page set is fixed and
 fully enumerable — exactly the condition where a hard schema constraint is
@@ -843,15 +908,20 @@ already in every `HumanMessage` (`.claude/rules/gateway.md`), the model
 reads its own context and supplies `page_name` correctly every time —
 confirmed across both same-page questions (no page named, relying on
 transcription) and cross-page questions (naming the *other* page than the
-one it's on). No injection plumbing, no `dispatch_other_call` special case,
-no optional field.
+one it's on). This is specifically about `active_page` — `filter_context`'s
+injection above is a separate, later addition, for a different reason
+(structural image selection, not page identification).
 
-**Returns a `dict`, not a bare `str` — a real bug, not a style choice.**
-LangChain JSON-encodes a tool's non-string return into the `ToolMessage`
-content automatically, the same as every other tool here; a bare `str`
-return instead passes through as raw, unencoded text, and
-`build_tool_call_record`'s `json.loads(...)` (`.claude/rules/orchestrator.md`)
-fails on it immediately. Confirmed live before shipping.
+**Returns a `dict`-free shape now, for a second reason beyond the original
+one.** The original fix (2026-10-02) was returning a `dict` instead of a
+bare `str`, since LangChain JSON-encodes a non-string return into
+`ToolMessage.content` automatically and a bare `str` passes through
+unencoded, breaking `build_tool_call_record`'s `json.loads(...)`
+(`.claude/rules/orchestrator.md`). The 2026-10-10 redesign moved past dicts
+entirely, to a list of content blocks (above) — `build_tool_call_record` no
+longer assumes every successful tool's content is JSON; it now falls back
+to storing the raw text when `json.loads` fails, specifically because this
+tool's content is prose, not structured data.
 
 **Trade-off:** a third page means a new file, not an enum edit anymore —
 smaller trade-off than `FILE_DESCRIPTIONS`/the HTML-measure exclusion list,

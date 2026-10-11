@@ -310,7 +310,11 @@ def build_tool_call_record(
             started_at=started_at, completed_at=completed_at,
         )
 
-    result = json.loads(_unwrap_content(message.content))
+    try:
+        result = json.loads(_unwrap_content(message.content))
+    except json.JSONDecodeError:
+        # get_page_info's content is now prose, not JSON -- store it as-is.
+        result = _unwrap_content(message.content)
     return ToolCallRecord(
         id=tc["id"], name=tc["name"], args=tc["args"], query_text=query_text, result=result,
         success=True, error=None, ref_id=ref_id, bytes_billed=bytes_billed,
@@ -370,8 +374,12 @@ def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> 
     return BatchResult(records, display_messages, errors, ref_counter)
 
 
-async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord]) -> ToolMessage:
+async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
+                               filter_context: list[dict]) -> ToolMessage:
     """Dispatches one non-BigQuery tool call, injecting hidden args first."""
+    if tc["name"] == "get_page_info":
+        full_args = {**tc, "args": {**tc["args"], "filter_context": filter_context}}
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
     if tc["name"] == "submit_answer":
         # Only reachable when not the sole call this round.
         return ToolMessage(
@@ -672,7 +680,7 @@ async def call_tool_node(state: AgentState) -> dict:
 
     other_started_at = datetime.now(timezone.utc)
     other_messages = await asyncio.gather(*[
-        dispatch_other_call(tc, state["tool_calls"]) for tc in other_calls
+        dispatch_other_call(tc, state["tool_calls"], state["filter_context"]) for tc in other_calls
     ])
     other_completed_at = datetime.now(timezone.utc)
 

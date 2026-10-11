@@ -1,5 +1,6 @@
 """Non-MCP tools: run_bigquery_sql, submit_answer, get_measure_dax, get_page_info, search_docs (.claude/rules/tools.md)."""
 import asyncio
+import base64
 import concurrent.futures
 import logging
 from datetime import date, time
@@ -324,20 +325,91 @@ get_measure_dax.handle_validation_error = lambda e: str(e)
 PAGES = tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
 if not PAGES:
     raise RuntimeError(f"No page-info files found in {PAGE_INFO_DIR}.")
+_missing_page_images = [p for p in PAGES if not (PAGE_INFO_DIR / f"{p}.png").exists()]
+if _missing_page_images:
+    raise RuntimeError(f"Missing page-info screenshot(s) for: {_missing_page_images}.")
+
+# The Feature Importance chart's second structural variant -- not part of
+# PAGES (that's derived from the .txt files, one per page), so it needs its
+# own existence check.
+FEATURE_IMPORTANCE_BEESWARM_IMAGE = "Model Performance Beeswarm"
+if not (PAGE_INFO_DIR / f"{FEATURE_IMPORTANCE_BEESWARM_IMAGE}.png").exists():
+    raise RuntimeError(f"Missing page-info screenshot: {FEATURE_IMPORTANCE_BEESWARM_IMAGE}.png")
 
 
 class GetPageInfoArgs(BaseModel):
     page_name: Literal[PAGES] = Field(description="Which dashboard page to return the content for.")
 
 
+def _page_image_base64(image_name: str) -> str:
+    return base64.b64encode((PAGE_INFO_DIR / f"{image_name}.png").read_bytes()).decode()
+
+
+def resolve_image_name(page_name: str, filter_context: list[dict]) -> str:
+    """Picks the PNG matching the page's current structural state, where a
+    structural (not just data) variant exists."""
+    if page_name == "Financial Impact":
+        image_name = page_name
+    elif page_name == "Model Performance":
+        selected_plot = next(
+            (fc["value"] for fc in filter_context
+             if fc.get("filter_column") == "Feature_Importance_Chart_Types[Chart_Types]"),
+            None,
+        )
+        image_name = FEATURE_IMPORTANCE_BEESWARM_IMAGE if selected_plot == "Beeswarm" else page_name
+    return image_name
+
+
 @tool(args_schema=GetPageInfoArgs)
-async def get_page_info(page_name: Literal[PAGES]) -> dict[str, str]:
-    """Whole-page content for one of this dashboard's two pages. Use the
-    page named in "Current dashboard page" for what the user is currently
-    viewing, or the other one if the question is clearly about it instead.
+async def get_page_info(page_name: Literal[PAGES],
+                         filter_context: Annotated[list[dict], InjectedToolArg]) -> list[dict]:
+    """Whole-page content for one of this dashboard's two pages, plus a
+    reference screenshot of its general layout. Use the page named in
+    "Current dashboard page" for what the user is currently viewing, or the
+    other one if the question is clearly about it instead.
+
+    The screenshot is a static reference for layout only -- it is not a
+    live capture, may not match the dashboard's current filter/selection
+    state, and is never a source of numbers. Never mention the screenshot,
+    the reference layout, or a "default" state to the user -- it's for your
+    own understanding of page structure only. State only the current,
+    filter_context-grounded reality.
+
+    On the Model Performance page: the "Recall@5 by Model" chart's title
+    and metric change with the Evaluation Metric Parameter slicer (Recall@5,
+    NDCG@5, Precision@5, F1@5) -- the screenshot shows one fixed selection.
+    If filter_context includes an "Evaluation Metric Parameter[Evaluation
+    Metric Parameter]" entry, trust that value over the screenshot and
+    describe the chart accordingly (e.g. "NDCG@5 by Model" if NDCG@5 is
+    selected).
+
+    Also on the Model Performance page: the "Feature Importance: Mean
+    Absolute SHAP" chart shows feature importance for whichever base model
+    is currently selected via the Model Selection Slicer (XGBoost Ranker,
+    XGBoost Classifier, LightGBM Ranker, LightGBM Classifier) -- its title
+    stays fixed, but the values shown depend on the selection, and the
+    screenshot reflects only one. If filter_context includes a
+    "base_models_dimension[model_name]" entry, trust that value over the
+    screenshot when stating which model's feature importance is shown.
+
+    That same chart also switches its whole plot type -- a bar chart
+    ("Bar Plot (Mean Absolute SHAP)") or a beeswarm plot ("Beeswarm") --
+    via the Plot Selection Buttons. The screenshot shown here already
+    reflects filter_context's "Feature_Importance_Chart_Types[Chart_Types]"
+    entry when present, so describe whichever plot type is actually shown.
+
+    On the Financial Impact page: the sensitivity sliders (Conversion Rate,
+    Churn Rate, Conversion/AOV/Churn Lift per 10% Recall) and the waterfall
+    chart's model selection come from filter_context, not the screenshot --
+    ground any DAX for this page in those values.
     """
     content = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
-    return {"page_name": page_name, "content": content}
+    image_name = resolve_image_name(page_name, filter_context)
+    return [
+        {"type": "text", "text": f"Page: {page_name}\n\n{content}"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                      "data": _page_image_base64(image_name)}},
+    ]
 
 get_page_info.handle_validation_error = lambda e: str(e)
 

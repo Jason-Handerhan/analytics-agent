@@ -62,9 +62,10 @@ def _render_parameters(parameters: list[dict]) -> str:
     for p in parameters:
         if p["type"] == "numeric":
             r = p["range"]
+            desc = f" -- {p['description']}" if p.get("description") else ""
             lines.append(
                 f"- [numeric, in filter_context] {p['filter_column']} -> value measure: {p['value_measure']}, "
-                f"default {p['default']}, range {r['min']}-{r['max']} step {r['step']}"
+                f"default {p['default']}, range {r['min']}-{r['max']} step {r['step']}{desc}"
             )
         elif p["type"] == "field":
             options = ", ".join(f"{o['label']} = {o['field']}" for o in p["options"])

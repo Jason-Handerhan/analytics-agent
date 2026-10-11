@@ -51,12 +51,9 @@ def unescape_dax_string_literal(expr: str) -> str:
         raise SystemExit(f"Expected a DAX string literal for a page-info measure, got: {expr[:80]!r}")
     return expr[1:-1].replace('""', '"')
 
-# Measures feeding the embedded chat app's integration data, not real
-# analytical measures.
-APP_INTEGRATION_MEASURES = {
-    "Selected_Dataset_Split",
-    "Selected_Model",
-    "Selected_Base_Model",
+# Hardcoded per-page constants read via PowerBIIntegration.Data to tell the
+# agent which page the user is on -- not real analytical measures.
+ACTIVE_PAGE_MEASURES = {
     "Active_Page_ModelEval",
     "Active_Page_FinancialImpact",
 }
@@ -232,6 +229,7 @@ def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict]
                 "type": "numeric",
                 "filter_column": f"{table}[{column}]",
                 "value_measure": m["name"],
+                "description": m["description"],
                 "default": float(default) if default is not None else None,
                 "range": compute_range(headers, table, column),
             })
@@ -254,7 +252,7 @@ def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict]
         {"table": m["table"], "name": m["name"], "description": m["description"], "dax": m["expression"]}
         for m in measures_full
         if m["name"] not in HTML_DISPLAY_MEASURES
-        and m["name"] not in APP_INTEGRATION_MEASURES
+        and m["name"] not in ACTIVE_PAGE_MEASURES
         and m["name"] not in value_measure_names
     ]
 

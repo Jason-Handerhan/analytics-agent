@@ -290,6 +290,16 @@ signal on its own: it also matched two ordinary measures reading a plain data
 column with `SELECTEDVALUE`, unrelated to any parameter. Use the strict form
 for `parameters[]`; treat the broad form as a lead to inspect, not a fact.
 
+**A numeric parameter's `description`, added 2026-10-10, comes from its own
+value measure — no new lookup needed.** `measures_full` (the full Scanner
+API measure list, built before any exclusion happens) already carries every
+measure's `description`, including the value measure's — the parameter-
+building loop iterates `measures_full` directly, so attaching
+`m["description"]` onto the parameter dict is one line. Authored in Power BI
+exactly like any other measure description; renders in the `PARAMETERS`
+static-context block when present, silently absent when not (a parameter
+dict with no `description` key doesn't error).
+
 ### Excluding HTML-display measures from the registry
 
 Some Power BI measures return a rendered HTML/markdown string for a visual
@@ -314,6 +324,26 @@ before anyone updates it.
 
 **Their content isn't lost** — the same page-info HTML lives in
 `context/page_info/`, returned whole by `get_page_info`.
+
+### Excluding `ACTIVE_PAGE_MEASURES` from the registry
+
+Same manual-exclusion-list mechanism as HTML-display measures, for a
+different reason: `Active_Page_ModelEval`/`Active_Page_FinancialImpact` are
+hardcoded per-page string constants, read via `PowerBIIntegration.Data` so
+the embedded app can tell the agent which page the user is on
+(`docs/frontend.md`) — not an analytical measure the model should ever pick
+from `MEASURE_REGISTRY`.
+
+**Renamed from `APP_INTEGRATION_MEASURES` and narrowed, 2026-10-10.** It
+used to also exclude `Selected_Dataset_Split`/`Selected_Model`/
+`Selected_Base_Model` — measures that track live dashboard selections, read
+the same way as the `Active_Page_*` ones — on the same "integration
+plumbing" reasoning. Reversed once those selections turned out to need
+their own descriptions for grounding, independent of which tool is running
+(`.claude/rules/tools.md`'s `get_page_info` section,
+`.claude/rules/orchestrator.md`'s GROUNDING instructions). They're ordinary
+measures now; only the two genuinely content-free `Active_Page_*` constants
+stay excluded.
 
 ### Table count mismatch — resolved
 

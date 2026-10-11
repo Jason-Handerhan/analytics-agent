@@ -38,6 +38,7 @@ class CancelResponse(BaseModel):
 class AgentResponse(BaseModel):
     """The wire format the gateway returns."""
     answer_markdown: str
+    answer_html: str
     sources: list[str]
     needs_approval: bool = False
     chart_urls: list[str] = []
