@@ -812,13 +812,17 @@ Real deviations, all confirmed live:
   directly. `value` is `Text(...)`-coerced on the numeric entries too, since
   a `Table()` literal mixing numeric and text values in one column errors
   ("cannot be converted to a number") rather than widening silently.
-- DAX/the semantic model has no concept of report pages, so `active_page`
-  can't be captured as a measure like everything else. Captured instead via
-  one hardcoded constant measure per page (`Active_Page_ModelEval`,
-  `Active_Page_FinancialImpact`), each dragged into only its own page's Data
-  well; read with `ParseJSON(JSON(First(PowerBIIntegration.Data)))` for
-  duck-typed field access (each page's real `PowerBIIntegration.Data` schema
-  differs) and `Coalesce()` to pick whichever one is actually present.
+- `active_page` was originally captured via one hardcoded constant measure
+  per page (`Active_Page_ModelEval`, `Active_Page_FinancialImpact`), each
+  dragged into only its own page's Data well, read with `Coalesce()` across
+  both. **Superseded, 2026-10-11** — replaced by a single
+  `Active_Page = SELECTEDVALUE(_CurrentPages[Current Page])` measure against
+  a disconnected page-name table with a page-level filter per report page,
+  shared identically across both page placements (`docs/data-pipeline.md`,
+  `docs/frontend.md`) — dropped before the frontend rebuild reused the old
+  two-measure design, over an untested risk that `PowerBIIntegration.Data`
+  might cache across two placements of the same app with different
+  per-page Data-well measures.
 - `varFilterContext`/`varActivePage` are computed fresh in `btnSend.OnSelect`,
   not `App.OnStart` — `OnStart` runs once at launch and would otherwise
   freeze a stale snapshot for the rest of the session.

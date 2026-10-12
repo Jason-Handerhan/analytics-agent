@@ -494,6 +494,17 @@
           "description": null
         }
       ]
+    },
+    {
+      "name": "_CurrentPages",
+      "description": null,
+      "columns": [
+        {
+          "name": "Current Page",
+          "type": "Text",
+          "description": null
+        }
+      ]
     }
   ],
   "measures": [
@@ -892,6 +903,12 @@
       "name": "Selected_Feature_Importance_Plot",
       "description": "Which plot type (Bar Plot or Beeswarm) the Model Performance page's Feature Importance chart is currently showing.",
       "dax": "SELECTEDVALUE(Feature_Importance_Chart_Types[Chart_Types])"
+    },
+    {
+      "table": "_SelectionMeasures",
+      "name": "Active_Page",
+      "description": "Page the user is currently looking at.",
+      "dax": "SELECTEDVALUE(_CurrentPages[Current Page])"
     }
   ],
   "relationships": [

@@ -108,18 +108,24 @@ description, in Power BI; `app/model_schema.py`'s `_render_parameters`
 surfaces it in the rendered `PARAMETERS` block when present, backward
 compatible with a parameter dict that has no `description` key at all.
 
-**`ACTIVE_PAGE_MEASURES` (renamed from `APP_INTEGRATION_MEASURES`,
-2026-10-10) only excludes the two `Active_Page_*` constants now** — purely
-hardcoded per-page strings read via `PowerBIIntegration.Data`, with no
-semantic content beyond what `active_page` already tells the agent directly.
-The `Selected_*` measures that track live dashboard selections (dataset
-split, model choices, evaluation metric, plot type) used to be excluded
-here too, on the same "integration plumbing, not a real measure" reasoning
-— reversed once those selections' descriptions turned out to matter for
+**`ACTIVE_PAGE_MEASURES` is gone entirely, 2026-10-11** (previously renamed
+from `APP_INTEGRATION_MEASURES`, narrowed to just the two `Active_Page_*`
+hardcoded per-page constants, 2026-10-10 — then removed outright once those
+two measures were deleted from the semantic model). They were replaced by a
+single real measure, `Active_Page = SELECTEDVALUE(_CurrentPages[Current
+Page])` against a disconnected page-name table with a page-level filter per
+report page — one measure, one Data-well config shared across both page
+placements, instead of two hardcoded constants requiring per-placement
+Data-well differences that risked `PowerBIIntegration.Data` caching
+incorrectly across them (`docs/data-pipeline.md` has the full reasoning).
+`Active_Page` needs no exclusion — it's an ordinary measure in
+`MEASURE_REGISTRY` with its own description, same treatment as the
+`Selected_*` dashboard-selection measures (dataset split, model choices,
+evaluation metric, plot type), which were already reversed out of this
+exclusion list earlier for the same reason: their descriptions matter for
 grounding `run_dax_query` and `get_page_info` correctly
 (`.claude/rules/tools.md`, `.claude/rules/orchestrator.md`), independent of
-whichever tool is actually running. They're ordinary measures now, visible
-in `MEASURE_REGISTRY` with their own descriptions, same as any other.
+whichever tool is actually running.
 
 **One open gap, not yet resolved (`docs/data-pipeline.md`):** no confirmed
 source for a what-if parameter's `range` — the Scanner API shows zero

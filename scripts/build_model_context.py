@@ -51,13 +51,6 @@ def unescape_dax_string_literal(expr: str) -> str:
         raise SystemExit(f"Expected a DAX string literal for a page-info measure, got: {expr[:80]!r}")
     return expr[1:-1].replace('""', '"')
 
-# Hardcoded per-page constants read via PowerBIIntegration.Data to tell the
-# agent which page the user is on -- not real analytical measures.
-ACTIVE_PAGE_MEASURES = {
-    "Active_Page_ModelEval",
-    "Active_Page_FinancialImpact",
-}
-
 SELECTEDVALUE_RE = re.compile(r"SELECTEDVALUE\(\s*'([^']+)'\[([^\]]+)\](?:\s*,\s*(.+?))?\s*\)")
 
 # Field parameters -- a 'Table'[Column] reference column instead of a
@@ -252,7 +245,6 @@ def build_measures_and_parameters(headers: dict) -> tuple[list[dict], list[dict]
         {"table": m["table"], "name": m["name"], "description": m["description"], "dax": m["expression"]}
         for m in measures_full
         if m["name"] not in HTML_DISPLAY_MEASURES
-        and m["name"] not in ACTIVE_PAGE_MEASURES
         and m["name"] not in value_measure_names
     ]
 

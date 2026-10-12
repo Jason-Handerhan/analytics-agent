@@ -371,24 +371,34 @@ here, matching the pattern, plus the corresponding entry in
 `model_schema.json`'s `parameters[]` (`.claude/rules/data-pipeline.md`) if
 it's a what-if or field parameter.
 
-**`active_page` can't be a measure — DAX has no concept of report pages.**
-Captured instead via one hardcoded constant measure per page (e.g.
-`Active_Page_ModelEval = "Model_Evaluation"`), each dragged into only that
-page's own Data well. Read with duck-typed field access, since each page's
-real `PowerBIIntegration.Data` schema differs:
-```
-Set(
-    varActivePage,
-    With(
-        {raw: ParseJSON(JSON(First(PowerBIIntegration.Data)))},
-        Coalesce(Text(raw.Active_Page_ModelEval), Text(raw.Active_Page_FinancialImpact))
-    )
-);
-```
-`Coalesce()` treats blank and empty string alike, so whichever page's measure
-is actually present wins. `active_page` is its own request field, not part of
-`filter_context` — a page name isn't filterable; filters describe the *data*,
-the active page describes what the user is *looking at*.
+**`active_page` design replaced, 2026-10-11 — this used to say "DAX has no
+concept of report pages," which turned out wrong, not a permanent
+constraint.** The
+original approach (one hardcoded constant measure per page, e.g.
+`Active_Page_ModelEval = "Model_Evaluation"`, each dragged into only that
+page's own Data well, read back with a `Coalesce()` across both) was dropped
+before being built into the new app — live-untested risk that
+`PowerBIIntegration.Data` might cache across two placements of the *same*
+app configured with different per-page Data-well measures, discovered
+during frontend planning, not worth building around blind.
+
+**Real fix: a disconnected `_CurrentPages[Current Page]` table plus a
+page-level filter per report page, and one ordinary measure** —
+`Active_Page = SELECTEDVALUE(_CurrentPages[Current Page])`
+(`docs/data-pipeline.md`). DAX filter context resolves it correctly per page
+the same way it already does for ordinary slicers, so both page placements
+use the identical measure and Data-well configuration — no `Coalesce()`
+across two field names needed, since there's only ever the one. `active_page`
+stays its own request field, not part of `filter_context` — a page name
+isn't filterable; filters describe the *data*, the active page describes
+what the user is *looking at*.
+
+**The exact Power Fx read of this measure isn't written up yet** — the app
+rebuild this change is part of (new embedded app, flexible-height gallery,
+see the planning conversation this decision came from) hadn't reached that
+step as of this edit. The `varFilterContext`/`varActivePage` formulas above
+and below reflect the *previous* app and are expected to be substantially
+rewritten once the new one is built, not just this one field.
 
 **Computed in `btnSend.OnSelect`, not `App.OnStart`.** `OnStart` runs once at
 launch; capturing there would freeze a stale snapshot for the rest of the

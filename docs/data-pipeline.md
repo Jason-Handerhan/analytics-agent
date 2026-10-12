@@ -325,25 +325,35 @@ before anyone updates it.
 **Their content isn't lost** — the same page-info HTML lives in
 `context/page_info/`, returned whole by `get_page_info`.
 
-### Excluding `ACTIVE_PAGE_MEASURES` from the registry
+### Active page tracking — redesigned, no longer an exclusion case at all
 
-Same manual-exclusion-list mechanism as HTML-display measures, for a
-different reason: `Active_Page_ModelEval`/`Active_Page_FinancialImpact` are
-hardcoded per-page string constants, read via `PowerBIIntegration.Data` so
-the embedded app can tell the agent which page the user is on
-(`docs/frontend.md`) — not an analytical measure the model should ever pick
-from `MEASURE_REGISTRY`.
+**`ACTIVE_PAGE_MEASURES` is gone entirely, 2026-10-11** — not narrowed
+further, removed. The two hardcoded per-page string constants it used to
+exclude (`Active_Page_ModelEval`/`Active_Page_FinancialImpact`, one dragged
+into the Data well on each report page so the embedded app could infer
+which page it was placed on) were dropped from a real, live-discovered
+problem: with two placements of the *same* app, each configured with a
+different Data-well measure, it was unclear whether
+`PowerBIIntegration.Data` would reliably distinguish the two rather than
+caching across placements — untested and risky to build a frontend around.
 
-**Renamed from `APP_INTEGRATION_MEASURES` and narrowed, 2026-10-10.** It
-used to also exclude `Selected_Dataset_Split`/`Selected_Model`/
-`Selected_Base_Model` — measures that track live dashboard selections, read
-the same way as the `Active_Page_*` ones — on the same "integration
-plumbing" reasoning. Reversed once those selections turned out to need
-their own descriptions for grounding, independent of which tool is running
-(`.claude/rules/tools.md`'s `get_page_info` section,
-`.claude/rules/orchestrator.md`'s GROUNDING instructions). They're ordinary
-measures now; only the two genuinely content-free `Active_Page_*` constants
-stay excluded.
+**Replaced with one real measure, the same pattern as the `Selected_*`
+dashboard-state measures.** A disconnected `_CurrentPages[Current Page]`
+table (one row per real page name) plus a page-level filter on each report
+page restricting it to that page's row, and a single measure:
+`Active_Page = SELECTEDVALUE(_CurrentPages[Current Page])`. Filter context
+resolves it correctly per page the same way it already does for ordinary
+slicers flowing into the Data well — no per-placement Data-well difference
+left to cache incorrectly, since both placements use the identical
+measure and configuration.
+
+`Active_Page` needs no exclusion from `MEASURE_REGISTRY` at all — it carries
+a real description ("Page the user is currently looking at.") and is
+treated exactly like `Selected_Feature_Importance_Plot` or any other
+dashboard-selection measure, which is also why the renamed/narrowed
+`ACTIVE_PAGE_MEASURES` (previously `APP_INTEGRATION_MEASURES`, 2026-10-10)
+no longer has any reason to exist — it only ever excluded the two
+now-deleted hardcoded constants.
 
 ### Table count mismatch — resolved
 
