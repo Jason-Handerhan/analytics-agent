@@ -235,8 +235,13 @@ async def test_finalize_node_message_selection(monkeypatch):
     assert cancelled_and_unverified["answer_markdown"] == orchestrator.CANCELLED_MESSAGE
 
     monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
-    pending = await finalize_node({**base, "needs_approval": True})
-    assert pending["answer_markdown"] == orchestrator.PENDING_APPROVAL_MESSAGE
+    pending = await finalize_node({
+        **base, "needs_approval": True,
+        "estimated_cost": "$1.25", "largest_pending_query": "SELECT * FROM big_table",
+    })
+    assert pending["answer_markdown"].startswith(orchestrator.PENDING_APPROVAL_MESSAGE)
+    assert "$1.25" in pending["answer_markdown"]
+    assert "```sql\nSELECT * FROM big_table\n```" in pending["answer_markdown"]
 
 
 # Iteration cap guardrail

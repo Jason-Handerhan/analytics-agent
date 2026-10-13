@@ -16,6 +16,7 @@ from app.config import (
     ANSWER_CODE_BLOCK_BG,
     ANSWER_CODE_BLOCK_TEXT,
     ANSWER_CODE_FONT_FAMILY,
+    ANSWER_CODE_FONT_SIZE,
     ANSWER_FONT_FAMILY,
     ANSWER_HEADING_FONT_SIZE,
     ANSWER_INLINE_CODE_BG,
@@ -113,6 +114,10 @@ class _AnswerRenderer(mistune.HTMLRenderer):
         id_attr = f' id="{mistune.util.escape(heading_id)}"' if heading_id else ""
         return f'<{tag}{id_attr} style="{style}">{text}</{tag}>\n'
 
+    def list_item(self, text: str) -> str:
+        return (f'<li style="font-family: {ANSWER_FONT_FAMILY}; '
+                f'font-size: {ANSWER_BODY_FONT_SIZE};">{text}</li>\n')
+
     def image(self, text: str, url: str, title: str | None = None) -> str:
         src = self.safe_url(url)
         alt = mistune.util.striptags(text)
@@ -122,7 +127,7 @@ class _AnswerRenderer(mistune.HTMLRenderer):
         escaped = mistune.util.escape(code)
         return (
             '<pre style="display: inline-block; max-width: 100%; overflow-x: auto; '
-            f'font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: 0.9em; '
+            f'font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: {ANSWER_CODE_FONT_SIZE}; '
             f'white-space: pre-wrap; background-color: {ANSWER_CODE_BLOCK_BG}; '
             f'color: {ANSWER_CODE_BLOCK_TEXT}; padding: 12px 16px; border-radius: 6px; '
             'line-height: 1.5;">'
@@ -132,7 +137,7 @@ class _AnswerRenderer(mistune.HTMLRenderer):
     def codespan(self, text: str) -> str:
         escaped = mistune.util.escape(text)
         return (
-            f'<code style="font-family: {ANSWER_CODE_FONT_FAMILY}; '
+            f'<code style="font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: {ANSWER_CODE_FONT_SIZE}; '
             f'background-color: {ANSWER_INLINE_CODE_BG}; border: 1px solid {ANSWER_INLINE_CODE_BORDER}; '
             f'color: {ANSWER_INLINE_CODE_TEXT}; padding: 2px 5px; '
             f'border-radius: 3px;">{escaped}</code>'

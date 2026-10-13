@@ -85,6 +85,13 @@ FILE_DESCRIPTIONS: dict[str, str] = {}
 # Tools whose result gets a ref_id, resolvable by generate_chart/combine_results.
 CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
+# finalize_node's canned messages -- one per terminal state with no real answer yet.
+VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
+                                 "question. Please try rephrasing or asking again.")
+PENDING_APPROVAL_MESSAGE = ("This question requires running a large query. "
+                            "Approve or reject it to continue.")
+CANCELLED_MESSAGE = "This turn was cancelled."
+
 
 async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
     """Populates MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE,
@@ -555,13 +562,6 @@ def claim_matches_pool(claim: float, pool: set[float]) -> bool:
     return any(_matches(v) or _matches(v * 100) for v in pool)
 
 
-VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
-                                 "question. Please try rephrasing or asking again.")
-PENDING_APPROVAL_MESSAGE = ("This question requires running a large query. "
-                            "Approve or reject it to continue.")
-CANCELLED_MESSAGE = "This turn was cancelled."
-
-
 # finalize_node: token/source tallying for the telemetry row
 
 # Past-tense badges, no tool jargon -- reader is field-operations staff.
@@ -813,18 +813,27 @@ async def finalize_node(state: AgentState) -> dict:
     answer_markdown yet; a cancelled turn keeps a real answer only if
     verify_node already confirmed it this turn."""
     cancelled = await is_cancelled(state["conversation_id"])
-    # A cancelled turn no longer needs approval -- cancelled overrides it everywhere.
+
+    #Set needs_approval to false if cancelled. Cancelled takes priority over approval workflow.
     needs_approval = False if cancelled else state["needs_approval"]
+
+    #Cancelled Branch: Return answer if there is already a verified answer -- cancel message otherwise
     if cancelled:
-        # Only show a real answer if verify_node already confirmed it this turn --
-        # otherwise a cancel arriving right after submit_answer, before verify_node
-        # runs, would display an unverified answer_markdown. Checked before
-        # needs_approval -- a cancel request should win over a fresh pause.
         answer_markdown = state["answer_markdown"] if state["verified"] else CANCELLED_MESSAGE
+        
+    #Approval Branch: Build approval message for answer markdown
     elif needs_approval:
-        answer_markdown = PENDING_APPROVAL_MESSAGE
+        answer_markdown = (
+            f"{PENDING_APPROVAL_MESSAGE}\n\n"
+            f"Estimated cost: {state['estimated_cost']}\n\n"
+            f"```sql\n{state['largest_pending_query']}\n```"
+        )
+
+    #Verification failure branch
     elif not state["verified"]:
         answer_markdown = VERIFICATION_FAILURE_MESSAGE
+
+    #Normal turn branch
     else:
         answer_markdown = state["answer_markdown"]
 

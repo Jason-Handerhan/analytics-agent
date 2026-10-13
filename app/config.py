@@ -97,10 +97,16 @@ LANGCHAIN_PROJECT = "analytics-agent"
 # honor a <style> block, so every styled element in the custom mistune
 # renderer (app/gateway/entry_exit.py) builds its style inline from these.
 ANSWER_FONT_FAMILY = "Segoe UI, sans-serif"
-ANSWER_BODY_FONT_SIZE = "18px"
-ANSWER_HEADING_FONT_SIZE = "24px"
-ANSWER_SUBHEADING_FONT_SIZE = "20px"
-ANSWER_TABLE_FONT_SIZE = "18px"
+# Power Apps' Size property is in points, not pixels -- these are the
+# pixel equivalents of the point sizes tuned against native Power Apps
+# Labels (1pt ~= 1.33px), not independently chosen pixel values.
+ANSWER_BODY_FONT_SIZE = "24px"
+ANSWER_HEADING_FONT_SIZE = "32px"
+ANSWER_SUBHEADING_FONT_SIZE = "27px"
+ANSWER_CODE_FONT_SIZE = "22px"  # ~90% of body, explicit rather than a
+                                # relative 0.9em -- inheritance isn't
+                                # reliable in the Power Apps HTML control
+ANSWER_TABLE_FONT_SIZE = "24px"
 ANSWER_CODE_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
 ANSWER_CODE_BLOCK_BG = "#282c34"
 ANSWER_CODE_BLOCK_TEXT = "#e8e8e8"
