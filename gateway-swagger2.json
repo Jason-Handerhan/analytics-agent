@@ -116,7 +116,16 @@
       "required": ["status", "thinking_log"],
       "properties": {
         "status": { "type": "string" },
-        "thinking_log": { "type": "array", "items": { "type": "object" } }
+        "thinking_log": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "seq": { "type": "integer" },
+              "text": { "type": "string" }
+            }
+          }
+        }
       }
     },
     "CancelResponse": {

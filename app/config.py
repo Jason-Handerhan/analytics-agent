@@ -96,6 +96,11 @@ LANGCHAIN_PROJECT = "analytics-agent"
 # answer_html styling -- Power Apps' HTML text control doesn't reliably
 # honor a <style> block, so every styled element in the custom mistune
 # renderer (app/gateway/entry_exit.py) builds its style inline from these.
+ANSWER_FONT_FAMILY = "Segoe UI, sans-serif"
+ANSWER_BODY_FONT_SIZE = "18px"
+ANSWER_HEADING_FONT_SIZE = "24px"
+ANSWER_SUBHEADING_FONT_SIZE = "20px"
+ANSWER_TABLE_FONT_SIZE = "18px"
 ANSWER_CODE_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
 ANSWER_CODE_BLOCK_BG = "#282c34"
 ANSWER_CODE_BLOCK_TEXT = "#e8e8e8"

@@ -12,14 +12,19 @@ from langchain_core.messages import (
 )
 
 from app.config import (
+    ANSWER_BODY_FONT_SIZE,
     ANSWER_CODE_BLOCK_BG,
     ANSWER_CODE_BLOCK_TEXT,
     ANSWER_CODE_FONT_FAMILY,
+    ANSWER_FONT_FAMILY,
+    ANSWER_HEADING_FONT_SIZE,
     ANSWER_INLINE_CODE_BG,
     ANSWER_INLINE_CODE_BORDER,
     ANSWER_INLINE_CODE_TEXT,
+    ANSWER_SUBHEADING_FONT_SIZE,
     ANSWER_TABLE_CELL_BORDER,
     ANSWER_TABLE_CELL_TEXT,
+    ANSWER_TABLE_FONT_SIZE,
     ANSWER_TABLE_HEADER_BG,
     ANSWER_TABLE_HEADER_BORDER,
     ANSWER_TABLE_HEADER_TEXT,
@@ -96,6 +101,18 @@ def build_initial_state(
 # <style> blocks aren't reliably honored by the Power Apps HTML text
 # control, so every element that needs styling gets it inline instead.
 class _AnswerRenderer(mistune.HTMLRenderer):
+    def paragraph(self, text: str) -> str:
+        return (f'<p style="font-family: {ANSWER_FONT_FAMILY}; '
+                f'font-size: {ANSWER_BODY_FONT_SIZE};">{text}</p>\n')
+
+    def heading(self, text: str, level: int, **attrs) -> str:
+        tag = f"h{level}"
+        size = ANSWER_HEADING_FONT_SIZE if level <= 2 else ANSWER_SUBHEADING_FONT_SIZE
+        style = f"font-family: {ANSWER_FONT_FAMILY}; font-size: {size};"
+        heading_id = attrs.get("id")
+        id_attr = f' id="{mistune.util.escape(heading_id)}"' if heading_id else ""
+        return f'<{tag}{id_attr} style="{style}">{text}</{tag}>\n'
+
     def image(self, text: str, url: str, title: str | None = None) -> str:
         src = self.safe_url(url)
         alt = mistune.util.striptags(text)
@@ -140,12 +157,13 @@ def _render_table_row(renderer, text: str) -> str:
 
 def _render_table_cell(renderer, text: str, align: str | None = None, head: bool = False) -> str:
     tag = "th" if head else "td"
+    font = f"font-family: {ANSWER_FONT_FAMILY}; font-size: {ANSWER_TABLE_FONT_SIZE}; "
     if head:
-        style = (f"border: 1px solid {ANSWER_TABLE_HEADER_BORDER}; padding: 6px 10px; "
+        style = (font + f"border: 1px solid {ANSWER_TABLE_HEADER_BORDER}; padding: 6px 10px; "
                   f"color: {ANSWER_TABLE_HEADER_TEXT}; line-height: 1.3; "
                   f"background-color: {ANSWER_TABLE_HEADER_BG}; font-weight: bold;")
     else:
-        style = (f"border: 1px solid {ANSWER_TABLE_CELL_BORDER}; padding: 4px 10px; "
+        style = (font + f"border: 1px solid {ANSWER_TABLE_CELL_BORDER}; padding: 4px 10px; "
                   f"color: {ANSWER_TABLE_CELL_TEXT}; line-height: 1.3;")
     if align:
         style += f" text-align: {align};"
