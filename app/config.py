@@ -30,6 +30,19 @@ AGENT_SAFE_DATASET = "agent_safe"
 TELEMETRY_DATASET = "telemetry"
 TELEMETRY_TABLE = "agent_telemetry"
 
+# agent_chat_history -- restorable past conversations, not analytics
+# (agent_telemetry is the audit/judge-facing table; this is serving data)
+CHAT_HISTORY_DATASET = "agent_chat_history"
+CHAT_HISTORY_TABLE = "turns"
+CONVERSATION_LIST_LIMIT = 50   # GET /conversations -- most recent N, not unbounded
+CONVERSATION_TITLE_MAX_CHARS = 60  # truncation length for a conversation's title
+
+# Both telemetry and chat-history writes go through this identity, reached
+# only via impersonation -- agent-sa has no direct grant on either dataset,
+# so run_bigquery_sql can't reach them even though it shares agent-sa's
+# identity (local-dev-environment-setup.md).
+TURN_WRITER_SA_EMAIL = "turn-writer-sa@instacart-ml-model.iam.gserviceaccount.com"
+
 # vector_db (search_docs, reached only via vector-search-sa impersonation --
 # agent-sa has no grant on this dataset)
 VECTOR_DB_DATASET = "vector_db"

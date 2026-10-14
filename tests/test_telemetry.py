@@ -21,7 +21,7 @@ async def test_write_telemetry_row_success(monkeypatch, clarifying_question, exp
     """Builds a full row, inserts it, and checks its JSON/native-type shape."""
     fake_client = MagicMock()
     fake_client.insert_rows.return_value = []
-    monkeypatch.setattr(writer, "get_bq_client", lambda: fake_client)
+    monkeypatch.setattr(writer, "get_turn_writer_client", lambda: fake_client)
 
     row = writer.build_telemetry_row(
         conversation_id="conv-123",

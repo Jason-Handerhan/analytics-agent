@@ -1,17 +1,10 @@
 import asyncio
 import json
 from datetime import datetime
-from functools import lru_cache
-
-from google.cloud import bigquery
 
 from app.config import GCP_PROJECT_ID, TELEMETRY_DATASET, TELEMETRY_TABLE
+from app.orchestrator.shared_helpers import get_turn_writer_client
 from app.telemetry.schema import SCHEMA
-
-
-@lru_cache
-def get_bq_client() -> bigquery.Client:
-    return bigquery.Client(project=GCP_PROJECT_ID)
 
 
 def _serialize_tool_call(tc: dict) -> dict:
@@ -117,4 +110,4 @@ def build_telemetry_row(
 async def write_telemetry_row(row: dict) -> list:
     """Writes a telemetry row to BigQuery."""
     table_ref = f"{GCP_PROJECT_ID}.{TELEMETRY_DATASET}.{TELEMETRY_TABLE}"
-    return await asyncio.to_thread(get_bq_client().insert_rows, table_ref, [row], selected_fields=SCHEMA)
+    return await asyncio.to_thread(get_turn_writer_client().insert_rows, table_ref, [row], selected_fields=SCHEMA)

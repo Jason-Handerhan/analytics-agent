@@ -5,6 +5,7 @@ paths:
   - 'tests/test_gateway.py'
   - 'tests/test_static_context.py'
   - 'tests/test_entry_exit.py'
+  - 'tests/test_chat_history.py'
 ---
 
 # Gateway: auth, API surface, response formatting

@@ -368,7 +368,9 @@ actually catch the click.
 
 **Send itself is also disabled while waiting** (`DisplayMode.Disabled`
 driven by `varWaitingForAnswer`) — belt-and-suspenders alongside the Cancel
-overlay physically covering it.
+overlay physically covering it. **Also disabled while *any* row has an
+unresolved approval card showing** — not just while a turn is actively in
+flight. See "Approval workflow," below, for why and the exact formula.
 
 ## Approval workflow
 
@@ -434,25 +436,71 @@ decision is made, independent of whether the new turn has resolved yet.
 server-side; resending them would be silently ignored, not harmful, just
 dead weight.
 
+**Send and New Chat are both disabled while any row has `NeedsApproval:
+true`** — deliberately forcing a response rather than letting the user
+abandon or route around an unresolved card. Not a second piece of state:
+derived directly from `colChat` itself, so it can't drift out of sync with
+what's actually showing:
+```
+DisplayMode: If(varWaitingForAnswer Or CountRows(Filter(colChat, NeedsApproval)) > 0, DisplayMode.Disabled, DisplayMode.Edit)
+```
+Cancel doesn't need this — it's already hidden in this state (`Visible:
+varWaitingForAnswer`), since there's nothing in flight to cancel once a
+pause has landed.
+
+**This isn't primarily a UX nicety — `live_turns` has no TTL
+(`.claude/rules/orchestrator.md`), so an abandoned pause is a genuine,
+permanent Firestore orphan if nothing ever touches that `conversation_id`
+again.** Traced through the real code: a normal question skips the
+approval-resume branch entirely (gated on `approval_decision is not None`),
+so it doesn't explicitly clean up a stale pause — but `consume_graph`'s own
+end-of-turn write does it as a side effect either way: a normal completion
+`delete()`s the whole document, and pausing again does a **non-merged**
+`set()` that replaces it outright. So *any* later turn in that same
+conversation cleans up the stale one — the orphan only becomes permanent if
+the user closes the app mid-pause and never returns to that exact
+conversation again. With Send/New Chat both locked while a card is showing,
+that's now hard to do from *within* a live session — the realistic path is
+closing the app entirely.
+
+**Decided: no TTL/scheduled cleanup for this.** Considered and rejected —
+the scenario that actually leaves a permanent orphan is narrow (close
+mid-pause, and never return to that specific conversation, and if restored
+from history, never send another message in it), and a leftover Firestore
+document costs nothing meaningful. Keeping the option to resume open
+indefinitely is a property worth having, not a gap to close.
+
+**What chat history restoration *does* need, instead of a TTL: a live check
+against `live_turns` at restore time, not blind trust of the historical
+table's frozen `needs_approval` value either direction.** A row's value at
+write time could be stale by the time it's restored (resolved in a later
+session, or — in principle — still genuinely pending). On restoring a
+conversation, look up `live_turns/{conversation_id}` live: if a real
+`pending_approval` still exists there, show that row's card as actually
+actionable; if not, render it as a frozen historical message with no
+buttons. See "Chat history," below — this is listed there as part of the
+restore design, not solved by anything in the main write/restore flow
+itself.
+
 **The enriched pending-approval message (cost + query) is built entirely on
 the backend, inside `finalize_node`'s `needs_approval` branch** — appended
 to `answer_markdown` as a fenced SQL block, then rendered through the same
 `answer_html` pipeline as any other answer. No separate frontend display
 work needed for it; `htmlAgentResponse` just shows it like any other answer.
 
-**A real, known cosmetic bug, understood but not yet fixed:** clicking
-Approve/Reject can briefly show the *previous* turn's leftover thinking-log
-text on the new row. Root cause, confirmed by reading the real code: not a
-Firestore race (the backend's reject path deletes `live_turns` immediately,
-and the pause-time write already drops `thinking_log` from the document via
-a full, non-merged replace) — it's `varCurrentThinkingLog`, a local
-variable, only getting overwritten when the polling Timer actually ticks.
-Reject resolves fast enough that the Timer's first ~1s tick often never
-fires before the response returns, so the final `UpdateIf` builds the new
-row from whatever was still sitting in that variable from the *original*
-turn's last real poll. Fix identified, not yet applied: clear
-`varCurrentThinkingLog` locally at the top of Approve/Reject's `OnSelect`
-(`Set(varCurrentThinkingLog, Blank())`), before anything else.
+**A real cosmetic bug, fixed, 2026-10-14:** clicking Approve/Reject could
+briefly show the *previous* turn's leftover thinking-log text on the new
+row. Root cause, confirmed by reading the real code: not a Firestore race
+(the backend's reject path deletes `live_turns` immediately, and the
+pause-time write already drops `thinking_log` from the document via a full,
+non-merged replace) — it's `varCurrentThinkingLog`, a local variable, only
+getting overwritten when the polling Timer actually ticks. Reject resolves
+fast enough that the Timer's first ~1s tick often never fires before the
+response returns, so the final `UpdateIf` built the new row from whatever
+was still sitting in that variable from the *original* turn's last real
+poll. Fixed by clearing `varCurrentThinkingLog` locally at the top of
+Approve/Reject's `OnSelect` (`Set(varCurrentThinkingLog, Blank())`), before
+anything else.
 
 ## Icons
 
@@ -618,9 +666,24 @@ even in the new table, so this is a known, accepted gap, not an oversight.
 The existing `Visible` formula on that row already hides itself on empty
 content, so this needs no special-casing.
 
+**`NeedsApproval` is hardcoded `false` above, and that's deliberately
+incomplete — see "Approval workflow"'s restore-time note, above, for the
+real design.** A row restored with `needs_approval: true` at its original
+write time shouldn't automatically get a live, clickable card just because
+the historical table says so — the pause could already be resolved from a
+later session, or (with no TTL, by design) could genuinely still be live.
+The restore loop needs an extra, live lookup against
+`live_turns/{conversation_id}` per conversation being restored (not per
+row): if a real `pending_approval` is still there, that turn's row should
+get `NeedsApproval: true` instead of the hardcoded `false` above, making its
+card genuinely actionable; otherwise `false` is correct as shown. Not yet
+built — the `ForAll`/`Collect` shape above is the easy 90%, this lookup is
+the real remaining piece.
+
 **Still open:** the IAM grant for `agent-sa` to write the new table (new
 dataset, scoped narrowly — ask before assuming the dataset name or location,
-per `CLAUDE.md`), and the picker UI itself (an icon toggling a small Gallery
-bound to `GET /conversations`, each row's `OnSelect` triggering the restore
+per `CLAUDE.md`), the `live_turns` live-check on restore described just
+above, and the picker UI itself (an icon toggling a small Gallery bound to
+`GET /conversations`, each row's `OnSelect` triggering the restore
 above) — not yet built, same control patterns as everything else in this
 doc.

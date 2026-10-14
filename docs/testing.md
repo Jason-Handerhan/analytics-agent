@@ -188,6 +188,43 @@ def test_get_ask_status_returns_live_progress(...)
 client is built. The `consume_graph` test asserts every write in order, including the final
 delete, so the status sequence and the cleanup are both covered.
 
+## 4c. Conversation history (`agent_chat_history`) — write path, readers, title truncation
+
+Distinct from §4's `sessions.history_messages` (short-term prompt context) —
+this is the separate, durable `agent_chat_history.turns` table backing
+`GET /conversations`/`GET /conversations/{id}/history`
+(`docs/frontend.md`'s "Chat history" section).
+
+```python
+# tests/test_chat_history.py
+def test_truncate_title(question, expected):
+    """Parametrized: under the limit passes through unchanged; a trailing
+    word straddling the cutoff is dropped whole, not kept half-formed; a
+    single token with no space at all falls back to the hard cut."""
+
+async def test_write_turn_row_success():
+    """Builds a full row, inserts it, checks the turn_data JSON blob's shape --
+    same pattern as telemetry's own write test (§7)."""
+
+async def test_list_conversations_passes_params_and_maps_rows():
+    """Right query parameters (user_id, limit), right dict-to-ConversationSummary
+    mapping. The SQL's own correctness (grouping/ordering) is Layer 2 --
+    notebooks/test_chat_history_endpoints.ipynb."""
+
+async def test_get_conversation_history_passes_params_and_decodes_rows():
+    """Right conversation_id parameter, and the JSON-decode-into-ConversationTurn
+    step -- catches turn_data/ConversationTurn field drift between the write
+    and read sides."""
+```
+
+The two new endpoints themselves (`get_conversations`,
+`get_conversation_history_endpoint`) are deliberately not unit-tested, same
+reasoning as `fetch_history_messages`/`write_history_messages` above: both
+are thin composition of already-independently-tested pieces (auth covered
+generically; `assert_owns_conversation` has its own test), with no real
+logic of their own to exercise behind a mock. Proven live instead, in
+`notebooks/test_chat_history_endpoints.ipynb`.
+
 ## 5. Every tool works, called through the MCP server
 
 Two different things — a tool can be a correct function and still never get

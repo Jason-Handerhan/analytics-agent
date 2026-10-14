@@ -1,7 +1,16 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, model_validator
 
+
+# --- POST /conversation -----------------------------------------------------
+
+class ConversationResponse(BaseModel):
+    conversation_id: str
+
+
+# --- POST /ask ---------------------------------------------------------------
 
 class AskRequest(BaseModel):
     question: str = ""
@@ -20,21 +29,6 @@ class AskRequest(BaseModel):
         return self
 
 
-class ConversationResponse(BaseModel):
-    conversation_id: str
-
-
-class StatusResponse(BaseModel):
-    """Live progress for a turn in flight. status is None when no turn is running."""
-    status: str | None
-    thinking_log: list[dict]
-
-
-class CancelResponse(BaseModel):
-    """Confirms the flag was written -- not that the turn has actually stopped."""
-    cancel_requested: bool
-
-
 class AgentResponse(BaseModel):
     """The wire format the gateway returns."""
     answer_markdown: str
@@ -47,3 +41,46 @@ class AgentResponse(BaseModel):
     pending_query: str | None = None
     estimated_cost: str | None = None
     cost_cap_exceeded: bool = False
+
+
+# --- GET /ask/status/{conversation_id} ---------------------------------------
+
+class StatusResponse(BaseModel):
+    """Live progress for a turn in flight. status is None when no turn is running."""
+    status: str | None
+    thinking_log: list[dict]
+
+
+# --- POST /ask/cancel/{conversation_id} ---------------------------------------
+
+class CancelResponse(BaseModel):
+    """Confirms the flag was written -- not that the turn has actually stopped."""
+    cancel_requested: bool
+
+
+# --- GET /conversations -------------------------------------------------------
+
+class ConversationSummary(BaseModel):
+    """One row in GET /conversations -- title is the truncated first question."""
+    conversation_id: str
+    title: str
+    last_activity_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    conversations: list[ConversationSummary]
+
+
+# --- GET /conversations/{conversation_id}/history ------------------------------
+
+class ConversationTurn(BaseModel):
+    """One turn in GET /conversations/{id}/history -- shaped to match colChat."""
+    question: str
+    answer_html: str
+    sources: list[str]
+    suggested_follow_ups: list[str]
+    needs_approval: bool
+
+
+class ConversationHistoryResponse(BaseModel):
+    turns: list[ConversationTurn]

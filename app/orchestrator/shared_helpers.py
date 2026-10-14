@@ -3,10 +3,12 @@ potential future refactoring of the gateway into a separate service.
 """
 from functools import lru_cache
 
-from google.cloud import firestore
+import google.auth
+import google.auth.impersonated_credentials
+from google.cloud import bigquery, firestore
 from langchain_core.messages import ToolMessage
 
-from app.config import GCP_PROJECT_ID
+from app.config import GCP_PROJECT_ID, TURN_WRITER_SA_EMAIL
 
 
 # Not a module-level global: constructing this eagerly at import time means
@@ -15,6 +17,23 @@ from app.config import GCP_PROJECT_ID
 def get_firestore_client() -> firestore.AsyncClient:
     """Lazy, cached Firestore client."""
     return firestore.AsyncClient(project=GCP_PROJECT_ID)
+
+
+@lru_cache
+def get_turn_writer_client() -> bigquery.Client:
+    """BigQuery client impersonating turn-writer-sa -- the only identity with
+    access to telemetry/agent_chat_history; agent-sa itself has no direct
+    grant on either, so run_bigquery_sql can't reach them. Shared by both
+    datasets' writers and readers -- one impersonated identity, one client
+    getter."""
+    source_credentials, _ = google.auth.default()
+    impersonated = google.auth.impersonated_credentials.Credentials(
+        source_credentials=source_credentials,
+        target_principal=TURN_WRITER_SA_EMAIL,
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        lifetime=300,
+    )
+    return bigquery.Client(project=GCP_PROJECT_ID, credentials=impersonated)
 
 
 def live_turn_doc(conversation_id: str):

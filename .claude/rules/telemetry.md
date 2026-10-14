@@ -80,6 +80,20 @@ in-flight background write freezes silently and is lost if the instance scales
 to zero. No error, no log entry. A streaming insert is <100ms against 5–15s
 turns; awaiting it is a rounding error.
 
+**`get_bq_client()` impersonates `turn-writer-sa`, not bare ADC — corrected
+2026-10-13, not the original design.** `run_bigquery_sql` runs as `agent-sa`
+too, and this project deliberately has no tool-layer table allow-list
+(`.claude/rules/tools.md`) — IAM is the only real boundary. A bare
+`bigquery.Client()` here would have meant `agent-sa`'s own write grant on
+`telemetry` was reachable by the *model's own* `run_bigquery_sql` tool, not
+just this writer — a composed query could, in principle, have written to or
+deleted from the audit table itself. Same impersonation-split pattern
+`search_docs` already uses for `vector-search-sa`
+(`local-dev-environment-setup.md` has the full IAM setup); `agent-sa` holds
+no direct grant on `telemetry` at all now. `app/gateway/chat_history/writer.py`
+shares the same identity, since it's the same category of risk for the same
+reason.
+
 ## Schema — define fully now, populate over time
 
 Create the table with every field up front rather than migrating piecemeal.

@@ -672,6 +672,73 @@ instead of failing on a missing API you then have to go enable and re-run.
    `scripts/build_vector_db.py` running as **you**, so neither service account
    needs write access — but `vector-search-sa` still reads
    `staging.embedding_model` on every search, hence the grant above.
+
+   **`telemetry` and `agent_chat_history` need write access, but not from
+   `agent-sa` directly — a dedicated identity, `turn-writer-sa`, same
+   impersonation-split pattern as `vector-search-sa` above.** First built
+   with a direct `agent-sa` grant on both datasets; corrected before
+   shipping once it became clear what that actually meant: `run_bigquery_sql`
+   runs as `agent-sa` too, and this project deliberately has no tool-layer
+   table allow-list (`.claude/rules/tools.md`) — IAM is the only real
+   boundary. A direct grant on `agent-sa` would have been reachable by the
+   *model's own* `run_bigquery_sql` tool, not just the gateway's own writer
+   code — a composed query could, in principle, have written to or deleted
+   from either table the same way it can already query `agent_safe`. This
+   had been true for `telemetry` since that table was first built (its
+   grant existed, just undocumented) and only got caught when
+   `agent_chat_history` forced actually tracing through the mechanism.
+   ```bash
+   gcloud iam service-accounts create turn-writer-sa \
+     --display-name="Turn Writer (telemetry + chat history only)"
+
+   # agent-sa may mint short-lived tokens AS turn-writer-sa. Without this,
+   # impersonation fails at runtime, not at deploy -- confirmed live, same
+   # failure mode as vector-search-sa's equivalent grant above.
+   gcloud iam service-accounts add-iam-policy-binding \
+     turn-writer-sa@YOUR_PROJECT.iam.gserviceaccount.com \
+     --member="serviceAccount:agent-sa@YOUR_PROJECT.iam.gserviceaccount.com" \
+     --role="roles/iam.serviceAccountTokenCreator"
+
+   # Needs its own jobUser to run any query/insert at all -- not implied by
+   # the dataset-level grant below, confirmed the hard way.
+   gcloud projects add-iam-policy-binding YOUR_PROJECT \
+     --member="serviceAccount:turn-writer-sa@YOUR_PROJECT.iam.gserviceaccount.com" \
+     --role="roles/bigquery.jobUser"
+   ```
+   **The dataset-level grant has to go through the BigQuery Console, not the
+   CLI** — `bq add-iam-policy-binding` hit *"This feature requires
+   allowlisting"* for this project (2026-10-13), even though the identical
+   command pattern is what's shown working for `agent_safe`/`vector_db`
+   above. Console path: **console.cloud.google.com/bigquery** (not the
+   general IAM & Admin page — that only grants project-level roles, no
+   per-dataset scoping at all) → the dataset → **Sharing** →
+   **Permissions** → **Add Principal** →
+   `turn-writer-sa@YOUR_PROJECT.iam.gserviceaccount.com`, role **BigQuery
+   Data Editor**. Repeat for both `telemetry` and `agent_chat_history`.
+
+   **Then remove `agent-sa`'s own direct grant on both datasets** — same
+   Console path, select `agent-sa`'s `BigQuery Data Editor` row, **Remove
+   agent-sa from the role BigQuery Data Editor on this resource** (not "all
+   roles" — the narrower, precise option). This is the step that actually
+   closes the gap; adding `turn-writer-sa` alone is additive, not a
+   replacement, until `agent-sa` no longer has its own path in.
+
+   **To test either writer locally** (not deployed), your own account also
+   needs impersonation permission on `turn-writer-sa` — `google.auth.default()`
+   resolves to *you* when running outside Cloud Run, same reasoning as
+   `vector-search-sa`'s local-testing grant further down this doc:
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding \
+     turn-writer-sa@YOUR_PROJECT.iam.gserviceaccount.com \
+     --member="user:YOUR_EMAIL" \
+     --role="roles/iam.serviceAccountTokenCreator"
+   ```
+   Confirmed live, 2026-10-13 — both `app/telemetry/writer.py`'s and
+   `app/gateway/chat_history/writer.py`'s `get_bq_client()` impersonate
+   `turn-writer-sa` (`TURN_WRITER_SA_EMAIL`, `app/config.py`), mirroring
+   `get_vector_search_client()`'s exact shape
+   (`app/orchestrator/tools.py`) — a real insert against
+   `agent_chat_history.turns` succeeded end to end with this setup.
    **Also one-time, for the embedding model** (`docs/data-pipeline.md`): a
    BigQuery→Vertex connection, plus `roles/aiplatform.user` on *that
    connection's* auto-created service account — a separate identity from

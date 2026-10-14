@@ -81,6 +81,10 @@ def auth_headers(make_token):
 
 def _patch_gateway(monkeypatch):
     monkeypatch.setattr(gateway, "get_gateway_api_key", lambda: "expected-key")
+    # write_chat_history runs on every /ask response, outside the graph --
+    # not covered by _FakeGraph/_ScriptedGraph the way write_telemetry_row
+    # is (that one's inside a real node, which the fakes never execute).
+    monkeypatch.setattr(gateway, "write_chat_history", AsyncMock())
 
 
 class _ScriptedGraph:
@@ -222,6 +226,14 @@ def test_post_ask_success(monkeypatch, patch_jwks, auth_headers):
     assert [method for method, _ in live.writes] == ["set", "delete"]
     assert session.writes[0][1]["last_activity_at"] > datetime.now(timezone.utc) + timedelta(
         days=SESSIONS_TTL_DAYS - 1)
+
+    # A normal turn's chat-history row uses the real question text, not a
+    # canned "Approved"/"Rejected" label.
+    gateway.write_chat_history.assert_awaited_once()
+    history_args = gateway.write_chat_history.await_args.args
+    assert history_args[0] == "some-id"
+    assert history_args[2] == "How many orders last week?"
+    assert history_args[3].answer_markdown == "There were 551,399 orders."
 
 
 def test_question_too_long_rejected(monkeypatch, patch_jwks, auth_headers):
@@ -386,6 +398,12 @@ def test_post_ask_resume_approved_seeds_state(monkeypatch, patch_jwks, auth_head
     assert seeded["approval_decision"] == "approved"
     assert seeded["messages"][-1].content == "How many orders?"
 
+    # The chat-history row gets the "Approved" label, not the original
+    # question re-read from seeded state -- the real bug this guards
+    # against: final_state["question"] is still the original question text
+    # for an approved resume, not "Approved".
+    assert gateway.write_chat_history.await_args.args[2] == "Approved"
+
 
 def test_post_ask_resume_rejected_returns_message(monkeypatch, patch_jwks, auth_headers):
     """Rejecting a pending approval returns the canned message -- no graph run."""
@@ -393,6 +411,7 @@ def test_post_ask_resume_rejected_returns_message(monkeypatch, patch_jwks, auth_
     pending = _fake_pending_approval()
     _, live = _patch_docs(monkeypatch, live=_Doc({"pending_approval": pending}))
     monkeypatch.setattr(gateway, "write_telemetry_row", AsyncMock())
+    monkeypatch.setattr(gateway, "init_orchestrator", AsyncMock())
 
     resp = client.post(
         "/ask", headers=auth_headers,
@@ -402,6 +421,7 @@ def test_post_ask_resume_rejected_returns_message(monkeypatch, patch_jwks, auth_
     assert resp.status_code == 200
     assert resp.json()["answer_markdown"] == gateway.REJECTED_MESSAGE
     assert live.writes == [("delete", None)]
+    assert gateway.write_chat_history.await_args.args[2] == "Rejected"
 
 
 NEEDS_APPROVAL_FINALIZE_CHUNK = {"type": "updates", "data": {"finalize": {"needs_approval": True}}}

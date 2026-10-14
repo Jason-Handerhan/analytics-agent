@@ -73,6 +73,37 @@
           }
         }
       }
+    },
+    "/conversations": {
+      "get": {
+        "summary": "List past conversations for the calling user",
+        "operationId": "GetConversations",
+        "parameters": [
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/ConversationListResponse" }
+          }
+        }
+      }
+    },
+    "/conversations/{conversation_id}/history": {
+      "get": {
+        "summary": "Every turn for one conversation, oldest first",
+        "operationId": "GetConversationHistory",
+        "parameters": [
+          { "name": "conversation_id", "in": "path", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/ConversationHistoryResponse" }
+          }
+        }
+      }
     }
   },
   "definitions": {
@@ -133,6 +164,40 @@
       "required": ["cancel_requested"],
       "properties": {
         "cancel_requested": { "type": "boolean" }
+      }
+    },
+    "ConversationSummary": {
+      "type": "object",
+      "required": ["conversation_id", "title", "last_activity_at"],
+      "properties": {
+        "conversation_id": { "type": "string" },
+        "title": { "type": "string" },
+        "last_activity_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ConversationListResponse": {
+      "type": "object",
+      "required": ["conversations"],
+      "properties": {
+        "conversations": { "type": "array", "items": { "$ref": "#/definitions/ConversationSummary" } }
+      }
+    },
+    "ConversationTurn": {
+      "type": "object",
+      "required": ["question", "answer_html", "sources", "suggested_follow_ups", "needs_approval"],
+      "properties": {
+        "question": { "type": "string" },
+        "answer_html": { "type": "string" },
+        "sources": { "type": "array", "items": { "type": "string" } },
+        "suggested_follow_ups": { "type": "array", "items": { "type": "string" } },
+        "needs_approval": { "type": "boolean" }
+      }
+    },
+    "ConversationHistoryResponse": {
+      "type": "object",
+      "required": ["turns"],
+      "properties": {
+        "turns": { "type": "array", "items": { "$ref": "#/definitions/ConversationTurn" } }
       }
     }
   }

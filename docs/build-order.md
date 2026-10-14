@@ -16,12 +16,20 @@ turn timer), the cancel button, and the full approval-workflow UI
 (approve/reject buttons, the backend's "new turn per resolution, not an
 in-place resume" design worked through and built to match) are all live
 and verified against real turns. `docs/frontend.md` has the full rebuilt
-architecture. One known, understood-but-unfixed cosmetic bug remains (a
-stale thinking-log display on a fast reject, `docs/frontend.md`'s
-"Approval workflow" section has the root cause and the identified fix).
-Chat history (a new BigQuery table + two new endpoints + a conversation
-picker) is scoped but not yet built — `docs/frontend.md`'s "Chat history"
-section has the full design. Gateway redeployed and
+architecture. The one known cosmetic bug (a stale thinking-log display on a
+fast reject) is fixed, 2026-10-14 — `docs/frontend.md`'s "Approval
+workflow" section has the root cause and the fix.
+Chat history's backend is built and live-verified, 2026-10-14: the
+`agent_chat_history.turns` table, the unconditional write in `post_ask`
+(`write_chat_history`), and both read endpoints (`GET /conversations`,
+`GET /conversations/{id}/history`), all behind the `turn-writer-sa`
+impersonation shared with telemetry (`get_turn_writer_client` in
+`app/orchestrator/shared_helpers.py`) — confirmed via
+`notebooks/test_chat_history_endpoints.ipynb`, including the
+`assert_owns_conversation` 404 case. Still open: the
+`gateway-swagger2.json`/connector refresh for the two new endpoints, and the
+frontend conversation-picker UI — `docs/frontend.md`'s "Chat history"
+section has the full design for both. Gateway redeployed and
 `gateway-swagger2.json`/the live connector refreshed to the current 4-endpoint
 contract, 2026-10-11 — all four operations re-verified live through the
 Power Apps connector (Phase 1 item 4's entry below has the details), so

@@ -29,10 +29,20 @@ from app.gateway.entry_exit import (
     rebuild_paused_messages,
     render_answer_html,
 )
-from app.gateway.models import AgentResponse, AskRequest, CancelResponse, ConversationResponse, StatusResponse
+from app.gateway.chat_history.reader import get_conversation_history, list_conversations
+from app.gateway.models import (
+    AgentResponse,
+    AskRequest,
+    CancelResponse,
+    ConversationHistoryResponse,
+    ConversationListResponse,
+    ConversationResponse,
+    StatusResponse,
+)
 from app.orchestrator.orchestrator import graph, init_orchestrator
 from app.orchestrator.shared_helpers import get_firestore_client, live_turn_doc
 from app.orchestrator.state import AgentState
+from app.gateway.chat_history.writer import build_turn_row, write_turn_row
 from app.telemetry.writer import build_telemetry_row, write_telemetry_row
 
 logger = logging.getLogger(__name__)
@@ -209,46 +219,7 @@ async def read_live_status(conversation_id: str) -> StatusResponse:
     return StatusResponse(status=data.get("status"), thinking_log=data.get("thinking_log", []))
 
 
-# --- Turn execution --------------------------------------------------------
-
-async def consume_graph(initial_state: AgentState) -> AgentState:
-    """Streams the graph, writing status and thinking to live_turns as each node finishes."""
-    live_turns_doc = live_turn_doc(initial_state["conversation_id"])
-    await live_turns_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
-    final_state = None
-    seq = 0
-    last_mark = time.monotonic()
-    try:
-        async for chunk in graph.astream(
-            initial_state, stream_mode=["updates", "values"], version="v2"
-        ):
-            # Keep the latest full state for the response and history.
-            if chunk["type"] == "values":
-                final_state = chunk["data"]
-                continue
-            # The node that just finished, and what it returned.
-            node, update = next(iter(chunk["data"].items()))
-            if node == "agent":
-                seq = await log_thinking(live_turns_doc, update, seq)
-            status = get_node_status(node, update)
-            # Skip the write for nodes with no status.
-            if status is None:
-                continue
-            now = time.monotonic()
-            await live_turns_doc.update({"status": f"{status} ({now - last_mark:.1f}s)"})
-            last_mark = now
-    finally:
-        # Replace live turns doc with pending approval if needs approval,
-        # otherwise delete the live turns doc. Cancelled wins over needs_approval.
-        if final_state is not None and final_state["needs_approval"] and not final_state["cancelled"]:
-            await live_turns_doc.set({
-                "status": "Approval workflow",
-                "pending_approval": build_pending_approval(final_state),
-            })
-        else:
-            await live_turns_doc.delete()
-    return final_state
-
+# --- Recording completed turns (telemetry, chat history) ------------------
 
 async def write_rejected_telemetry(conversation_id: str, user_id: str, pending: dict) -> None:
     """Minimal telemetry row for a rejected approval -- no graph run,
@@ -289,6 +260,59 @@ async def write_rejected_telemetry(conversation_id: str, user_id: str, pending: 
         clarifying_question="",
     )
     await write_telemetry_row(row)
+
+
+async def write_chat_history(conversation_id: str, user_id: str, question: str, response: AgentResponse) -> None:
+    """Writes one agent_chat_history.turns row -- called once per /ask
+    response regardless of which branch in run_agent_turn produced it."""
+    row = build_turn_row(
+        conversation_id=conversation_id, user_id=user_id, question=question,
+        completed_at=datetime.now(timezone.utc), answer_html=response.answer_html,
+        sources=response.sources, suggested_follow_ups=response.suggested_follow_ups,
+        needs_approval=response.needs_approval,
+    )
+    await write_turn_row(row)
+
+
+# --- Turn execution --------------------------------------------------------
+
+async def consume_graph(initial_state: AgentState) -> AgentState:
+    """Streams the graph, writing status and thinking to live_turns as each node finishes."""
+    live_turns_doc = live_turn_doc(initial_state["conversation_id"])
+    await live_turns_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
+    final_state = None
+    seq = 0
+    last_mark = time.monotonic()
+    try:
+        async for chunk in graph.astream(
+            initial_state, stream_mode=["updates", "values"], version="v2"
+        ):
+            # Keep the latest full state for the response and history.
+            if chunk["type"] == "values":
+                final_state = chunk["data"]
+                continue
+            # The node that just finished, and what it returned.
+            node, update = next(iter(chunk["data"].items()))
+            if node == "agent":
+                seq = await log_thinking(live_turns_doc, update, seq)
+            status = get_node_status(node, update)
+            # Skip the write for nodes with no status.
+            if status is None:
+                continue
+            now = time.monotonic()
+            await live_turns_doc.update({"status": f"{status} ({now - last_mark:.1f}s)"})
+            last_mark = now
+    finally:
+        # Replace live turns doc with pending approval if needs approval,
+        # otherwise delete the live turns doc. Cancelled wins over needs_approval.
+        if final_state is not None and final_state["needs_approval"] and not final_state["cancelled"]:
+            await live_turns_doc.set({
+                "status": "Approval workflow",
+                "pending_approval": build_pending_approval(final_state),
+            })
+        else:
+            await live_turns_doc.delete()
+    return final_state
 
 
 async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
@@ -394,7 +418,14 @@ async def post_ask(
     await assert_owns_conversation(body.conversation_id, claims)
     if len(body.question) > MAX_QUESTION_CHARS:
         raise HTTPException(400, "Question too long -- please shorten it.")
-    return await run_agent_turn(body, claims["oid"])
+    response = await run_agent_turn(body, claims["oid"])
+    chat_history_question = (
+        "Approved" if body.approval_decision == "approved"
+        else "Rejected" if body.approval_decision == "rejected"
+        else body.question
+    )
+    await write_chat_history(body.conversation_id, claims["oid"], chat_history_question, response)
+    return response
 
 
 @app.get("/ask/status/{conversation_id}", response_model=StatusResponse)
@@ -419,3 +450,24 @@ async def post_ask_cancel(
     await assert_owns_conversation(conversation_id, claims)
     await live_turn_doc(conversation_id).set({"cancel_requested": True}, merge=True)
     return CancelResponse(cancel_requested=True)
+
+
+@app.get("/conversations", response_model=ConversationListResponse)
+async def get_conversations(authorization: str = Header(...), x_api_key: str = Header(...)):
+    """This user's past conversations, most recent first. No conversation_id
+    is supplied by the caller, thus no ownership check --
+    the query itself is scoped to user id"""
+    validate_api_key(x_api_key)
+    claims = await asyncio.to_thread(validate_entra_token, authorization)
+    return ConversationListResponse(conversations=await list_conversations(claims["oid"]))
+
+
+@app.get("/conversations/{conversation_id}/history", response_model=ConversationHistoryResponse)
+async def get_conversation_history_endpoint(
+    conversation_id: str, authorization: str = Header(...), x_api_key: str = Header(...)
+):
+    """Every turn for one conversation, oldest first -- restores colChat."""
+    validate_api_key(x_api_key)
+    claims = await asyncio.to_thread(validate_entra_token, authorization)
+    await assert_owns_conversation(conversation_id, claims)
+    return ConversationHistoryResponse(turns=await get_conversation_history(conversation_id))
