@@ -4,10 +4,24 @@
 
 **Phase 3 complete** (items 1-15, see the entries below) — **Phase 4 in
 progress: item 1 (visual grounding) built and live-verified, 2026-10-10;
-item 2's backend half (`answer_html` rendering) built and live-verified,
-2026-10-11, UI work (source badges, approval cards, the actual control
-binding) still open** (see the Phase 4 entries further down, and the
-item-10-area status below for Phase 3's own history). Gateway redeployed and
+item 2 (`answer_html` rendering + the real control binding) built and
+live-verified end to end, 2026-10-13** (see the Phase 4 entries further
+down, and the item-10-area status below for Phase 3's own history). The
+app itself was rebuilt from scratch partway through item 2's UI work — a
+new Power Apps visual, a flexible-height gallery replacing the original
+fixed layout — and that rebuild is where the bulk of item 2's actual
+control binding landed: the full chat gallery (thinking log, answer,
+sources, follow-up questions), live status polling (icon, status text,
+turn timer), the cancel button, and the full approval-workflow UI
+(approve/reject buttons, the backend's "new turn per resolution, not an
+in-place resume" design worked through and built to match) are all live
+and verified against real turns. `docs/frontend.md` has the full rebuilt
+architecture. One known, understood-but-unfixed cosmetic bug remains (a
+stale thinking-log display on a fast reject, `docs/frontend.md`'s
+"Approval workflow" section has the root cause and the identified fix).
+Chat history (a new BigQuery table + two new endpoints + a conversation
+picker) is scoped but not yet built — `docs/frontend.md`'s "Chat history"
+section has the full design. Gateway redeployed and
 `gateway-swagger2.json`/the live connector refreshed to the current 4-endpoint
 contract, 2026-10-11 — all four operations re-verified live through the
 Power Apps connector (Phase 1 item 4's entry below has the details), so

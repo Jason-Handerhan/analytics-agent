@@ -351,8 +351,11 @@ def resolve_image_name(page_name: str, filter_context: list[dict]) -> str:
     if page_name == "Financial Impact":
         image_name = page_name
     elif page_name == "Model Performance":
+        # Uncertain if custom connector strips {Value: ...} wrapper in filter context.
+        # unwrap it if present, use the entry as-is otherwise.
+        entries = [fc.get("Value", fc) for fc in filter_context]
         selected_plot = next(
-            (fc["value"] for fc in filter_context
+            (fc["value"] for fc in entries
              if fc.get("filter_column") == "Feature_Importance_Chart_Types[Chart_Types]"),
             None,
         )

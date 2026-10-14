@@ -1,7 +1,9 @@
 # Power Apps Frontend
 
-> Controls, what each turn sends, and how a response renders. **Phase 1** for
-> the basic app; the approval card and cancel button land with their features.
+> Controls, what each turn sends, and how a response renders. The app was
+> rebuilt from scratch partway through Phase 4 (flexible-height gallery,
+> approval workflow, cancel button) — this doc reflects the rebuilt app, not
+> the original Phase 1 sketch.
 >
 > The request contract itself is in `.claude/rules/gateway.md`; the connector
 > that carries it is in `docs/auth.md`.
@@ -19,334 +21,247 @@ which doesn't surface it), and **Test operation** against a real endpoint
 (`api.github.com/zen`) returned a genuine `200`, with Microsoft's own
 `x-ms-environment-id`/`x-ms-tenant-id`/`x-ms-dlp-re` headers on the response
 confirming the call actually transited Power Platform's connector gateway —
-no licensing or DLP prompt anywhere in the flow.
+no licensing or DLP prompt anywhere in the flow. The real connector (OAuth
+2.0 + static `x-api-key`) hit no additional licensing gate either, confirmed
+once it was actually built (`docs/auth.md`).
 
-**One caveat, not yet tested and worth confirming when Phase 1 builds the
-real connector:** this proved a **No authentication** connector. The real
-connector needs **OAuth 2.0** (delegated) plus a static `x-api-key` header —
-a different security configuration, untested here. No specific reason to
-expect the auth type itself to be Premium-gated when a no-auth connector
-wasn't, but don't assume; confirm it when it's actually built.
+**A licensing-terms question, not a technical one:** Microsoft's Developer
+Plan FAQ frames the environment as for "development and test," with a paid
+plan required for genuine "production" use — a distinction about
+intent/terms, not something enforced by the environment itself. Worth being
+aware of for how this project is described (a portfolio/demo build run
+inside the developer environment, not a commercial product with paying
+customers), not a blocker to building anything.
 
-**Second caveat, a licensing-terms question rather than a technical one:**
-Microsoft's Developer Plan FAQ frames the environment as for "development
-and test," with a paid plan required for genuine "production" use — a
-distinction about intent/terms, not something enforced by the environment
-itself as far as this test showed. Worth being aware of for how this project
-is described (a portfolio/demo build run inside the developer environment,
-not a commercial product with paying customers), rather than a blocker to
-building anything.
+## App creation and embedding
 
-## Layout & controls
+**Embedding direction: the chat app is a Power Apps visual embedded inside
+the Power BI report — not a Power BI report embedded inside Power Apps.**
+The reverse direction doesn't work for this dashboard: a `Power BI tile`
+control only pushes filters one-way through a `TileUrl` OData query string,
+which doesn't reach field parameters, and an `HTML text` control with a raw
+`<iframe>` doesn't render at all — tested directly, even with a plain
+non-Power-BI URL.
 
-**App type:** Canvas app — needed for layout control alongside an embedded
-report.
+- In the report, add the **Power Apps visual** and click **Create new** —
+  not an existing app selected in. Selecting an existing app leaves
+  `PowerBIIntegration.Data` (below) permanently empty; only an app created
+  this way gets a working data connection. An existing app's screen can
+  still be ported in afterward by copying its controls between two Studio
+  tabs open side by side — formulas, including custom connector calls, carry
+  over cleanly since the connector is an environment-level resource. This is
+  exactly how the rebuilt app was populated with proven formulas from the
+  original one.
+- **`PowerBIIntegration.Data`** is a live, read-only table reflecting
+  whatever fields/measures are dragged into the visual's **Data** well —
+  configured independently per report page, and used for all dashboard-state
+  capture (filters, parameters, slicers, active page — see "Visual
+  grounding" below).
+- **Browser support:** Edge and Chrome only. Safari is view-only with a
+  privacy caveat; Firefox and other browsers are unsupported.
+- **Screen size doesn't auto-match the visual's placed size.** Set the
+  Screen's own `Width`/`Height` properties directly (Tree view → select the
+  Screen → formula bar → pick the property, same mechanism as any other
+  control) to match the visual's pixel size in the report's Format pane. A
+  mismatch shows as a hard crop, not a proportional shrink.
+- **Fixed vs. Responsive layout (App Settings → Display):** this app uses
+  **Fixed** — Responsive screens don't take an explicit size at all; they
+  fill whatever space their host gives them, which for an embedded visual
+  means the *Power BI visual's own bounding box* becomes the real sizing
+  control instead of anything set in Studio. Fixed mode is what exposes the
+  Screen's own `Width`/`Height` as directly settable properties. Either way,
+  the live embed's actual appearance is governed by the visual's size on the
+  report canvas (resized in Power BI Desktop, not Studio) — keep the
+  Screen's size and the visual's placed size in the same ballpark regardless
+  of which mode is chosen.
 
-- **Embedding direction: the chat app is embedded as a Power Apps visual
-  inside the Power BI report — not a Power BI report embedded inside Power
-  Apps.** The reverse direction doesn't work for this dashboard: a
-  `Power BI tile` control only pushes filters one-way through a `TileUrl`
-  OData query string, which doesn't reach field parameters (Microsoft's own
-  docs and multiple independent reports confirm this), and an `HTML text`
-  control with a raw `<iframe>` doesn't render at all — tested directly, even
-  with a plain non-Power-BI URL.
-  - In the report, add the **Power Apps visual** and click **Create new** —
-    not an existing app selected in. Selecting an existing app leaves
-    `PowerBIIntegration.Data` (below) permanently empty; only an app created
-    this way gets a working data connection. An existing app's screen can
-    still be ported in afterward by copying its controls between two Studio
-    tabs open side by side — formulas, including custom connector calls,
-    carry over cleanly since the connector is an environment-level resource.
-  - **`PowerBIIntegration.Data`** is a live, read-only table reflecting
-    whatever fields/measures are dragged into the visual's **Data** well —
-    configured independently per report page, and used for all dashboard-state
-    capture (filters, parameters, slicers, active page — see "Visual
-    grounding" below).
-  - **Browser support:** Edge and Chrome only. Safari is view-only with a
-    privacy caveat; Firefox and other browsers are unsupported.
-  - **Screen size must be set manually to match the visual's placed size —
-    it doesn't auto-scale.** Check the visual's pixel width/height in the
-    report's Format pane, and set the Screen's `Width`/`Height` properties to
-    match exactly. A mismatch shows as a hard crop (part of the layout
-    visible, the rest cut off), not a proportional shrink.
-- **`TextInput` + send `Button` + `Gallery`**, the Gallery bound to a
-  `colChat` collection.
-- **Custom connector call on send — positional arguments, not a record:**
-  `AnalyticsAgent.PostAsk(question, conversation_id)` — a flat request-body
-  schema like `AskRequest`'s gets flattened into separate positional
-  parameters by Power Apps' connector generation, not exposed as one inline
-  record. Optional named parameters follow as a trailing options record:
-  `{filter_context: ..., active_page: ...}` — see "Visual grounding" below for
-  how those two are built. `image_base64` is omitted entirely until Phase 4.
+## The flexible-height gallery — core architecture
 
-**Both roles render through an HTML text control — not the Label-for-user
-split originally planned here.** A plain Label can't support the
-scrollable-long-message fix below, and user questions turned out not to be
-reliably short (confirmed against real usage, not assumed). The
-markup-injection risk a Label would have sidestepped is instead closed by
-**manually HTML-escaping user text before rendering**:
-`&` → `&amp;` first, then `<` → `&lt;`, then `>` → `&gt;` — that order
-matters, since escaping `<`/`>` before `&` would double-escape the entities
-just created.
+**One outer Gallery (`Flexible height` layout, not `TemplateSize`), `Items`
+bound to a local collection, `colChat` — one row per turn.** Confirmed
+directly: a plain Gallery has no "fit to content" mode; a `Flexible height`
+Gallery sizes each template to the tallest `AutoHeight`-marked control inside
+it, which is the one mechanism everything else in this layout depends on.
 
+**Not a nested Gallery, and not a Container per sub-element — both were
+tried conceptually and ruled out before building:**
+- A Gallery control has no native way to report its own rendered height back
+  to an outer Gallery's flexible-height calculation, so nesting one gallery
+  inside another was never confirmed to propagate sizing correctly, and was
+  abandoned in favor of keeping everything at one level.
+- This app's `Container` controls (Horizontal/Vertical/Grid — the modern
+  Auto-layout set) were confirmed, by direct inspection of their Properties
+  panel, to have **no "fit to content" height mode at all** — `Height` is
+  just a plain settable number, same as any other control. Containers are
+  still used where they're actually useful (arranging a few buttons side by
+  side via `Direction`/`Gap`), but never relied on for auto-sizing.
+
+**So every row within one turn is a flat stack of sibling controls inside
+the Gallery's single template, positioned by chaining each one's `Y` off
+the control before it:**
 ```
-colChat record:  { role: "user" | "agent",
-                   body: <escaped plain text for user, HTML for agent>,
-                   chart_urls: <optional, agent only, list -- a turn can chart more than once> }
+nextControl.Y = priorControl.Y + If(priorControl.Visible, priorControl.Height, 0)
+```
+This is the one pattern that recurs through the whole template. `AutoHeight`
+on each control (confirmed to work reliably on `Label` and `HTML text`, not
+on `Button`) is what makes `priorControl.Height` meaningful, and the
+`If(...Visible...)` guard is what makes a row collapse to zero without
+leaving a gap when it has nothing to show.
+
+**`colChat`'s real shape**, one record per turn:
+```
+{ Question: Text,        -- the question text, or "Approved"/"Rejected" for
+                          -- an approval-resolution turn (see below)
+  Answer: Text,           -- answer_html, rendered server-side
+  ThinkingLog: Text,       -- pre-joined string, not the raw {seq, text} table
+                          -- (see "Live status" below for why)
+  Sources: Text,           -- comma-joined, not the raw table
+  FollowUps: Table,         -- raw table of {Value: Text}, kept as a table
+                          -- since the 3 follow-up controls need indexed access
+  IsPending: Boolean,       -- true from Collect until this turn's first
+                          -- PostAsk call resolves
+  NeedsApproval: Boolean }  -- true while this row's approval card should show
 ```
 
-**Gallery uses the Flexible height layout, not the standard `TemplateSize`
-gallery.** Confirmed against Microsoft's own docs (2026-09-25) — supersedes
-an earlier, incorrect claim here that Power Apps galleries can't auto-size
-per row; a dedicated Flexible height gallery variant exists for exactly this.
-Each message's row grows to fit its actual content, so the `HtmlText` formula
-no longer needs an internal `max-height` + `overflow-y: auto` scroll div —
-long messages and variable-length status text (below) both render without
-truncation or an inner scrollbar.
-
-**Known caveat, documented by Microsoft — verify in Studio, chosen anyway.**
-Scrolling a Flexible height gallery before all items finish loading can push
-the item currently in view out of frame once loading completes. Real risk
-here specifically: new messages keep appending mid-conversation while a user
-may be scrolled up reading earlier ones. Accepted trade-off — the auto-height
-win is worth it regardless of whether this surfaces in practice — but
-confirm the actual behavior once built rather than assuming either way.
-
-**`TextInput` uses `TextMode.MultiLine` for word-wrap, with typed newlines
-flattened to spaces before use.** Power Apps ties visual wrapping and
-Enter-inserts-a-newline together in one property — there's no wrap-only
-mode. Stripping `Char(13)`/`Char(10)` to spaces before storing or sending
-decouples them: the box wraps visually, but a manually-typed line break
-never becomes semantically meaningful data.
-
-**Store `AgentResponse.answer_html`, not `answer_markdown` — built,
-2026-10-10/11.** Power Apps can't convert Markdown, so the conversion
-happens once in the gateway (`render_answer_html`, `.claude/rules/gateway.md`)
-and the client holds what it renders. Re-deriving it client-side isn't an
-option. `answer_markdown` is still sent alongside it (debugging/notebook
-value, `.claude/rules/gateway.md`) but the HTML control binds to
-`answer_html` specifically.
-
-## Conversation state
-
-**`colChat` and the server's history are two different things.** `colChat` is
-the *visible transcript* — everything the user has scrolled through this
-session, client-side only. The model sees `sessions.history_messages`, capped
-at the **last 5 turns** (`.claude/rules/gateway.md`). So a user can be looking
-at twenty messages while the model is working from five. Don't send `colChat`
-to the server; it isn't the history, and the server already has its own.
-
-- **Conversation lifecycle — the ID comes from the server, at app start.**
-  `App.OnStart` calls `POST /conversation` and stores the result in
-  `varConversationId`; every subsequent request sends it. **A session is the
-  app lifecycle** — closing and reopening mints a new ID, so history doesn't
-  carry across. That makes the 30-day Firestore TTL pure cleanup, not
-  functional session expiry.
-
-  Microsoft's `App` object reference lists *"API calls through a connector"*
-  as a valid `OnStart` use, with one condition: *"make sure the call returns
-  quickly."* `POST /conversation` does nothing but mint an ID and write an
-  empty document — **keep it that way**, since `OnStart` blocks the first
-  screen. (Also: `OnStart` variables aren't available in `StartScreen`, so
-  `varConversationId` can't feed navigation logic.)
-
-  **Cold starts aren't the risk here** — 2–10s against the connector's 120s
-  ceiling, the same ceiling `POST /ask` already lives under. Transient
-  failures are: wrap the call in `IfError` per Microsoft's "handle connector
-  failures explicitly" guidance, and disable the chat with a visible message
-  if `varConversationId` ends up empty, rather than letting the app open in a
-  state where sending fails cryptically.
-
-- **New chat button — a real feature that doubles as the recovery path.**
-  Calls the same `POST /conversation`, swaps `varConversationId`, and clears
-  the visible transcript. **Confirm first when the transcript is non-empty**
-  — an accidental click otherwise discards the visible conversation, and with
-  no chat-list UI the old history is unreachable even though it still exists
-  in Firestore. **No confirmation when empty or after a failed start**:
-  nothing to lose, and retry should be one click. The send button is disabled
-  whenever `varConversationId` is empty, alongside the in-flight disable
-  below.
-
-  **A deliberate step toward multi-chat, not a workaround.** This is the
-  generation half; the client-side list and picker are deliberately not built.
-  Adding them later means storing IDs and a selector, not restructuring how
-  conversations get created.
-
-- **Disable the send button while a turn is in flight** —
-  `DisplayMode.Disabled`, driven by the same in-flight variable the thinking
-  icon uses. **This is the only thing enforcing one turn per conversation**,
-  and it needs to be: everything turn-scoped is keyed on `conversation_id`, so
-  two concurrent turns would interleave statuses and overwrite each other's
-  pending approval — the user could approve one card and execute the other
-  turn's query. No server-side guard; the realistic failure is an impatient
-  double-click, which a disabled button stops completely.
-
-## While a turn is in flight
-
-- **Progress indication (both tiers, combined not either/or):** an always-visible thinking icon, plus real staged status — the gateway writes a status string to `live_turns/{conversation_id}` in **Firestore**, polled by a `Timer` via `GET /ask/status/{conversation_id}`
-  (`.claude/rules/gateway.md`). Icon is the fallback if the status layer has a gap.
-
-  **A third tier, additive to both: the model's own summarized thinking, one
-  gallery row per round.** `GET /ask/status` also returns `thinking_log`
-  (`.claude/rules/gateway.md`) — a growing list of `{seq, text}` entries, one
-  per `agent` round that actually produced thinking (adaptive thinking means
-  not every round does; a round with none just adds nothing). Track a local
-  `varThinkingRowsRendered` counter, reset to `0` per turn; each `Timer` tick,
-  `Collect` one `colChat` row for every entry past that count, then advance
-  it — an unchanged `thinking_log` since the last poll naturally collects
-  zero rows, no special-casing needed. The final answer is unaffected: still
-  its own row, `Collect`ed once when the blocking `PostAsk` call resolves.
-
-  **Style thinking rows distinctly from a real answer** — grey, italic, a
-  serif fallback stack, smaller than body text:
-  `style="color: #6b7280; font-style: italic; font-family: Georgia, 'Times New Roman', serif; font-size: 0.9em;"`.
-  Same "verify visually once built" caveat as every other styling choice for
-  this control (`pending_query`, below).
-
-  **Why polling rather than streaming.** Power Apps has no websocket or SSE
-  support, so a `Timer` hitting a plain endpoint is the mechanism available —
-  and it's what the control is built for. The gateway writes the status
-  string as a side effect of running the turn; the mechanism, the status
-  vocabulary, and why status lives in Firestore rather than process memory
-  are all in `.claude/rules/gateway.md`.
-
-  **Status lines are past tense, with a duration.** Each one names a step that
-  already finished, e.g. `Gathered results from BigQuery (1.5s)`. `Verified results`
-  appears only when the answer passed verification. The last few steps are written and
-  deleted within a fraction of a second, so a 1-second poll often misses them. Treat
-  the final status as best-effort; the answer itself is always in the `PostAsk` response.
-
-  **A `null` status means "nothing new to show," not "something broke" --
-  never render it literally.** Keep displaying the last real value instead.
-  A paused turn no longer produces a `null`: the same write that replaces
-  `live_turns` with the pending approval also carries its own `status: "Needs
-  your approval"` (no duration -- the wait has no fixed length, unlike the
-  per-step writes above), so a poll anywhere during the approval wait always
-  gets a real string (`.claude/rules/gateway.md`). The one remaining gap is at
-  turn end: a normal or cancelled completion deletes the `live_turns` doc
-  outright, and a poll landing in the instant between that delete and the
-  blocking `PostAsk` call itself resolving reads a missing document --
-  structurally unavoidable, not a bug to chase. The answer is already on its
-  way in that case regardless.
-
-- **User-cancel button (Phase 4 — the endpoint lands in Phase 3):** a `Cancel` button shown alongside the thinking icon, `Visible` exactly while a response is in flight. `OnSelect` fires `POST /ask/cancel/{conversation_id}`
-  (`.claude/rules/gateway.md`) — fire-and-forget; the original blocked call resolves on its own shortly after. Complements, doesn't replace, the automatic gateway timeout — gives the user control without changing the underlying guardrail.
-
-- **Streaming vs. request/response:** synchronous request/response, for a documented reason — Power Platform's synchronous-call ceiling is commonly ~120s (unconfirmed exact figure for a direct canvas-app connector call) and isn't extendable by any setting. The real escape valve if ever needed is converting to true async polling, reusing the same status-endpoint plumbing already built for progress indication — not needed now given `max_iterations` + the gateway timeout
-  (`.claude/rules/orchestrator.md`) keep turns well under the ceiling.
-
-## Helping the user ask
-
-- **Sample questions on open:** hardcoded buttons, `Visible = CountRows(colChat) = 0`. Zero backend cost, meaningfully improves the demo.
-
-- **Agent-suggested follow-up chips:** bound to `suggested_follow_ups` on the response envelope; system prompt asks for 1–3 short suggestions (e.g. "Would you like to see a graph?"). Natural because `generate_chart` (`.claude/rules/tools.md`) is a real callable tool, not a promise the agent can't keep.
-
-  **Populate the input, don't auto-send.** A chip's `OnSelect` sets the
-  existing `TextInput` (`Set(localQuestion, chipText)`); the user still hits
-  Send. Two reasons: it reuses
-  `btnSend.OnSelect`'s existing turn-launch path entirely — no second trigger
-  into the in-flight-disable/status-polling logic to build and keep in sync
-  with the first — and it means a mistaken tap fills a box instead of firing
-  a real, potentially cost-bearing query with no chance to reconsider or edit.
-
-## Visual grounding — filter context and the optional screenshot
-
-**Design: manual screenshot upload, not automatic capture.** Automatic capture
-of an embedded Power BI report was the original plan but was confirmed not
-viable (cross-origin/iframe boundary — flagged as a risk before it was hit).
-Resolution: a standard `Add picture`/`Attachment` control — simpler to build
-than the original plan, not harder.
-
-**What's sent each turn:** the question (text) · an *optional* uploaded
-screenshot (base64) · current filter/parameter/slicer context, read from
-`PowerBIIntegration.Data` · the active report page · user identity.
-
-**Capture is entirely manual, field by field — nothing is automatic.**
-`PowerBIIntegration.Data` only ever reflects whatever DAX measures are
-dragged into the Power Apps visual's Data well on the current report page;
-there's no equivalent of a "give me every active filter" call. Two kinds are
-captured, matching `model_schema.json`'s `parameters[]`:
-- **Numeric what-ifs** — the model already exposes a `SELECTEDVALUE(...)`
-  value measure for each one (`.claude/rules/data-pipeline.md`); drag those
-  in directly.
-- **Dimensional slicers** — a raw column can't be dragged in safely (it fans
-  the well's single-row table out to one row per selected value); instead,
-  add one small `SELECTEDVALUE(column)` measure per slicer and drag that in.
-  Blank on multi-select is a real "no single value" signal, not a bug.
-
-**Field parameters needed a different DAX pattern, not permanent exclusion
-— corrected 2026-10-10.** The original symptom still holds exactly as
-found: a bare `SELECTEDVALUE(...)` directly on a field parameter's label
-column throws "This might be caused by a capacity or license issue" when
-added to the visual's Data well, isolated specifically to field-parameter
-tables. What was wrong was the diagnosis, not the symptom — that error is
-about *reading that one column that way*, not about field parameters being
-unreachable from the Data well at all. `LOOKUPVALUE`, keyed off the
-field parameter's working `[... Fields]` column (the one holding
-`NAMEOF(...)` references, which `SELECTEDVALUE` *can* read directly)
-instead of its label column, resolves it cleanly:
+**The seed row.** `App.OnStart`/the New Chat button both run:
 ```
-Selected_Evaluation_Metric =
-LOOKUPVALUE(
-    'Evaluation Metric Parameter'[Evaluation Metric Parameter],
-    'Evaluation Metric Parameter'[Parameter Fields],
-    SELECTEDVALUE('Evaluation Metric Parameter'[Parameter Fields])
-)
+ClearCollect(colChat, {Question: "seed", Answer: "seed", ThinkingLog: "seed",
+                        Sources: "seed", FollowUps: Filter(Table({Value: "seed"}), false),
+                        IsPending: false, NeedsApproval: false});
 ```
-Confirmed live — added to the Data well successfully, reads correctly.
-Same fix for `Selected_Ensemble_Weights_Model`. `Selected_Feature_Importance_Plot`
-needed no workaround at all — it's a plain slicer-bound synthetic table, not
-a field parameter, so a bare `SELECTEDVALUE(Feature_Importance_Chart_Types[Chart_Types])`
-just works, same as any dimensional slicer above.
+Confirmed necessary, not just defensive: Studio's design-time formula
+checker has no way to know a column's type from a genuinely empty
+`ClearCollect(colChat, [])` — referencing `ThisItem.ThinkingLog` against an
+empty, shapeless collection produces a real "Expected Text value" error, not
+just a cosmetic warning. One concrete seed record gives Studio a shape to
+check every other formula against. The Gallery's `Items` filters it back
+out: `Filter(colChat, Question <> "seed")`.
 
-**Querying the measure directly via `run_dax_query` is still not a
-workaround, for an unrelated reason that was never actually wrong:** that
-call runs under the service principal through a stateless `executeQueries`
-request, with no attachment to any specific user's live report session —
-`SELECTEDVALUE()`/`LOOKUPVALUE()` reflect the filter context of *that
-query*, never what a separate, already-open report tab currently has
-selected. The Data well, reading from the live embedded session, is the
-only path that actually sees a specific user's current selection — that
-reasoning holds regardless of which DAX pattern reads the field parameter.
+### Per-row controls, in stack order
 
-**`filter_context` is a list of `{filter_column, value}` pairs**, reusing
-`model_schema.json`'s `filter_column` naming so the agent can match a
-captured value straight to its parameter:
-```json
-[
-  {"filter_column": "Conversion Rate[Conversion Rate]", "value": "0.08"},
-  {"filter_column": "dataset_split_dimension[dataset_split]", "value": "Test"},
-  {"filter_column": "Evaluation Metric Parameter[Evaluation Metric Parameter]", "value": "NDCG@5"},
-  {"filter_column": "Feature_Importance_Chart_Types[Chart_Types]", "value": "Beeswarm"}
-]
+1. **Question label** — plain `Label`, `Text: ThisItem.Question`.
+2. **Thinking log label** — `AutoHeight` `Label`, `Text: ThisItem.ThinkingLog`.
+   `Visible`: `Not(IsBlank(ThisItem.ThinkingLog)) And ThisItem.ThinkingLog <> ""`
+   — deliberately based on content, not on the global waiting flag (an
+   earlier version bound this to `varWaitingForAnswer`, which hid the row
+   again the instant the turn finished — wrong, since the whole point is for
+   it to persist once the turn is done).
+3. **Answer** — `AutoHeight` `HTML text` control, `HtmlText: ThisItem.Answer`.
+4. **Sources** — `AutoHeight` `HTML text` control (not cards — plain text was
+   the deliberate choice, since `sources` isn't tightly bounded in size the
+   way follow-ups are, and reusing the renderer avoids re-solving formatting
+   already solved for the Answer control):
+   ```
+   HtmlText: "<b>Sources:</b> " & ThisItem.Sources
+   ```
+   `Visible`: `Not(IsBlank(ThisItem.Sources)) And ThisItem.Sources <> ""`
+5. **3 follow-up question Labels** (not a horizontal Container of cards — a
+   fixed count of individually-positioned `AutoHeight` Labels, chosen since
+   each needs its own `OnSelect` and `AutoHeight` (the length isn't bounded
+   tightly enough for a fixed-size card)). Per card `N` (1–3):
+   - `Text`: `If(CountRows(ThisItem.FollowUps) >= N, Index(ThisItem.FollowUps, N).Value, "")`
+     — the guard matters: `Index()` past the end of the table errors even on
+     a *hidden* control, since `Visible = false` doesn't stop the formula
+     from being evaluated.
+   - `Visible`: `CountRows(ThisItem.FollowUps) >= N` — safe to collapse
+     bottom-up only, since `suggested_follow_ups` is always front-loaded (an
+     index-2 entry implies index 1 exists too).
+   - `Y`: chained off the previous follow-up (or off Sources, for card 1).
+   - `OnSelect`: `Set(varPrefill, Index(ThisItem.FollowUps, N).Value); Reset(TextInput1)`
+   - Styling: no border, `Fill: Transparent`, `HoverFill: RGBA(128, 128, 128, 0.2)`.
+6. **Approval Container** (`Horizontal` direction, holding Approve/Reject
+   buttons) — `Y` chained off the last follow-up; `Visible: ThisItem.NeedsApproval`;
+   `Height: If(ThisItem.NeedsApproval, 60, 0)` (explicit, since Containers
+   don't auto-size — see above).
+7. **Trailing spacer** — any control with no visible content, `Height: 20`,
+   `Y` chained off whatever is currently the *last* element in the stack.
+   **Must be re-chained every time a new row type is inserted before it** —
+   hit twice during the build (once when follow-ups were added after
+   Sources, once when the approval Container was added after follow-ups).
+   This is purely trailing padding between one turn and the next; nothing
+   else chains off it.
+
+## Live status while a turn is in flight
+
+**One `Timer`, polling `GET /ask/status/{conversation_id}` once a second,
+feeding two independent things from the same response:**
+- `Timer` properties: `Duration: 1000`, `Repeat: true`, `Start: varWaitingForAnswer`.
+- `OnTimerEnd`:
+  ```
+  Set(varStatusResponse, AnalyticsAgent.GetAskStatus(varConversationId));
+  Set(varCurrentStatus, varStatusResponse.status);
+  Set(varCurrentThinkingLog, varStatusResponse.thinking_log);
+  UpdateIf(colChat, IsPending = true, {ThinkingLog: Concat(Sort(varCurrentThinkingLog, seq), text & Char(10) & Char(10))})
+  ```
+
+**`varCurrentStatus`** (a single, overwritten-each-poll string) feeds the
+standalone status popup, entirely outside the Gallery. **`varCurrentThinkingLog`**
+(the growing `{seq, text}` array) feeds the in-Gallery thinking-log row for
+whichever turn is currently `IsPending` — joined into one string via
+`Concat(Sort(..., seq), text & Char(10) & Char(10))` at write time, not kept
+as a raw table, since `ThinkingLog`'s column type in `colChat` needs to stay
+consistently `Text` (the seed row forced this — an earlier version stored
+the raw table and hit a real "Invalid argument type" error on the seed row's
+plain-text value).
+
+**`IsPending` marks the one row currently waiting on its first `PostAsk`
+call** — `true` from the moment it's `Collect`-ed, `false` once that call
+resolves. Exactly one row should ever be `IsPending = true` at a time.
+
+**A real Gallery-rendering quirk, confirmed live, not assumed: the Gallery
+doesn't visibly reflect a freshly-`Collect`-ed row until a *second* write
+touches `colChat`.** The Send button's `OnSelect` therefore does an
+immediately-following, otherwise-redundant `UpdateIf` right after the
+initial `Collect`:
 ```
-The full set, as actually sent, also includes the remaining four numeric
-sliders, `Ensemble Weight Parameter[Ensemble Weight Parameter]`,
-`base_models_dimension[model_name]`, and `models_dimension[Model]` — eleven
-entries in total; not reproduced in full here to avoid drifting out of sync
-with the real `varFilterContext` formula below.
-Every value is sent as text, numeric ones included — a Power Fx `Table()`
-literal mixing numeric and text values in one column errors rather than
-widening silently, so each is `Text(...)`-coerced first. The agent composes
-DAX from these regardless of JSON type.
-
-**Built as `{Value: ParseJSON(JSON({filter_column: ..., value: ...}))}` per
-row, not the record directly.** `filter_context` is `list[dict]` in
-`AskRequest` — a schemaless array — and Power Apps' connector import
-surfaces that as one `Value` column typed `Dynamic`. Power Fx has no literal
-syntax for `Dynamic`, so each row's real filter object is round-tripped
-through `ParseJSON(JSON(...))` to produce one. The `{Value: ...}` wrapping
-is purely this client-side `Table()` construction detail — Power Apps'
-connector serialization strips it back down to the plain array shown above
-by the time it reaches the gateway; confirmed directly against the real
-`varFilterContext` variable's value in Power Apps Studio, which still shows
-the wrapper, versus what `AgentState["filter_context"]` actually holds in
-the notebooks (`notebooks/phase3_graph.ipynb`,
-`notebooks/phase3_orchestrator_e2e.ipynb`), which don't.
-
-The real formula, as it stands 2026-10-10 — eleven rows, one per captured
-value:
+Collect(colChat, {Question: varQuestion, Answer: "", ThinkingLog: "", IsPending: true});
+UpdateIf(colChat, IsPending = true, {Question: varQuestion});
 ```
+The second write's content doesn't matter — only that it's a second
+distinct write to the same row.
+
+## The status popup, icon, and TurnTimer
+
+Entirely separate from the Gallery — a fixed element near the input box.
+
+- **Status text**: `Text: varCurrentStatus`, `Visible: varWaitingForAnswer`.
+- **Icon**: `Visible: varWaitingForAnswer`. Pulses via `Transparency`, driven
+  continuously off a second Timer's live `.Value` (not a toggled boolean —
+  a dedicated boolean-blink Timer was tried first and discarded once this
+  continuous approach proved smoother):
+  ```
+  Transparency: Max(0, Sin(TurnTimer.Value / 300)) * 0.5
+  ```
+  `Max(0, Sin(...))` clamps the falling half of the wave to fully opaque, so
+  the icon holds fully visible for roughly half of each cycle rather than
+  spending equal time at both extremes. **`Transparency` is a 0–1 scale, not
+  0–100** — confirmed live the hard way: an initial `* 70` and a later `* 30`
+  produced *visually identical* results, which only makes sense if both were
+  clamping to the same maximum past a 0–1 ceiling.
+- **`TurnTimer`**: `Start: varWaitingForAnswer`, `Visible: varWaitingForAnswer`,
+  `Duration: 120000` (a safety ceiling past the gateway's own
+  `GATEWAY_TURN_TIMEOUT_SECONDS = 115`, not a real limit), `Repeat: false`.
+  Its own default built-in visual (confirmed live) already renders a running
+  elapsed-time display — no separate Label needed.
+- **`TurnTimer.Reset`**, bound to `varResetTurnTimer`, pulsed `true` then
+  `false` at the start of every Send/Approve/Reject, so elapsed time
+  restarts at zero each turn instead of continuing to climb.
+
+## Send button
+
+The real, current `OnSelect` — every piece here earned its place through a
+real bug or a real design question during the build, not speculative:
+```
+Set(varQuestion, TextInput1.Text);
+Set(varPrefill, "");
+Set(varCancelRequested, false);
+Reset(TextInput1);
+Collect(colChat, {Question: varQuestion, Answer: "", ThinkingLog: "", IsPending: true});
+UpdateIf(colChat, IsPending = true, {Question: varQuestion});
+Set(varResetTurnTimer, true);
+Set(varWaitingForAnswer, true);
+Set(varResetTurnTimer, false);
+
 Set(
     varFilterContext,
     Table(
@@ -363,211 +278,349 @@ Set(
         {Value: ParseJSON(JSON({filter_column: "Feature_Importance_Chart_Types[Chart_Types]", value: First(PowerBIIntegration.Data).Selected_Feature_Importance_Plot}))}
     )
 );
-```
-The last three rows are the field-parameter/plot-type additions above — same
-row shape as everything else, no special-casing needed once the measure
-itself reads correctly. Adding a new captured value is always one more row
-here, matching the pattern, plus the corresponding entry in
-`model_schema.json`'s `parameters[]` (`.claude/rules/data-pipeline.md`) if
-it's a what-if or field parameter.
 
-**`active_page` design replaced, 2026-10-11 — this used to say "DAX has no
-concept of report pages," which turned out wrong, not a permanent
-constraint.** The
-original approach (one hardcoded constant measure per page, e.g.
-`Active_Page_ModelEval = "Model_Evaluation"`, each dragged into only that
-page's own Data well, read back with a `Coalesce()` across both) was dropped
-before being built into the new app — live-untested risk that
-`PowerBIIntegration.Data` might cache across two placements of the *same*
-app configured with different per-page Data-well measures, discovered
-during frontend planning, not worth building around blind.
+Set(
+    varResponse,
+    AnalyticsAgent.PostAsk(
+        varConversationId,
+        {
+            question: varQuestion,
+            filter_context: varFilterContext,
+            active_page: First(PowerBIIntegration.Data).Active_Page
+        }
+    )
+);
 
-**Real fix: a disconnected `_CurrentPages[Current Page]` table plus a
-page-level filter per report page, and one ordinary measure** —
-`Active_Page = SELECTEDVALUE(_CurrentPages[Current Page])`
-(`docs/data-pipeline.md`). DAX filter context resolves it correctly per page
-the same way it already does for ordinary slicers, so both page placements
-use the identical measure and Data-well configuration — no `Coalesce()`
-across two field names needed, since there's only ever the one. `active_page`
-stays its own request field, not part of `filter_context` — a page name
-isn't filterable; filters describe the *data*, the active page describes
-what the user is *looking at*.
+**The `{Value: ...}` wrapper is not stripped by the connector — confirmed
+live, 2026-10-13, not assumed.** Each `filter_context` entry arrives at the
+gateway as `{"Value": {"filter_column": ..., "value": ...}}`, not the flat
+`{"filter_column": ..., "value": ...}` shape an earlier version of this doc
+assumed (and never actually verified). Any backend code reading a
+`filter_context` entry's fields programmatically has to account for this —
+`resolve_image_name` (`.claude/rules/tools.md`) does, via
+`fc.get("Value", fc)`. Code that only ever reads `filter_context` as
+unstructured text (the model's own prompt, `build_human_message`) is
+unaffected either way, since an LLM reading prose tolerates the extra
+nesting fine.
 
-**The exact Power Fx read of this measure isn't written up yet** — the app
-rebuild this change is part of (new embedded app, flexible-height gallery,
-see the planning conversation this decision came from) hadn't reached that
-step as of this edit. The `varFilterContext`/`varActivePage` formulas above
-and below reflect the *previous* app and are expected to be substantially
-rewritten once the new one is built, not just this one field.
-
-**Computed in `btnSend.OnSelect`, not `App.OnStart`.** `OnStart` runs once at
-launch; capturing there would freeze a stale snapshot for the rest of the
-session. Both variables are rebuilt fresh on every send, then passed as named
-connector parameters:
-```
-Set(varAnswer, IfError(
-    AnalyticsAgent.PostAsk(localQuestion, varConversationId,
-        {filter_context: varFilterContext, active_page: varActivePage}),
-    Blank()
-));
+Set(varWaitingForAnswer, false);
+UpdateIf(
+    colChat,
+    IsPending = true,
+    {
+        Answer: varResponse.answer_html,
+        ThinkingLog: Concat(Sort(varCurrentThinkingLog, seq), text & Char(10) & Char(10)),
+        Sources: Concat(varResponse.sources, Value, ", "),
+        FollowUps: varResponse.suggested_follow_ups,
+        IsPending: false,
+        NeedsApproval: varResponse.needs_approval
+    }
+)
 ```
 
-**TODO -- no connector error handling built yet.** `IfError(..., Blank())`
-discards whatever the failure was; nothing downstream checks
-`IsBlank(varAnswer)`. So today, any non-2xx response -- a 401, the
-`MAX_QUESTION_CHARS` 400, a validation 422 (e.g. `AskRequest`'s
-exactly-one-of-`question`-or-`approval_decision` check,
-`.claude/rules/gateway.md`), a 500 -- has an undefined user experience, not
-a helpful message. Needs real handling before this matters in practice; not
-deciding the approach here.
+**`PostAsk`'s real call shape — `conversation_id` positional, everything
+else in one trailing record — not `(question, conversation_id)` as
+originally planned.** `AskRequest.required` is only `["conversation_id"]`
+(matching the Pydantic model — `question` has a default, so it isn't
+JSON-schema-required even though a runtime validator enforces exactly-one-of
+`question`/`approval_decision`), so Power Platform's connector generation
+bundles `question` into the optional trailing record rather than giving it
+its own positional slot.
 
-**A missing parameter filter is worse than a missing dimensional one.** A
-missing dimensional filter gives the right number for the wrong slice; a
-missing parameter filter makes the disconnected table fall back to its
-default, so the answer is **a different sensitivity scenario entirely** —
-plausible and unsignalled. Passing it through needs no special-casing;
-omitting it is the failure.
+**`filter_context: []` doesn't work — needs `Table()`, and even an empty
+`Table()` isn't enough on its own.** `filter_context` is `list[dict]` in
+`AskRequest`, a schemaless array, which Power Apps surfaces as a table of
+`{Value: Dynamic}` records. A bare `[]` or an untyped `Table()` can't be
+coerced to that shape — Power Fx needs a real sample record to infer the
+type from. The actual empty-array value sent today:
+```
+Filter(Table({Value: ParseJSON(JSON({filter_column: "", value: ""}))}), false)
+```
+(used today only as a placeholder in Approve/Reject's call, which omits
+`filter_context` from the record entirely instead — see below. The pattern
+above is kept here since it's the one way to construct a genuinely empty,
+correctly-typed table of this shape, if ever needed again.)
 
-**This is not the declined-forecasting rule reopening**
-(`.claude/rules/orchestrator.md`)**.** That rule
-exists because a forecast means the *agent* generating a number with no
-live tool call to cite. This is the opposite: a real, pre-built DAX
-measure computed by Power BI's engine from a parameter someone already
-modeled — as governed and citable as any other `run_dax_query` result.
+**`Active_Page` and `filter_context` are both read fresh in `OnSelect`, not
+`App.OnStart`** — dashboard selections can change between messages.
+`Active_Page` is a single DAX measure now (`docs/data-pipeline.md`), read
+directly — no `Coalesce()` across multiple per-page constants, which was the
+original, abandoned design (see `docs/data-pipeline.md` for why).
 
-## Response formatting
+## Cancel button
 
-**Pipeline:** agent produces Markdown → gateway converts to HTML (`mistune`,
-custom renderer with **inline styles**, since a `<style>` block isn't reliably
-honored by the HTML text control) → Power Apps renders via an **HTML text
-control**, not a plain `Label` (which shows raw Markdown literally).
+A separate `Button`, overlaid exactly on top of the Send button (not a
+distinct control elsewhere on screen) — `X`/`Y`/`Width`/`Height` all mirror
+`sendButton`'s own, so it visually reads as "Send transformed into Cancel"
+during a turn, and must sit *after* `sendButton` in the Tree view to
+actually catch the click.
+- `Visible: varWaitingForAnswer`
+- `DisplayMode: If(varCancelRequested, DisplayMode.Disabled, DisplayMode.Edit)`
+- `OnSelect`:
+  ```
+  Set(varCancelRequested, true);
+  AnalyticsAgent.PostAskCancel(varConversationId)
+  ```
+  Fire-and-forget, per the endpoint's own design (`.claude/rules/gateway.md`)
+  — the original blocked `PostAsk` call resolves on its own shortly after.
+- `varCancelRequested` resets to `false` at the top of every new
+  Send/Approve/Reject, so Cancel is clickable again for each new wait.
 
-**Beyond plain conversion (cheap, worth it):**
-- Structured response envelope (`AgentResponse`, `.claude/rules/orchestrator.md`)
-  reused for rendering,
-  not a separate schema — `sources` badges (plural; a turn can use more than
-  one), a distinct approval card for `needs_approval`. **`sources` arrives
-  render-ready** — ordered, grouped with counts, failed calls excluded. Built
-  in `finalize` (`.claude/rules/orchestrator.md`), not the client, so the
-  React rebuild doesn't reimplement it.
+**Send itself is also disabled while waiting** (`DisplayMode.Disabled`
+driven by `varWaitingForAnswer`) — belt-and-suspenders alongside the Cancel
+overlay physically covering it.
 
-### Chart display — decided and built, 2026-10-11 (originally an open decision, 2026-09-28)
+## Approval workflow
 
-**Option B won — inline `<img>`, built and live-verified.** `answer_html`
-(`.claude/rules/gateway.md`) is the real, built custom mistune renderer;
-`submit_answer`'s field description already steered the model to embed
-`chart_url` in prose (built earlier, confirmed still working) — both of
-Option B's two "Requires" items below were already satisfied before this
-decision closed, one from this session's work, one from before it.
-`MAX_ANSWER_CHARS` is 7000, as the "If Option B wins" note below called for.
-The rest of this section is kept as the record of the actual decision, not
-rewritten as if B were the only option considered.
+**The backend's "resume" is a genuinely new graph invocation each time, not
+a suspended execution woken back up — confirmed from the real code, and it
+changes how the frontend has to model it.** Pausing ends the turn
+completely: `finalize_node` runs, a real telemetry row gets written, and the
+`live_turns` document is replaced with a `PendingApproval` snapshot. Approving
+or rejecting calls `POST /ask` again with `approval_decision` set; the
+gateway reconstructs an `AgentState` from that snapshot and calls
+`graph.astream(...)` fresh, `START` to `finalize` again, exactly like any
+other turn. "Same turn" is the *state* carrying continuity, not the
+*execution* — there's no in-place resumption happening anywhere.
 
-**`chart_urls` stays its own field on the message/response, regardless of
-which option below wins.** `colChat`'s row schema (above) and
-`AgentResponse.chart_urls` (`.claude/rules/orchestrator.md`) already carry it
-separately from `body`/`answer_markdown` — not in question. **It's a list,
-not a single URL** — a turn can call `generate_chart` more than once, so
-either option below needs to handle zero, one, or several charts per
-message, not just the one-chart case this section was originally sketched
-against.
+**So the frontend treats Approve/Reject as creating a new turn — a new
+`Collect`-ed row, not an `UpdateIf` of the paused one** — matching what the
+backend actually does (a second, separate telemetry row) and what gives the
+best chat transcript anyway: one row per real event, "asked X → needed
+approval → approved → here's the answer" readable top to bottom instead of
+the pending-approval content vanishing, overwritten in place.
 
-**What's undecided is how the chart actually renders**, and it's a real
-choice, not a placeholder:
+**Approve button's `OnSelect`** (Reject is identical, swapping the literal
+string and the `varQuestion` label):
+```
+UpdateIf(colChat, NeedsApproval = true, {NeedsApproval: false});
+Set(varQuestion, "Approved");
+Set(varCancelRequested, false);
+Collect(colChat, {Question: varQuestion, Answer: "", ThinkingLog: "", IsPending: true});
+UpdateIf(colChat, IsPending = true, {Question: varQuestion});
+Set(varResetTurnTimer, true);
+Set(varWaitingForAnswer, true);
+Set(varResetTurnTimer, false);
 
-- **Option A — native `Image` control per URL, bound to `chart_urls`.** The
-  original plan (for one chart; a multi-chart message needs a small repeating
-  container, not a single bound control). Predictable sizing (a Power Apps
-  control, not raw pixels), no HTML rendering question to depend on.
-- **Option B — inline `<img>`, embedded directly in `answer_markdown`'s HTML,
-  narrated with text above and below in one flowing message.** Confirmed
-  live (2026-09-28) that the HTML text control *does* render a plain
-  `<img src="...">` from an external HTTPS URL — unlike `<iframe>`, already
-  confirmed blocked (above) — sized correctly with an inline
-  `style="max-width:100%; height:auto;"` so it scales to the control's actual
-  width instead of the chart's native ~1350×825px (`FIGSIZE`/`DPI` in
-  `app/mcp_server/chart_tool.py`). Tested directly in Studio against a real
-  signed URL. **Visually the better result** — genuinely reads like one
-  message instead of an answer plus a bolted-on separate image.
+Set(
+    varResponse,
+    AnalyticsAgent.PostAsk(varConversationId, {approval_decision: "approved"})
+);
 
-  Requires: the mistune custom renderer needs its own image-handling
-  override to inject that `style` attribute (a plain `![alt](url)` converts
-  to a bare `<img>` with no styling by default), and the model needs
-  steering to embed the chart URL in prose rather than treating it as a
-  hidden field it shouldn't reference directly.
+Set(varWaitingForAnswer, false);
+UpdateIf(
+    colChat,
+    IsPending = true,
+    {
+        Answer: varResponse.answer_html,
+        ThinkingLog: Concat(Sort(varCurrentThinkingLog, seq), text & Char(10) & Char(10)),
+        Sources: Concat(varResponse.sources, Value, ", "),
+        FollowUps: varResponse.suggested_follow_ups,
+        IsPending: false,
+        NeedsApproval: varResponse.needs_approval
+    }
+)
+```
 
-**If Option B wins, bump `MAX_ANSWER_CHARS` 6000 → 7000**
-(`.claude/rules/orchestrator.md`) to absorb the signed URL's ~1000 characters
-of query string — no real change to the readable-text budget, just room for
-the URL itself.
+**The first line is its own fix, not boilerplate** — without it, the
+*original* paused row's `NeedsApproval` stays `true` forever (nothing else
+in this flow ever touches that row again), leaving a dead, unclickable
+approval card showing permanently. Matching on `NeedsApproval = true` finds
+whichever row is currently showing a card and clears it the instant the
+decision is made, independent of whether the new turn has resolved yet.
 
-**Correction to the answer-length rationale, confirmed live (2026-09-28):**
-Microsoft's Power Fx docs state Text/Hyperlink/Image/Media properties,
-including `HtmlText`, have **no preset character limit** — the real
-constraint is available browser/device memory (100+ MB on desktop, ~30-70 MB
-on phone), not a fixed count. The "hard 16,384-character limit" previously
-stated here and in `.claude/rules/orchestrator.md` doesn't appear in current
-Microsoft documentation and was never independently verified — flagging per
-`CLAUDE.md` rather than leaving it stated as fact. `MAX_ANSWER_CHARS` stands
-regardless: a readability/display-sanity ceiling, not a workaround for a
-platform limit that turned out not to exist.
-- **The approval card needs two buttons, not just a display.** `Approve` and
-  `Reject` both fire the same `POST /ask` route as a normal question, with
-  `approval_decision` set to `"approved"`/`"rejected"` instead of `question`
-  — there's no separate respond endpoint (`docs/approval-workflow.md`). Then
-  replace the card with whatever `AgentResponse` comes back — a real answer
-  on approve, a flat cancellation message on reject (not a partial answer;
-  rejection never re-synthesizes from whatever ran before the pause). Show
-  `estimated_cost` (the dollar string) prominently alongside `pending_query`;
-  that's the number the human is actually approving.
-- **Disable the send control while the approval card is showing, same
-  mechanism as "turn in flight."** The window between the pause response
-  landing and the user clicking Approve/Reject isn't "in flight" (the
-  `POST /ask` call already returned), so the existing in-flight
-  `DisplayMode.Disabled` doesn't cover it on its own — extend the same
-  formula with an OR: `DisplayMode.Disabled` while *either* a turn is in
-  flight *or* an unresolved approval card is showing. The variable the card
-  already needs for its own content (`pending_query`/`estimated_cost`) is
-  the same signal this needs — no new tracking required, just wiring the
-  send control to it too. This is the primary defense against a normal
-  question arriving mid-pause; the backend already degrades safely if it's
-  ever bypassed (`docs/approval-workflow.md`).
-- **`cost_cap_exceeded: true` is a third distinct card state** — not an
-  approval prompt (there's nothing to approve) and not a normal answer.
-  No buttons; just the declined message and `estimated_cost` so the user
-  knows how far over it was.
-- **`iteration_cap_hit: true` gets the same distinct-card treatment** — a
-  visually marked "partial answer" state, not styled like a complete one. The
-  prose already says it's partial; the card catches a user skimming.
-- **Fenced code inside `answer_markdown` needs the same monospace treatment
-  — built, 2026-10-10/11, not just planned.** The agent emits
-  ```` ```python ````/```` ```sql ```` blocks when answering code questions;
-  `_AnswerRenderer.block_code` (`.claude/rules/gateway.md`) overrides
-  mistune's default `<pre><code>` output (no inline styles, no monospace,
-  collapsed line breaks) with its own inline-styled version — ended up a
-  dark code-block theme (`ANSWER_CODE_BLOCK_BG`, `app/config.py`) rather
-  than matching `pending_query`'s lighter styling below, confirmed live to
-  look better against a white page than reusing the exact same treatment.
+**`filter_context`/`active_page` are deliberately omitted from this call** —
+`PendingApproval` already carries the original turn's captured values
+server-side; resending them would be silently ignored, not harmful, just
+dead weight.
 
-  Safe to show verbatim: it's this repo's own code, and `CLAUDE.md` forbids
-  secrets in code. The answer-length guardrail already bounds it.
+**The enriched pending-approval message (cost + query) is built entirely on
+the backend, inside `finalize_node`'s `needs_approval` branch** — appended
+to `answer_markdown` as a fenced SQL block, then rendered through the same
+`answer_html` pipeline as any other answer. No separate frontend display
+work needed for it; `htmlAgentResponse` just shows it like any other answer.
 
-- **`pending_query` renders as a monospace code block within the approval
-  card, not run through the same prose path as `answer_markdown`.** Verified
-  against current Power Apps HTML text control behavior, not assumed:
-  - The control has no special handling for `<pre>`/`<code>` — same
-    constraint as everything else here, inline styles are what actually
-    render, not semantic tags or a `<style>` block.
-  - `font-family` set via inline `style=` is confirmed to work — e.g.
-    `style="font-family: 'Courier New', monospace; ..."`.
-  - **`white-space: pre-wrap` must be set explicitly** — without it, a
-    multi-line query's line breaks and indentation collapse into one run-on
-    line, defeating the entire point of showing it for review.
-  - **No platform character limit on the control, corrected here too** — this
-    bullet previously repeated the same "16,384-character" figure the
-    answer-length correction above (2026-09-28) already found unconfirmed
-    and removed; missed in that pass, fixed now. `pending_query` has no
-    length cap of its own to worry about beyond ordinary readability.
-  - **Verify visually once built** — same "confirm, don't assume" status as
-    every other HTML-rendering detail already flagged as unverified for this
-    control (open items, component reference).
+**A real, known cosmetic bug, understood but not yet fixed:** clicking
+Approve/Reject can briefly show the *previous* turn's leftover thinking-log
+text on the new row. Root cause, confirmed by reading the real code: not a
+Firestore race (the backend's reject path deletes `live_turns` immediately,
+and the pause-time write already drops `thinking_log` from the document via
+a full, non-merged replace) — it's `varCurrentThinkingLog`, a local
+variable, only getting overwritten when the polling Timer actually ticks.
+Reject resolves fast enough that the Timer's first ~1s tick often never
+fires before the response returns, so the final `UpdateIf` builds the new
+row from whatever was still sitting in that variable from the *original*
+turn's last real poll. Fix identified, not yet applied: clear
+`varCurrentThinkingLog` locally at the top of Approve/Reject's `OnSelect`
+(`Set(varCurrentThinkingLog, Blank())`), before anything else.
+
+## Icons
+
+- **`Classic/Icon` controls have no `BorderRadius` property — confirmed by
+  checking, not assumed.** For rounded corners on an icon built this way,
+  layer a `Rectangle` shape behind it (same `X`/`Y`/`Width`/`Height`,
+  `BorderRadius` set there instead, same `Fill` color) with the Icon's own
+  `Fill` set to `Transparent` so only the Rectangle's rounded background
+  shows through, Icon glyph rendering on top.
+- **Custom SVG icon set, built but not yet swapped in** (still on the
+  default `Classic/Icon` controls as of this writing): a matched Send/Stop
+  pair — 100×100 rounded (`rx="16"`) orange (`#F98B5C`) square with a white
+  glyph (an up-arrow for Send, a square for Stop) — plus a separate-style
+  New Chat icon: an outline-only chat bubble with a `+` badge, `#808080`
+  stroke, transparent/white fill, no colored background square (deliberately
+  different treatment from Send/Stop, since it's a secondary action).
+- **Swapping an icon file in place, without touching any control's
+  formula**, only works for a genuine media asset (`Image` control bound to
+  an uploaded file) — Studio's Media pane has a "Replace" option for that.
+  It does **not** apply to a `Classic/Icon`'s built-in `Icon.Send`-style enum
+  value, which isn't a media asset at all; switching to the custom SVGs
+  means building new `Image` controls and porting over `Height`/`Width`/
+  `X`/`Y`/`DisplayMode`/`OnSelect` (not `Color`/`Fill`/`HoverFill` — those
+  existed only to tint the old vector icon, and the new SVGs already have
+  their colors baked in).
+- **New Chat button** — `OnSelect` mirrors `App.OnStart` exactly (mints a
+  fresh `conversation_id`, re-seeds `colChat`, resets every loose
+  variable) — see `App.OnStart`, below. `DisplayMode: If(varWaitingForAnswer, DisplayMode.Disabled, DisplayMode.Edit)`,
+  same as every other action button.
+
+## `App.OnStart`
+
+```
+IfError(
+    Set(varConversationId, AnalyticsAgent.PostConversation().conversation_id),
+    Notify("Could not start a new conversation. Please restart the app.", NotificationType.Error);
+    Set(varConversationId, Blank())
+);
+ClearCollect(colChat, {Question: "seed", Answer: "seed", ThinkingLog: "seed", Sources: "seed", FollowUps: Filter(Table({Value: "seed"}), false), IsPending: false, NeedsApproval: false});
+Set(varQuestion, Blank());
+Set(varResponse, Blank());
+Set(varCurrentThinkingLog, Blank());
+Set(varCurrentStatus, Blank());
+Set(varWaitingForAnswer, false);
+Set(varPrefill, "");
+Set(varCancelRequested, false);
+Set(varResetTurnTimer, false);
+```
+
+**`PostConversation()` takes zero visible arguments — `x-api-key` must be
+configured as an Internal-visibility, default-valued parameter on every
+operation in the connector, not left as a plain visible header.** Confirmed
+the hard way: re-updating the connector's Swagger definition through the
+Swagger Editor reset this per-parameter setting (it isn't encoded in the
+Swagger JSON at all, it's a separate Power Platform-side setting layered on
+top), which surfaced as `PostConversation()` suddenly demanding an argument
+it never needed before. Fix lives in the connector editor's **Request** step
+per operation: set `x-api-key`'s **Visibility → Internal** and **Default
+value →** the real secret value, for all 4 operations, every time the
+connector definition gets re-imported.
+
+## `answer_html` styling
+
+**Power Apps' `Size` property is in *points*, not pixels — a different unit
+than CSS `font-size`.** Tuning sizes by eye against native Power Apps Labels
+first, then applying the same number as a CSS pixel value, produces visibly
+smaller text than intended. Conversion used: `1pt ≈ 1.33px`. Current values
+(`app/config.py`), all derived this way, not chosen as pixel values
+directly:
+```
+ANSWER_FONT_FAMILY = "Segoe UI, sans-serif"
+ANSWER_BODY_FONT_SIZE = "24px"
+ANSWER_HEADING_FONT_SIZE = "32px"
+ANSWER_SUBHEADING_FONT_SIZE = "27px"
+ANSWER_TABLE_FONT_SIZE = "24px"
+ANSWER_CODE_FONT_SIZE = "22px"
+```
+
+**Every element needs its own explicit inline font styling — confirmed
+nothing can be left to inherit, not just for headings/tables but for list
+items and inline code too.** The control doesn't reliably honor CSS
+inheritance: a real bug surfaced where `<li>` text and inline `<code>` had
+no explicit `font-size` at all and silently fell back to the browser's
+default size, visibly mismatched against everything around it. The renderer
+(`_AnswerRenderer`, `app/gateway/entry_exit.py`) now styles `paragraph`,
+`heading` (levels ≤2 get `ANSWER_HEADING_FONT_SIZE`, levels 3+ get
+`ANSWER_SUBHEADING_FONT_SIZE`), `list_item`, `codespan`, `block_code`, and
+every table cell — nothing is left to the surrounding context.
+
+**Chart display: inline `<img>`, decided and built.** `answer_html`'s
+mistune renderer embeds chart images directly in the flowing answer text
+(`<img src="..." style="max-width: 100%;" />`), confirmed live to render
+correctly from a real signed GCS URL. `MAX_ANSWER_CHARS` is 7000 to absorb
+the signed URL's query string. **No platform character limit exists on the
+control at all** — confirmed against Microsoft's own Power Fx docs; the
+earlier-assumed "16,384-character limit" was never real.
+
+## Response formatting — pipeline
+
+Agent produces Markdown → gateway converts to HTML (`mistune`, custom
+renderer, `.claude/rules/gateway.md`) → Power Apps renders via an **HTML
+text** control, never a plain `Label` (which shows raw Markdown literally).
+`answer_markdown` is still sent alongside `answer_html` on every response —
+debugging/notebook value — but the HTML control always binds to `answer_html`.
+
+## Conversation lifecycle
+
+**The ID comes from the server, at app start** (`App.OnStart`, above),
+stored in `varConversationId`. **A session is the app lifecycle** — closing
+and reopening mints a new ID, so history doesn't carry across today (see
+"Chat history," below, for the planned fix).
+
+## Chat history — scoped, not yet built
+
+Decided during frontend planning: real but bounded scope, worth building.
+
+**Storage: a new BigQuery table, not Firestore and not a reuse of
+`agent_telemetry`.** Firestore was ruled out early — a long conversation's
+full history risks the 1MB document-size ceiling. Reusing `agent_telemetry`
+was considered and rejected in favor of a dedicated table: `AgentResponse`
+is already built in exactly the shape the frontend needs by the time a turn
+finishes (`answer_html` pre-rendered, `sources`/`suggested_follow_ups`
+already in final form) — serializing that object plus the question directly
+into its own table means the read side is a flat `SELECT`, nothing to
+re-derive at read time the way reusing telemetry would require
+(re-rendering markdown, re-deriving sources from `tool_calls`).
+
+**Write every turn unconditionally, including ones where `needs_approval`
+was `true` at the time.** Skipping those was considered and rejected: the
+live session already keeps a pause turn and its resolution as two separate
+rows (not one overwritten in place, see "Approval workflow" above), and
+history should match what the user actually saw live, not a trimmed version
+of it. Safety against a stale, unclickable approval card on a restored
+historical turn comes entirely from the frontend forcing `NeedsApproval:
+false` unconditionally on restore (below) — not from omitting the data.
+
+**Two new endpoints**, matching the existing REST-ish shape:
+- `GET /conversations` — list past conversations for the calling user:
+  `conversation_id`, first question (truncated, as the display title — no
+  model-generated naming needed, same pattern most chat products use), last
+  activity timestamp.
+- `GET /conversations/{id}/history` — every turn for one conversation,
+  ordered oldest first, each already shaped to match what `colChat` expects.
+
+**Restoring a conversation into the Gallery — `ForAll` + `Collect`, not
+`Set`.** `Collect` always appends; the loop runs it once per returned turn:
+```
+ForAll(
+    varHistoryResponse.turns,
+    Collect(colChat, {
+        Question: ThisRecord.question,
+        Answer: ThisRecord.answer_html,
+        ThinkingLog: "",
+        Sources: ThisRecord.sources,
+        FollowUps: ThisRecord.suggested_follow_ups,
+        IsPending: false,
+        NeedsApproval: false
+    })
+)
+```
+`ThinkingLog` is always empty on restore — it was never persisted anywhere,
+even in the new table, so this is a known, accepted gap, not an oversight.
+The existing `Visible` formula on that row already hides itself on empty
+content, so this needs no special-casing.
+
+**Still open:** the IAM grant for `agent-sa` to write the new table (new
+dataset, scoped narrowly — ask before assuming the dataset name or location,
+per `CLAUDE.md`), and the picker UI itself (an icon toggling a small Gallery
+bound to `GET /conversations`, each row's `OnSelect` triggering the restore
+above) — not yet built, same control patterns as everything else in this
+doc.

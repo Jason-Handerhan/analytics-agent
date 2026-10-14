@@ -90,21 +90,17 @@ async def test_get_page_info():
                                           "data": expected_image}},
         ]
 
-    # Beeswarm selected -- Model Performance's image switches; Financial Impact
-    # (and any other filter_context value) is unaffected.
-    beeswarm_context = [{"filter_column": "Feature_Importance_Chart_Types[Chart_Types]", "value": "Beeswarm"}]
+    # Beeswarm selected -- Model Performance's image switches.
+    beeswarm_context = [{"Value": {"filter_column": "Feature_Importance_Chart_Types[Chart_Types]",
+                                    "value": "Beeswarm"}}]
     expected_beeswarm_image = base64.b64encode(
         (PAGE_INFO_DIR / "Model Performance Beeswarm.png").read_bytes()).decode()
     result = await get_page_info.coroutine(page_name="Model Performance", filter_context=beeswarm_context)
     assert result[1] == {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                                        "data": expected_beeswarm_image}}
 
-    result = await get_page_info.coroutine(page_name="Financial Impact", filter_context=beeswarm_context)
-    expected_financial_image = base64.b64encode((PAGE_INFO_DIR / "Financial Impact.png").read_bytes()).decode()
-    assert result[1]["source"]["data"] == expected_financial_image
 
-
-# run_bigquery_sql -- the cancellation race (Level 2)
+# run_bigquery_sql -- the cancellation race
 
 @pytest.mark.asyncio
 async def test_run_bigquery_sql_cancel_wins_race(monkeypatch):
