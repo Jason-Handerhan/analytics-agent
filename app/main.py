@@ -21,8 +21,8 @@ async def main() -> None:
     gateway_port = int(os.environ["PORT"])
     mcp_app = mcp.http_app()
 
-    # Server.serve() is a plain coroutine -- unlike uvicorn.run()/mcp.run(),
-    # which each call asyncio.run() internally and BLOCK the whole process
+    # Server.serve() is a plain coroutine -- unlike uvicorn.run()/mcp.run() which are sync calls,
+    # uvicorn.run()/mcp.run() each call asyncio.run() internally and BLOCK the whole process
     # until that one server stops. .serve() lets both servers run as
     # ordinary coroutines in ONE shared event loop (asyncio.gather below)
     

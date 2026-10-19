@@ -7,6 +7,8 @@ generate_chart itself uses -- but one test per chart type packs render,
 dispatch, every guardrail, and every nuance into a single function rather
 than spreading them across many. Not exhaustive by design.
 """
+import textwrap
+
 import pandas as pd
 import pytest
 from fastmcp.exceptions import ToolError
@@ -24,6 +26,7 @@ from app.mcp_server.chart_tool import (
     MAX_HISTOGRAM_BUCKETS, MAX_BOX_CATEGORIES, MAX_HEATMAP_AXIS,
     MAX_HEATMAP_ANNOT_FONTSIZE, MAX_PARETO_LABELS, MAX_CATEGORY_LABEL_LENGTH,
     TITLE_FONTSIZE, AXIS_LABEL_FONTSIZE, TICK_LABEL_FONTSIZE, LEGEND_FONTSIZE,
+    AXIS_LABEL_WRAP_CHARS, GROUPED_BAR_VALUE_FONTSIZE,
 )
 
 LABELS = {"title": "T", "x_label": "X", "y_label": "Y"}
@@ -91,7 +94,8 @@ def test_bar_and_horizontal_bar(cls, chart_type, x_field, y_field):
 
 
 def test_grouped_bar():
-    """Render, shared font hierarchy via _finish(), and the max-categories cap."""
+    """Render, shared font hierarchy via _finish(), label wrapping,
+    width-aware value labels, and the max-categories cap."""
     data = [{"model": "LightGBM", "recall": 0.367, "[Split]": "test"},
             {"model": "LightGBM", "recall": 0.412, "[Split]": "train"}]
     spec = {"chart_type": "grouped_bar", "x_field": "model", "y_field": "recall",
@@ -108,10 +112,31 @@ def test_grouped_bar():
     assert ax.xaxis.get_ticklabels()[0].get_fontsize() == TICK_LABEL_FONTSIZE
     assert legend.get_texts()[0].get_fontsize() == LEGEND_FONTSIZE
 
+    # Long axis labels wrap via _finish() too -- also shared by every chart
+    # type, checked once here.
+    long_label_spec = {**spec, "y_label": "Average SHAP Value (impact on reorder probability)"}
+    fig2 = validate_and_render(data, long_label_spec, GroupedBarChartSpec)
+    assert fig2.axes[0].yaxis.label.get_text() == textwrap.fill(
+        "Average SHAP Value (impact on reorder probability)", width=AXIS_LABEL_WRAP_CHARS)
+
     over_cap = [{"model": f"m{i}", "recall": 0.1, "split": "test"}
                 for i in range(MAX_GROUPED_BAR_CATEGORIES + 1)]
     with pytest.raises(ToolError, match="Too many x-axis categories"):
         validate_and_render(over_cap, {**spec, "hue_field": "split"}, GroupedBarChartSpec)
+
+    # width_aware value labels: a roomy chart (few categories) keeps its
+    # labels, at the smaller grouped-bar fontsize; a cramped one (many
+    # categories x many hue groups, bars flush with no gap) blanks any
+    # label wider than its own bar instead of overlapping the next one.
+    roomy_labels = [t.get_text() for t in fig.axes[0].texts]
+    assert roomy_labels == ["0.367", "0.412"]
+    assert fig.axes[0].texts[0].get_fontsize() == GROUPED_BAR_VALUE_FONTSIZE
+
+    cramped = [{"model": f"m{i}", "recall": -0.6686, "split": s}
+               for i in range(MAX_GROUPED_BAR_CATEGORIES)
+               for s in ("test", "train", "validation")]
+    fig3 = validate_and_render(cramped, {**spec, "hue_field": "split"}, GroupedBarChartSpec)
+    assert "" in [t.get_text() for t in fig3.axes[0].texts]
 
 
 def test_stacked_horizontal_bar():
@@ -206,10 +231,10 @@ def test_box():
 
 
 def test_heatmap():
-    """Duplicate-grain cap, max-categories cap, and annotation dropout at
-    high density."""
-    # A duplicate (x, y) pair means the query returned the wrong grain --
-    # that must fail, not silently pick one value.
+    """Duplicate-grain cap, max-categories cap, annotation dropout at high
+    density, and magnitude-aware cell-annotation formatting (no scientific
+    notation)."""
+    # Duplicate (x, y) pair.
     dupes = [{"order_dow": 0, "order_hour": 10, "orders": 812},
              {"order_dow": 0, "order_hour": 10, "orders": 999}]
     spec = {"chart_type": "heatmap", "x_field": "order_hour", "y_field": "order_dow",
@@ -221,13 +246,19 @@ def test_heatmap():
     with pytest.raises(ToolError, match="Too many y-axis categories"):
         validate_and_render(over_cap, spec, HeatmapChartSpec)
 
-    small_grid = [{"order_hour": x, "order_dow": y, "orders": x + y} for x in range(2) for y in range(2)]
+    # Large value -- must not render as scientific notation.
+    small_grid = [{"order_hour": 0, "order_dow": 0, "orders": 54_000},
+                  {"order_hour": 0, "order_dow": 1, "orders": 1},
+                  {"order_hour": 1, "order_dow": 0, "orders": 2},
+                  {"order_hour": 1, "order_dow": 1, "orders": 3}]
     fig = validate_and_render(small_grid, spec, HeatmapChartSpec)
-    assert len(fig.axes[0].texts) == 4
+    texts = [t.get_text() for t in fig.axes[0].texts]
+    assert len(texts) == 4
+    assert "54K" in texts
+    assert not any("e+" in t for t in texts)
     assert fig.axes[0].texts[0].get_fontsize() <= MAX_HEATMAP_ANNOT_FONTSIZE
 
-    # Below MIN_HEATMAP_ANNOT_FONTSIZE, annotations are dropped entirely --
-    # color + colorbar carry the value instead of illegible overlapping text.
+    # Annotations dropped below MIN_HEATMAP_ANNOT_FONTSIZE.
     dense_grid = [{"order_hour": x, "order_dow": y, "orders": x + y}
                   for x in range(MAX_HEATMAP_AXIS) for y in range(MAX_HEATMAP_AXIS)]
     fig2 = validate_and_render(dense_grid, spec, HeatmapChartSpec)

@@ -18,3 +18,4 @@ node_modules/
 
 # Personal reference notes, not project docs
 oauth-oidc-reference.md
+async-event-loop-and-vpc-security-reference.md

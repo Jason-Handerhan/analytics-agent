@@ -443,10 +443,10 @@ item 3).
 
 - Calling `build_static_context(model, static_text)` — the single caching
   adapter. **Takes the model name, not a provider**, so switching models is a
-  one-line config change with nothing else to update. **Seven components in
+  one-line config change with nothing else to update. **Six components in
   the static block, two of them split further** — `SYSTEM_INSTRUCTIONS`
-  first, then reference material, with the few-shot examples interleaved
-  next to the schema each set demonstrates rather than trailing as one block:
+  first, then reference material, with DAX's few-shot examples interleaved
+  next to the schema they demonstrate rather than trailing as a separate block:
 
   1. **`SYSTEM_INSTRUCTIONS`** — role and behavioral rules, established
      before the model sees any reference material.
@@ -469,7 +469,27 @@ item 3).
   6. **DAX few-shot examples** — real, verified query patterns against the
      schema just shown.
   7. **`BIGQUERY_SCHEMA`** — read from `agent_safe` on first real use.
-  8. **BigQuery few-shot examples** — same reasoning as 6, next to their schema.
+
+  **BigQuery few-shot examples live in `run_bigquery_sql`'s own tool
+  description, not here (2026-10-19) — moved out of the static block, unlike
+  DAX's.** `BIGQUERY_FEW_SHOT_EXAMPLES` is a module-level constant in
+  `app/orchestrator/tools.py`, appended to `run_bigquery_sql.description`
+  right after the `@tool`-decorated function is defined — not inlined into
+  the docstring itself, since a docstring can't interpolate a variable
+  (an f-string docstring doesn't populate `__doc__` at all, confirmed
+  directly: it's a runtime expression, not the compile-time constant Python's
+  docstring mechanism requires). `run_bigquery_sql` is already local, not
+  MCP-hosted (`.claude/rules/tools.md`), so there's no reusability contract
+  its description could violate by carrying this project's real table/query
+  patterns — putting them where the model reads them right as it's deciding
+  how to call the tool follows the same salience reasoning `submit_answer`'s
+  formatting contract did (`.claude/rules/tools.md`). DAX's few-shots stay
+  here instead, deliberately: `run_dax_query` *is* MCP-hosted and meant to be
+  reusable against a different semantic model, so baking this project's own
+  measure/table names into its description would misrepresent it as portable
+  when it isn't (`.claude/rules/tools.md` has the full reasoning, including
+  the deferred idea of adding *generic*
+  DAX examples there instead, once an actual second deployer exists).
 
   **3 and 4 are why the semantic model isn't vector-searched.** With the whole
   schema in context, measure discovery is deterministic: the model can't fail
@@ -479,7 +499,7 @@ item 3).
   caching requirement.** A cache hit needs a byte-identical prefix, so
   whatever order is picked must be fixed and everything varying per turn —
   question, filter context, history — goes *after* the `cache_control`
-  marker. Interleaving the few-shot examples with their schema, or leading
+  marker. Interleaving DAX's few-shot examples with its schema, or leading
   with `SYSTEM_INSTRUCTIONS`, costs nothing: the whole block is one static,
   contiguous prefix regardless of the order chosen inside it.
 
@@ -491,7 +511,6 @@ item 3).
       RELATIONSHIPS, PARAMETERS,          # same artifact, same parse
       DAX_FEW_SHOT_EXAMPLES,
       get_bigquery_schema(),              # lazy, cached on first call
-      BIGQUERY_FEW_SHOT_EXAMPLES,
   ])
   ```
 

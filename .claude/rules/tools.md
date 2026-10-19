@@ -627,6 +627,22 @@ close that gap for a generic client, at some latency/relationship-awareness
 cost this project's own static-context approach avoids. Not building it here
 — tracked as an optional Phase 7 item (`docs/build-order.md`).
 
+**A second reusability gap, same status — not building it now (2026-10-19):**
+`DAX_FEW_SHOT_EXAMPLES` stays in the static context block, project-specific
+(real measure/table names), not duplicated into `run_dax_query`'s own
+docstring even in a genericized form. Discussed and deliberately deferred: a
+different deployer picking this tool up today gets a blank slate — no
+illustrative patterns at all — which a handful of *generic* (placeholder
+names, not this project's own) few-shot examples baked into the tool's own
+schema would fix, without conflicting with the reusability contract that
+justifies hosting it (unlike this project's real examples, which would
+mislead a different deployer's schema and were ruled out for exactly that
+reason). Not worth building speculatively, though — it's pure investment in
+a reuse case nobody has yet, with zero benefit to this project's own served
+questions (the concrete, schema-grounded examples already in context are
+strictly more useful here than a generic version would be). Revisit when an
+actual second deployer is real, not hypothetical.
+
 ## `get_measure_dax` — lookup, not search
 
 **Not MCP-hosted** (see the hosting table above) — a plain function in

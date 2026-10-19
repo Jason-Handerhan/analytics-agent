@@ -211,17 +211,33 @@ class FormattedValueSpec(BaseModel):
 **A mixin, not a `ChartSpecBase` field.** Only six types have a genuinely
 ambiguous value axis — `bar`, `horizontal_bar`, `grouped_bar`,
 `stacked_horizontal_bar`, `line`, `box`. `pareto`/`concentration` already
-hardcode `%` for their cumulative axis; **`heatmap` is deliberately
-excluded** — `sns.heatmap(annot=True, fmt=...)` only accepts a plain
-format-spec string per cell, not a callable, so plugging in custom
-formatting there means pre-building a matching-shape array of
-already-formatted strings instead. Judged not worth the complexity for one
-chart type; left as-is. Given cell values are unlabeled with a formatter
-either way, `heatmap` instead gets a **`cmap="Blues"`** — a single-hue
-sequential ramp, light→dark, the correct encoding for a magnitude-only,
-non-diverging grid (day-of-week × hour order counts have no meaningful
-zero-crossing, so a diverging map like the previous default would have been
-semantically wrong, not just a style preference).
+hardcode `%` for their cumulative axis; **`heatmap` is excluded from the
+mixin** — its cell values are never a percent/currency choice, always plain
+magnitude formatting, so there's no model-facing choice to expose. `heatmap`
+also gets a **`cmap="Blues"`** — a single-hue sequential ramp, light→dark,
+the correct encoding for a magnitude-only, non-diverging grid (day-of-week ×
+hour order counts have no meaningful zero-crossing, so a diverging map like
+the previous default would have been semantically wrong, not just a style
+preference).
+
+**`heatmap`'s cell annotations *do* go through `_format_value` now, fixed
+2026-10-19 — not left as the raw `sns.heatmap(annot=True, fmt=".4g")` this
+section once described.** That raw `fmt=".4g"` has exactly the same
+scientific-notation bug already fixed for bar/axis labels (`_format_value`'s
+own section above) — any cell value in the tens of thousands (an ordinary
+hourly order count) flips to `"5.4e+04"`-style text, confirmed live, not
+hypothetical. `sns.heatmap`'s `fmt=` only accepts a plain format-spec
+string per cell, not a callable, so the fix is exactly what this section
+previously said wasn't worth the complexity: pre-build a matching-shape
+grid of already-formatted strings (`grid.map(lambda v: self._format_value(v,
+"auto"))`, pandas 3.x's current name for the elementwise operation — the
+older `applymap` is gone, not just deprecated, in the pandas version this
+project runs) and pass that as `annot=` with `fmt=""`, instead of handing
+seaborn the raw numeric grid to format itself. Confirmed live that seaborn
+still correctly skips annotating a masked/NaN cell regardless of what
+string sits in that position in the custom annotation grid, so the existing
+"hide annotations once cells are too small to read" behavior
+(`MIN_HEATMAP_ANNOT_FONTSIZE`) needed no changes alongside this.
 
 **`histogram`'s count doesn't need the *choice* — it's never a percent or
 currency — but it still gets `_apply_value_format`, just without the mixin
@@ -305,6 +321,71 @@ default (`.claude/rules/orchestrator.md`) — the only thing an optional
 `None` default actually bought was letting the model emit `null` and get the
 raw-column-name fallback. Requiring a real, non-empty string (`min_length=1`)
 closes that path instead of just discouraging it.
+
+**Long title/axis-label text wraps onto multiple lines in `_finish()`, rather
+than being capped or rejected (2026-10-15).** A real chart surfaced this: a
+y-axis label like "Average SHAP Value (impact on reorder probability)"
+rendered on one line runs the full height of the plot and collides with the
+title. Considered and rejected: a Pydantic `max_length` that rejects an
+over-length label outright — that forces a retry for what's a cosmetic
+concern, not a correctness or cost one (unlike the row/byte caps, where
+silently proceeding would hide real harm). `_wrap_label(text, width)`
+(`textwrap.fill`, a no-op on text already shorter than `width`) applies to
+`title`/`x_label`/`y_label` for every chart type via the shared `_finish()`,
+after `_clean_label` strips any bracket alias. `TITLE_WRAP_CHARS` (60) is
+wider than `AXIS_LABEL_WRAP_CHARS` (30) — the title runs horizontally across
+the full figure width, while `x_label`/`y_label` run vertically (`y_label`)
+or in a narrower horizontal band (`x_label`) and crowd the plot sooner.
+
+**The overlapping bar-value-label problem this same chart surfaced — fixed,
+2026-10-18, but not the way `_annotate_segments` was first expected to
+generalize.** `MAX_LABELED_BARS` measures bar *count* per container, not
+whether a label's rendered width actually fits the space its bar occupies —
+a `grouped_bar` with ~10 x-categories × 3 hue bars stays under the count
+threshold while still producing genuinely illegible, overlapping labels,
+since three floating-point labels per x-slot don't fit in a fixed-width
+figure. Lowering the threshold was considered and rejected as too blunt (it
+would drop every label on any `grouped_bar` past the new count, including
+cases with fewer hue groups that would have rendered fine).
+
+`_annotate_segments`' own check (`segment value / axis range >= 0.10`)
+doesn't generalize to `grouped_bar` the way it first looked like it would:
+it works for `stacked_horizontal_bar` specifically because a segment's
+rendered width *is* proportional to its value, laid end-to-end along one
+continuous axis. A grouped bar's rendered width has nothing to do with its
+value at all — it's pure layout (category count, hue count, figure width),
+so a short bar and a tall bar in the same cluster are the same width. The
+real rule, worked out instead: **don't show a label wider than the bar it
+labels.**
+
+`_annotate_values` gained two new parameters — `fontsize` (grouped bars get
+their own smaller `GROUPED_BAR_VALUE_FONTSIZE`, below `VALUE_ANNOTATION_FONTSIZE`,
+since they have far less width per bar than `bar`/`pareto`) and
+`width_aware` (`grouped_bar` only). `width_aware=True` computes each bar's
+real rendered width from geometry already available right after
+`sns.barplot()` runs — the bar's own data-unit width (`patch.get_width()`),
+the axes' real size in inches (`ax.get_position().width * FIGSIZE[0]`), and
+the x-axis's data range — converted to points, no render pass needed.
+**The label's own width is a per-character estimate, not a true
+measurement** (`len(text) * fontsize * CHAR_WIDTH_FACTOR`) — reasonable here
+specifically because the label content is always numeric
+(`_format_value`'s output: digits, `.`, `-`, `,`, `%`, `$`), which have far
+more uniform glyph widths than general text would. `LABEL_FIT_MARGIN` (0.85)
+covers that estimate's imprecision, plus the axes shrinking slightly further
+once `_finish()`'s `tight_layout()`/legend adjustment run after this check —
+this runs mid-`render()`, before the axes' position is fully settled, so the
+margin is deliberately conservative rather than exact. A label past the
+margin gets blanked individually (`label.set_text("")`), not the whole
+container.
+
+**Scoped to `grouped_bar` only, not folded into every `_annotate_values`
+caller.** `bar`/`pareto` use the same placement mechanism but have
+meaningfully more room per bar in practice; `horizontal_bar` has a different
+geometry entirely — its labels sit past the bar's *end* in the value
+direction, not squeezed within the bar's own cross-wise thickness, so "label
+wider than bar" isn't the right check there. The parameters exist on
+`_annotate_values` generically, so widening this to `bar`/`pareto` later is
+a one-line change at their call sites, not a new mechanism.
 
 ## Every spec's docstring states its required grain
 

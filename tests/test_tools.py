@@ -15,6 +15,13 @@ import app.orchestrator.tools as tools_module
 from app.orchestrator.tools import PAGE_INFO_DIR, PAGES, ToolError, get_measure_dax, get_page_info, run_bigquery_sql
 
 
+def test_run_bigquery_sql_description_has_few_shot_examples():
+    """BigQuery's few-shot examples are appended to the tool's own
+    description, not the static context block (.claude/rules/orchestrator.md)."""
+    assert "EXAMPLES" in run_bigquery_sql.description
+    assert "reorder rate by department" in run_bigquery_sql.description
+
+
 # --- Fakes for run_bigquery_sql's cancellation race -- no real BigQuery/Firestore ---
 
 class FakeRows(list):

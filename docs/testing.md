@@ -76,11 +76,12 @@ async def test_cannot_access_another_users_conversation():
 
 ```python
 # tests/test_static_context.py
-def test_static_context_contains_all_seven_components():
+def test_static_context_contains_all_six_components():
     """Orientation bundle, TABLE_REGISTRY, MEASURE_REGISTRY,
-    RELATIONSHIPS/PARAMETERS, bigquery_schema, system instructions, few-shots —
-    all seven, every turn, in a FIXED order: a cache hit needs a
-    byte-identical prefix.
+    RELATIONSHIPS/PARAMETERS, bigquery_schema, system instructions, DAX
+    few-shots — all six, every turn, in a FIXED order: a cache hit needs a
+    byte-identical prefix. BigQuery's own few-shots live in
+    run_bigquery_sql's docstring now, not the static block.
 
     Two silent-failure modes this covers. Table registry and relationships
     describe DIFFERENT tables (disconnected vs. connected) — dropping either

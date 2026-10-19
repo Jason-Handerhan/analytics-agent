@@ -470,17 +470,21 @@ from history, never send another message in it), and a leftover Firestore
 document costs nothing meaningful. Keeping the option to resume open
 indefinitely is a property worth having, not a gap to close.
 
-**What chat history restoration *does* need, instead of a TTL: a live check
-against `live_turns` at restore time, not blind trust of the historical
-table's frozen `needs_approval` value either direction.** A row's value at
-write time could be stale by the time it's restored (resolved in a later
-session, or — in principle — still genuinely pending). On restoring a
-conversation, look up `live_turns/{conversation_id}` live: if a real
-`pending_approval` still exists there, show that row's card as actually
-actionable; if not, render it as a frozen historical message with no
-buttons. See "Chat history," below — this is listed there as part of the
-restore design, not solved by anything in the main write/restore flow
-itself.
+**What chat history restoration actually needs, decided and built without a
+live `live_turns` check at all — simpler than originally planned here.**
+The original plan assumed a row's `needs_approval` could go stale between
+write and restore (resolved in a later session), requiring a live lookup
+against `live_turns/{conversation_id}` to confirm which row is genuinely
+still actionable. Tracing through the write path again during the actual
+build: every resolution (`approved` or `rejected`) is itself a new `/ask`
+call, which always produces its own new, later chat-history row — so a
+conversation's **last** row always reflects true current state by
+construction, with no window where it can go stale. Every *other* row's
+`needs_approval` is real history (it genuinely was `true` when written) but
+not current status, and must be forced `false` regardless of its own stored
+value. See "Chat history," below, for the actual restore formula — a live
+`live_turns` check was considered and dropped once this was traced through,
+not left for later.
 
 **The enriched pending-approval message (cost + query) is built entirely on
 the backend, inside `finalize_node`'s `needs_approval` branch** — appended
@@ -613,9 +617,13 @@ stored in `varConversationId`. **A session is the app lifecycle** — closing
 and reopening mints a new ID, so history doesn't carry across today (see
 "Chat history," below, for the planned fix).
 
-## Chat history — scoped, not yet built
+## Chat history — built and live-verified, 2026-10-14
 
 Decided during frontend planning: real but bounded scope, worth building.
+Backend built first (`.claude/rules/gateway.md`'s chat-history section,
+`docs/testing.md` §4c); this section is the frontend half — the picker UI
+and the restore logic — plus two real bugs found only once it was wired up
+end to end.
 
 **Storage: a new BigQuery table, not Firestore and not a reuse of
 `agent_telemetry`.** Firestore was ruled out early — a long conversation's
@@ -626,7 +634,10 @@ finishes (`answer_html` pre-rendered, `sources`/`suggested_follow_ups`
 already in final form) — serializing that object plus the question directly
 into its own table means the read side is a flat `SELECT`, nothing to
 re-derive at read time the way reusing telemetry would require
-(re-rendering markdown, re-deriving sources from `tool_calls`).
+(re-rendering markdown, re-deriving sources from `tool_calls`). Reached only
+via `turn-writer-sa` impersonation, the same identity and reasoning as
+telemetry's own writer — no direct `agent-sa` grant on this dataset at all
+(`.claude/rules/telemetry.md`).
 
 **Write every turn unconditionally, including ones where `needs_approval`
 was `true` at the time.** Skipping those was considered and rejected: the
@@ -634,56 +645,125 @@ live session already keeps a pause turn and its resolution as two separate
 rows (not one overwritten in place, see "Approval workflow" above), and
 history should match what the user actually saw live, not a trimmed version
 of it. Safety against a stale, unclickable approval card on a restored
-historical turn comes entirely from the frontend forcing `NeedsApproval:
-false` unconditionally on restore (below) — not from omitting the data.
+historical turn comes from the restore formula forcing `NeedsApproval:
+false` on every row except the conversation's actual last one (below) — not
+from omitting the data, and not from a live `live_turns` check, which turned
+out to be unnecessary (see the "Approval workflow" section's restore-time
+note, above, for why).
 
-**Two new endpoints**, matching the existing REST-ish shape:
+**Two endpoints**, matching the existing REST-ish shape:
 - `GET /conversations` — list past conversations for the calling user:
-  `conversation_id`, first question (truncated, as the display title — no
-  model-generated naming needed, same pattern most chat products use), last
-  activity timestamp.
+  `conversation_id`, first question (truncated at a word boundary, as the
+  display title — no model-generated naming needed, same pattern most chat
+  products use), last activity timestamp.
 - `GET /conversations/{id}/history` — every turn for one conversation,
   ordered oldest first, each already shaped to match what `colChat` expects.
 
-**Restoring a conversation into the Gallery — `ForAll` + `Collect`, not
-`Set`.** `Collect` always appends; the loop runs it once per returned turn:
+**The picker UI.** A clock icon (plain outline, `#808080` stroke, transparent
+background — same treatment as New Chat, a secondary action not a primary
+one) toggles a `Container` (`grpConversationPicker`: a title label, an X
+close icon, and a flexible-height `Gallery` bound to `colConversations`) via
+`varShowConversationPicker`, gating all three controls' visibility at once
+rather than setting it per-control. The icon's `OnSelect` refetches on open
+only; the X icon's `OnSelect` closes and resets `colConversations` back to
+just its seed row — closing without this left stale data from the previous
+open visible for however long the next fetch took, a real, confirmed bug
+before this reset was added. `colConversations`'s columns are
+PascalCase (`ConversationId`/`Title`/`LastActivityAt`, matching `colChat`'s
+own convention), mapped from the connector's snake_case response via
+`RenameColumns` — column names there are bare identifiers, not quoted
+strings, confirmed live after an initial attempt errored.
+
+**Restoring a conversation — the real, final formula**, on the picker row's
+`OnSelect`:
 ```
-ForAll(
-    varHistoryResponse.turns,
-    Collect(colChat, {
-        Question: ThisRecord.question,
-        Answer: ThisRecord.answer_html,
-        ThinkingLog: "",
-        Sources: ThisRecord.sources,
-        FollowUps: ThisRecord.suggested_follow_ups,
-        IsPending: false,
-        NeedsApproval: false
-    })
+Set(varShowConversationPicker, false);
+ClearCollect(colConversations, {ConversationId: "seed", Title: "seed", LastActivityAt: Now()});
+
+Set(varConversationId, ThisItem.ConversationId);
+Set(varQuestion, Blank());
+Set(varResponse, Blank());
+Set(varCurrentThinkingLog, Blank());
+Set(varCurrentStatus, Blank());
+Set(varWaitingForAnswer, false);
+Set(varPrefill, "");
+Set(varCancelRequested, false);
+Set(varResetTurnTimer, false);
+Reset(TextInput1);
+
+ClearCollect(colChat, {Question: "seed", Answer: "seed", ThinkingLog: "seed", Sources: "seed", FollowUps: Filter(Table({Value: "seed"}), false), IsPending: false, NeedsApproval: false});
+
+With(
+    {turns: AnalyticsAgent.GetConversationHistory(ThisItem.ConversationId).turns},
+    ForAll(
+        turns,
+        Collect(colChat, {
+            Question: ThisRecord.question,
+            Answer: ThisRecord.answer_html,
+            ThinkingLog: "",
+            Sources: Concat(ThisRecord.sources, Value, ", "),
+            FollowUps: ThisRecord.suggested_follow_ups,
+            IsPending: false,
+            NeedsApproval: false
+        })
+    );
+    UpdateIf(colChat, true, {IsPending: false});
+    If(
+        Last(turns).needs_approval,
+        Patch(colChat, Last(colChat), {NeedsApproval: true})
+    )
 )
 ```
+Reuses the existing `conversation_id` rather than minting a new one, resets
+every loose variable `App.OnStart` resets, re-seeds `colChat`, then restores.
+`Sources` is comma-joined (`Concat(..., Value, ", ")`), matching the normal
+Send flow — `colChat.Sources` is `Text`, not a raw table, a mismatch the
+very first draft of this formula got wrong by assigning the array directly.
 `ThinkingLog` is always empty on restore — it was never persisted anywhere,
 even in the new table, so this is a known, accepted gap, not an oversight.
-The existing `Visible` formula on that row already hides itself on empty
-content, so this needs no special-casing.
+The trailing `UpdateIf(colChat, true, {IsPending: false})` is a no-op on
+values (every row is already `false`) but a real second write — the same
+"doesn't render until a second write" Gallery quirk `colChat` already had,
+now hitting a conversation with exactly one turn, which otherwise has
+nothing after its own `Collect` to nudge it into rendering.
 
-**`NeedsApproval` is hardcoded `false` above, and that's deliberately
-incomplete — see "Approval workflow"'s restore-time note, above, for the
-real design.** A row restored with `needs_approval: true` at its original
-write time shouldn't automatically get a live, clickable card just because
-the historical table says so — the pause could already be resolved from a
-later session, or (with no TTL, by design) could genuinely still be live.
-The restore loop needs an extra, live lookup against
-`live_turns/{conversation_id}` per conversation being restored (not per
-row): if a real `pending_approval` is still there, that turn's row should
-get `NeedsApproval: true` instead of the hardcoded `false` above, making its
-card genuinely actionable; otherwise `false` is correct as shown. Not yet
-built — the `ForAll`/`Collect` shape above is the easy 90%, this lookup is
-the real remaining piece.
+**Every row's `NeedsApproval` is forced `false` at `Collect` time, and only
+the conversation's actual last turn gets patched back to `true`, if the
+backend itself says that turn is still pending.** Collecting
+`ThisRecord.needs_approval` directly on every row — the first version of
+this formula — reproduced exactly the symptom "every approve/reject card in
+the whole history shows up at once": every row that *ever* paused keeps
+`needs_approval: true` in storage forever, since a resolution never
+retroactively corrects the row that paused, it just adds a new one
+afterward. Only the very last row's stored value can ever still be live.
+`Patch(colChat, Last(colChat), {NeedsApproval: true})` targets that one row
+directly — `Patch` on a local collection matches by whole-record value
+equality, not identity, so this is only safe because nothing else in
+`colChat` is guaranteed byte-identical to the last row; a duplicate-valued
+row elsewhere (plausible for two **rejected** turns in the same
+conversation, which always share the same canned message) could in
+principle cause this to patch more than one row. Not hit in practice, worth
+knowing if `NeedsApproval` ever looks wrong on a rejected-heavy history.
 
-**Still open:** the IAM grant for `agent-sa` to write the new table (new
-dataset, scoped narrowly — ask before assuming the dataset name or location,
-per `CLAUDE.md`), the `live_turns` live-check on restore described just
-above, and the picker UI itself (an icon toggling a small Gallery bound to
-`GET /conversations`, each row's `OnSelect` triggering the restore
-above) — not yet built, same control patterns as everything else in this
-doc.
+**The real bug, found only once a restored conversation had more than one
+turn: the Question label's `Text` property was a bare `varQuestion`, not
+`ThisItem.Question`.** Every row in the gallery was displaying the exact
+same thing — whatever the single global `varQuestion` currently held — not
+its own stored value. This had always worked for ordinary live turns purely
+by coincidence: there's only ever one turn anyone is looking at at a time,
+and `colChat.Question` happens to get written correctly anyway by Send's
+own existing `UpdateIf(colChat, IsPending = true, {Question: varQuestion})`
+(the same second-write quirk fix, originally built for a different reason).
+Nobody was reading that stored value back out, so nobody noticed every row
+was really just mirroring one shared variable until restore put several
+rows on screen simultaneously: right after restore `varQuestion` is
+`Blank()`, so every row showed blank, and the next real question overwrote
+all of them at once, including historical "Approved"/"Rejected" rows,
+because they were never independent in the first place. Fixed by changing
+the label's `Text` to `ThisItem.Question` — safe for live turns too, since
+`colChat.Question` is already correctly populated by the time a row is ever
+actually rendered on screen.
+
+**Still open:** whether the New Chat button's `OnSelect` (which mirrors
+`App.OnStart`) also resets `varShowConversationPicker` to `false` — flagged
+during this build, not yet confirmed done.

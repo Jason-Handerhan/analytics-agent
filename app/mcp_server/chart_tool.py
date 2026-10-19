@@ -1,6 +1,7 @@
 import datetime
 import io
 import re
+import textwrap
 import uuid
 from abc import ABC, abstractmethod
 from typing import Annotated, Literal, Union
@@ -26,43 +27,46 @@ FIGSIZE    = (9.0, 5.5)      # inches
 DPI        = 150
 GRID_ALPHA = 0.3             # gridline opacity
 
-CONCENTRATION_BUCKETS = 20   # fixed NTILE grain -- 5% per bucket
-MAX_PARETO_LABELS     = 25   # cumulative-% labels shown before evenly thinning
-MAX_LABELED_BARS      = 25   # bar value labels skipped entirely above this count
-CUMULATIVE_AXIS_LABEL = "Cumulative % of Total"   # fixed right-axis label -- concentration/pareto
+CONCENTRATION_BUCKETS = 20   # NTILE grain, 5% per bucket
+MAX_PARETO_LABELS     = 25   # cumulative-% labels shown before thinning
+MAX_LABELED_BARS      = 25   # bar value labels skipped above this count
+CUMULATIVE_AXIS_LABEL = "Cumulative % of Total"   # concentration/pareto right axis
 
-MAX_BAR_CATEGORIES         = 150  # bar, horizontal_bar, pareto -- matches the
-                                   # documented "aisles ~134" ceiling
-MAX_GROUPED_BAR_CATEGORIES = 15   # denser than plain bar -- multiple bars per cluster
+MAX_BAR_CATEGORIES         = 150  # bar, horizontal_bar, pareto
+MAX_GROUPED_BAR_CATEGORIES = 15   # grouped_bar
 MAX_STACKED_BAR_CATEGORIES = 50
-MAX_STACKED_BAR_SEGMENTS   = 10   # matches the documented "3-5 reads well, 10 is a muddle"
+MAX_STACKED_BAR_SEGMENTS   = 10
 MAX_LINE_POINTS            = 100
 MAX_LINE_HUE_GROUPS        = 8
 MAX_HISTOGRAM_BUCKETS      = 50
 MAX_BOX_CATEGORIES         = 30
 MAX_HEATMAP_AXIS           = 30
-HEATMAP_FONT_FACTOR        = 18   # scales cell size (inches) to annotation fontsize (points)
-MAX_HEATMAP_ANNOT_FONTSIZE = 14   # cap so a sparse grid doesn't get oversized numbers
-MIN_HEATMAP_ANNOT_FONTSIZE = 5    # below this, drop annotations -- color + colorbar carry the value
+HEATMAP_FONT_FACTOR        = 18   # cell size (inches) to annotation fontsize (points)
+MAX_HEATMAP_ANNOT_FONTSIZE = 14
+MIN_HEATMAP_ANNOT_FONTSIZE = 5    # below this, annotations are dropped
 
-MAX_CATEGORY_LABEL_LENGTH = 40   # longer labels crowd the plot area and break
-                                  # segment/value-label placement -- horizontal_bar,
-                                  # stacked_horizontal_bar only
+MAX_CATEGORY_LABEL_LENGTH = 40   # horizontal_bar, stacked_horizontal_bar only
 
-# Title > axis labels > ticks/legend -- applied uniformly to every chart type in _finish().
+# Font size hierarchy, applied uniformly in _finish().
 TITLE_FONTSIZE       = 16
 AXIS_LABEL_FONTSIZE  = 14
 TICK_LABEL_FONTSIZE  = 10
 LEGEND_FONTSIZE      = 10
-LEGEND_MAX_COLUMNS   = 4      # legend sits in a row below the plot; wraps past this
+LEGEND_MAX_COLUMNS   = 4      # legend wraps to a new row past this many entries
 
-# Bar/segment value labels (_annotate_values, _annotate_segments) -- drawn
-# mid-render, not part of _finish()'s chrome hierarchy above. Heatmap's cell
-# annotations are separate and already dynamically sized, not this constant.
-VALUE_ANNOTATION_FONTSIZE = 8
+# Title/axis-label wrap widths, in characters.
+TITLE_WRAP_CHARS      = 60
+AXIS_LABEL_WRAP_CHARS = 30
+
+# Bar/segment value label fontsize.
+VALUE_ANNOTATION_FONTSIZE  = 8
+GROUPED_BAR_VALUE_FONTSIZE = 7
+
+# Estimate a label's rendered width without a render pass.
+CHAR_WIDTH_FACTOR = 0.6   # avg glyph width, as a fraction of fontsize
+LABEL_FIT_MARGIN  = 0.85  # label must fit within this fraction of the bar's width
 
 # Matches a standalone "[Alias]" token, not a qualified "table[Column]" reference.
-# Used to strip brackets from chart labeling
 BRACKET_ALIAS_RE = re.compile(r"(?<![\w'])\[([^\[\]]+)\]")
 
 
@@ -87,6 +91,12 @@ class ChartSpecBase(BaseModel, ABC):
         text (a title, axis label, or legend title)"""
         return BRACKET_ALIAS_RE.sub(r"\1", text)
 
+    def _wrap_label(self, text: str, width: int) -> str:
+        """Wraps long title/axis-label text onto multiple lines rather than
+        letting it overflow or collide with the plot -- a no-op for text
+        already shorter than width."""
+        return textwrap.fill(text, width=width)
+
     def _style_legend(self, ax: plt.Axes) -> None:
         legend = ax.get_legend()
         # Legend title and entry font sizes.
@@ -96,10 +106,13 @@ class ChartSpecBase(BaseModel, ABC):
             text.set_fontsize(LEGEND_FONTSIZE)
 
     def _finish(self, fig: plt.Figure, ax: plt.Axes) -> plt.Figure:
-        # Title and axis labels, bracket aliases stripped.
-        ax.set_title(self._clean_label(self.title), pad=12, fontsize=TITLE_FONTSIZE)
-        ax.set_xlabel(self._clean_label(self.x_label), fontsize=AXIS_LABEL_FONTSIZE)
-        ax.set_ylabel(self._clean_label(self.y_label), fontsize=AXIS_LABEL_FONTSIZE)
+        # Title and axis labels, bracket aliases stripped, then wrapped.
+        ax.set_title(self._wrap_label(self._clean_label(self.title), TITLE_WRAP_CHARS),
+                     pad=12, fontsize=TITLE_FONTSIZE)
+        ax.set_xlabel(self._wrap_label(self._clean_label(self.x_label), AXIS_LABEL_WRAP_CHARS),
+                      fontsize=AXIS_LABEL_FONTSIZE)
+        ax.set_ylabel(self._wrap_label(self._clean_label(self.y_label), AXIS_LABEL_WRAP_CHARS),
+                      fontsize=AXIS_LABEL_FONTSIZE)
         # Tick label size.
         ax.tick_params(axis="both", labelsize=TICK_LABEL_FONTSIZE)
         # Legend below the plot, then styled.
@@ -126,18 +139,28 @@ class ChartSpecBase(BaseModel, ABC):
             fig.subplots_adjust(bottom=fig.subplotpars.bottom + legend_height)
         return fig
 
-    def _annotate_values(self, ax: plt.Axes) -> None:
-        """Bar value labels -- skipped entirely once any container holds more
-        than MAX_LABELED_BARS bars, so every caller (present and future) gets
-        the same overcrowding protection with no per-call-site threshold."""
+    def _annotate_values(self, ax: plt.Axes, fontsize: float = VALUE_ANNOTATION_FONTSIZE,
+                          width_aware: bool = False) -> None:
+        """Bar value labels, skipped entirely past MAX_LABELED_BARS bars per
+        container. width_aware=True also blanks an individual label wider
+        than its own bar."""
         # Skip labels when any bar container is too crowded.
         if any(len(container) > MAX_LABELED_BARS for container in ax.containers):
             return
         value_format = getattr(self, "value_format", "auto")
         # Label each bar container with its formatted value.
         for container in ax.containers:
-            ax.bar_label(container, fmt=lambda v: self._format_value(v, value_format),
-                        padding=2, fontsize=VALUE_ANNOTATION_FONTSIZE)
+            labels = ax.bar_label(container, fmt=lambda v: self._format_value(v, value_format),
+                                  padding=2, fontsize=fontsize)
+            if width_aware:
+                # Blank out any label wider than the bar it labels.
+                axes_width_inches = ax.get_position().width * FIGSIZE[0]
+                x_range = ax.get_xlim()[1] - ax.get_xlim()[0]
+                for patch, label in zip(container.patches, labels):
+                    bar_width_points = (patch.get_width() / x_range) * axes_width_inches * 72
+                    estimated_label_width = len(label.get_text()) * fontsize * CHAR_WIDTH_FACTOR
+                    if estimated_label_width > bar_width_points * LABEL_FIT_MARGIN:
+                        label.set_text("")
 
     def _format_value(self, value: float, value_format: str) -> str:
         """Formats one value for an axis tick or bar label. 'auto' picks based
@@ -311,8 +334,9 @@ class GroupedBarChartSpec(ChartSpecBase, FormattedValueSpec):
         fig, ax = self._setup()
         sns.barplot(data=df, x=self.x_field, y=self.y_field,
                     hue=self.hue_field, ax=ax)
-        # Bar value labels, then y-axis format.
-        self._annotate_values(ax)
+        # Bar value labels (smaller, width-aware -- bars sit flush against
+        # each other), then y-axis format.
+        self._annotate_values(ax, fontsize=GROUPED_BAR_VALUE_FONTSIZE, width_aware=True)
         self._apply_value_format(ax, "y")
         return self._finish(fig, ax)
 
@@ -539,6 +563,9 @@ class HeatmapChartSpec(ChartSpecBase):
 
     7 days x 24 hours = 168 rows. Both axes must be low-cardinality, or the
     grid is unreadable before the row cap is even reached.
+
+    Put the axis with MORE distinct values on x_field, not y_field -- the
+    figure is wider than tall.
     """
     chart_type: Literal["heatmap"] = Field(description='Always "heatmap".')
     x_field: str = Field(description="Column with the x-axis category.")
@@ -562,9 +589,11 @@ class HeatmapChartSpec(ChartSpecBase):
         # Annotation font scales with cell size, capped.
         fontsize = min(min(cell_width, cell_height) * HEATMAP_FONT_FACTOR, MAX_HEATMAP_ANNOT_FONTSIZE)
         # Hide annotations when too small to read.
-        annot = fontsize >= MIN_HEATMAP_ANNOT_FONTSIZE
-        sns.heatmap(grid, annot=annot, fmt=".4g", cmap="Blues", ax=ax,
-                    annot_kws={"fontsize": fontsize} if annot else None)
+        show_annot = fontsize >= MIN_HEATMAP_ANNOT_FONTSIZE
+        # Pre-format each cell's text to avoid scientific notation.
+        annot = grid.map(lambda v: self._format_value(v, "auto")) if show_annot else False
+        sns.heatmap(grid, annot=annot, fmt="", cmap="Blues", ax=ax,
+                    annot_kws={"fontsize": fontsize} if show_annot else None)
         return self._finish(fig, ax)
 
 

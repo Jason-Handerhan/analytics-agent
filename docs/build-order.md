@@ -26,10 +26,13 @@ Chat history's backend is built and live-verified, 2026-10-14: the
 impersonation shared with telemetry (`get_turn_writer_client` in
 `app/orchestrator/shared_helpers.py`) — confirmed via
 `notebooks/test_chat_history_endpoints.ipynb`, including the
-`assert_owns_conversation` 404 case. Still open: the
-`gateway-swagger2.json`/connector refresh for the two new endpoints, and the
-frontend conversation-picker UI — `docs/frontend.md`'s "Chat history"
-section has the full design for both. Gateway redeployed and
+`assert_owns_conversation` 404 case. Deployed to Cloud Run and the connector
+updated with the two new operations and tested live, 2026-10-14. **Frontend
+picker UI also built and live-verified, 2026-10-14** — the clock icon, the
+conversation-picker container/gallery, and the restore formula, including
+two real bugs found and fixed along the way (a `NeedsApproval` row-targeting
+fix and a Question-label binding bug affecting every restored row) —
+`docs/frontend.md`'s "Chat history" section has the full account. Gateway redeployed and
 `gateway-swagger2.json`/the live connector refreshed to the current 4-endpoint
 contract, 2026-10-11 — all four operations re-verified live through the
 Power Apps connector (Phase 1 item 4's entry below has the details), so
@@ -1406,17 +1409,19 @@ layer failed.
    Layer 1 tested (`tests/test_entry_exit.py`'s `test_build_agent_response`,
    asserting against the same `app/config.py` constants the renderer uses,
    not a hardcoded literal, so a future color tweak can't silently drift the
-   two out of sync). **Still entirely open: source badges, approval cards,
-   and the actual Power Apps HTML control binding/UI work** — this item was
-   never about those; `answer_html` is what those will render once built.
-3. **The cancel button** — a Power Apps button firing
-   `POST /ask/cancel/{conversation_id}` (`docs/frontend.md`). The endpoint and
-   cancellation path shipped in Phase 3; this is the UI half, alongside the
-   approve/reject buttons above.
-4. Progress indication, sample questions, follow-up chips — including the
-   `thinking_log`/`append_thinking` design (`.claude/rules/gateway.md`,
-   `docs/frontend.md`): a new `live_turns` field plus a gallery row per
-   summarized-thinking round, styled distinctly from a real answer.
+   two out of sync). **The frontend half (source badges, approval cards, the
+   real Power Apps HTML control binding) is also built and live-verified,
+   2026-10-13**, as part of the full flexible-height gallery rebuild — see
+   the status block above and `docs/frontend.md`.
+3. **The cancel button — built and live-verified, 2026-10-13**, part of the
+   same rebuild — `POST /ask/cancel/{conversation_id}` (shipped in Phase 3)
+   wired to a real Power Apps button, hidden/disabled per `docs/frontend.md`.
+4. **Progress indication, sample questions, follow-up chips — built and
+   live-verified, 2026-10-13.** Live status polling (icon, status text, turn
+   timer) and the `thinking_log`/`append_thinking` design (a gallery row per
+   summarized-thinking round, styled distinctly from a real answer) are both
+   part of the same rebuild; follow-up questions render as chips from
+   `suggested_follow_ups`. `docs/frontend.md` has the full architecture.
 5. ~~The remaining `generate_chart` spec types beyond Phase 3's three~~ —
    **stale, confirmed 2026-10-10: all 10 documented chart types
    (`docs/chart-tool.md`) are already built**

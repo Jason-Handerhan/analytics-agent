@@ -5,9 +5,11 @@ touches a real BigQuery client.
 import app.orchestrator.context as context
 
 
-def test_static_context_contains_all_seven_components(monkeypatch):
-    """All seven static-context components present, in a fixed order, and
-    MEASURE_REGISTRY contains no measure's DAX body."""
+def test_static_context_contains_all_six_components(monkeypatch):
+    """All six static-context components present, in a fixed order, and
+    MEASURE_REGISTRY contains no measure's DAX body. BigQuery few-shot
+    examples live in run_bigquery_sql's own docstring now, not here --
+    tests/test_tools.py covers those."""
     monkeypatch.setattr(context, "get_bigquery_schema", lambda: "BIGQUERY SCHEMA -- fake")
     context.get_static_context.cache_clear()
 
@@ -25,7 +27,6 @@ def test_static_context_contains_all_seven_components(monkeypatch):
         "PARAMETERS",
         "DAX EXAMPLES",
         "BIGQUERY SCHEMA",
-        "BIGQUERY EXAMPLES",
     ]
     positions = [text.index(marker) for marker in markers]
     assert positions == sorted(positions), "static context components are out of order"

@@ -125,41 +125,6 @@ UNION(
 )
 Note: reshaping into long form (one row per category+segment, what stacked_horizontal_bar/grouped_bar need) means UNIONing several SELECTCOLUMNS calls. DAX can't bracket-reference a qualified column from inside another expression -- [evaluation_metrics[Model]] is invalid syntax, brackets don't nest -- so alias it to a bare name first via an intermediate SELECTCOLUMNS (Base0 -> Base above), then build the UNION against that alias.'''
 
-BIGQUERY_FEW_SHOT_EXAMPLES = '''BIGQUERY EXAMPLES
-
-Q: "What's the reorder rate by department?"
-SELECT department, ROUND(AVG(reordered), 4) AS reorder_rate, COUNT(*) AS n
-FROM `instacart-ml-model.agent_safe.product_order_analysis`
-GROUP BY department
-ORDER BY reorder_rate DESC
-Note: reordered is a 0/1 flag at the order-line grain, so AVG(reordered) grouped by department gives a true per-department reorder rate directly.
-
-Q: "On average, how many distinct products has each user ordered?"
-SELECT ROUND(AVG(user_distinct_product_count), 2) AS avg_distinct_products
-FROM (
-  SELECT DISTINCT user_id, user_distinct_product_count
-  FROM `instacart-ml-model.agent_safe.product_order_analysis`
-)
-Note: user_-prefixed columns (user_distinct_product_count, user_reorder_ratio, user_avg_basket_size, etc.) are precomputed per user and repeat on every order-line row for that user. Averaging one directly over product_order_analysis over-weights users with more order lines -- deduplicate to one row per user first.
-
-Q: "Do users who reorder products more quickly have a higher reorder rate for that product?"
-SELECT
-  CASE WHEN user_prod_avg_days_between_purchases < 7 THEN 'under 7 days' ELSE '7+ days' END AS pace_bucket,
-  ROUND(AVG(label_reordered), 4) AS reorder_rate,
-  COUNT(*) AS n
-FROM `instacart-ml-model.agent_safe.candidate_reorder_features`
-WHERE user_prod_avg_days_between_purchases IS NOT NULL
-GROUP BY pace_bucket
-Note: candidate_reorder_features is the right table for correlating an engineered feature against reorder likelihood (label_reordered) -- product_order_analysis is order-line grain with no candidate/label structure for this kind of question.
-
-Q: "Which engineered features correlate most strongly with reorder likelihood?"
-SELECT
-  CORR(user_reorder_ratio, label_reordered) AS corr_reorder_ratio,
-  CORR(user_avg_basket_size, label_reordered) AS corr_avg_basket_size,
-  CORR(user_prod_avg_days_between_purchases, label_reordered) AS corr_avg_days_between_purchases
-FROM `instacart-ml-model.agent_safe.candidate_reorder_features` TABLESAMPLE SYSTEM (1 PERCENT)
-Note: correlation is a statistical estimate -- TABLESAMPLE cuts cost on a multi-million-row table with no meaningful accuracy loss. Compute every correlation in ONE query, not one call per column: splitting it into parallel calls still scans the same total bytes, summed against the same cost cap.'''
-
 SYSTEM_INSTRUCTIONS = f"""SYSTEM INSTRUCTIONS
 
 You are a senior data professional supporting business stakeholders evaluating a machine learning reorder-recommendation model and its projected financial impact. Translate technical analysis -- SQL, DAX, model evaluation metrics, financial modeling -- into clear, direct language a business audience can act on.
@@ -211,6 +176,5 @@ def get_static_context() -> list[dict] | str:
         PARAMETERS,
         DAX_FEW_SHOT_EXAMPLES,
         get_bigquery_schema(),
-        BIGQUERY_FEW_SHOT_EXAMPLES,
     ])
     return build_static_context(MODEL, static_text)
