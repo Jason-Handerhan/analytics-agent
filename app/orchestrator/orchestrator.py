@@ -19,10 +19,13 @@ import google.auth
 import google.auth.transport.requests
 import mistune
 import msal
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_anthropic import ChatAnthropic, convert_to_anthropic_tool
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
@@ -52,6 +55,7 @@ from app.config import (
     MCP_SERVER_NAME,
     MCP_SERVER_URL,
     MODEL,
+    MODEL_PROVIDER,
     NUMERIC_SOURCE_TOOLS,
     POWER_BI_DATASET_ID,
     POWER_BI_WORKSPACE_ID,
@@ -101,7 +105,12 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         return
 
     # Set API Key and Tracing Environment Variables
-    os.environ["ANTHROPIC_API_KEY"] = get_secret("anthropic-api-key", GCP_PROJECT_ID)
+    if MODEL_PROVIDER == "anthropic":
+        os.environ["ANTHROPIC_API_KEY"] = get_secret("anthropic-api-key", GCP_PROJECT_ID)
+    elif MODEL_PROVIDER == "openai":
+        os.environ["OPENAI_API_KEY"] = get_secret("openai-api-key", GCP_PROJECT_ID)
+    elif MODEL_PROVIDER == "gemini":
+        os.environ["GOOGLE_API_KEY"] = get_secret("gemini-api-key", GCP_PROJECT_ID)
     os.environ["LANGSMITH_TRACING"] = LANGSMITH_TRACING
     os.environ["LANGSMITH_API_KEY"] = get_secret("langsmith-api-key", GCP_PROJECT_ID)
     os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
@@ -123,9 +132,11 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
     }
     # Model binds here, stand-in tools (generate_chart, combine_results) + non-stand-in tools (the rest)
 
-    generate_chart_tool = convert_to_anthropic_tool(chart_tool_call_standin)
+    # Only Claude's strict=True rejects generate_chart's discriminated-union schema
+    generate_chart_tool = (convert_to_anthropic_tool(chart_tool_call_standin)
+                           if MODEL_PROVIDER == "anthropic" else chart_tool_call_standin)
 
-    stand_in_tool_names = ("generate_chart", "combine_results")
+    stand_in_tool_names = ["generate_chart", "combine_results"]
     stand_in_tools = [generate_chart_tool, combine_results_call_standin]
 
     non_stand_in_tools = [t for name, t in ALL_TOOLS.items()
@@ -594,6 +605,19 @@ def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
             for name, grp in groupby(names)]
 
 
+def build_model() -> BaseChatModel:
+    """Bare, correctly-configured chat model for MODEL_PROVIDER -- unbound;
+    agent_node binds BIND_TOOLS_LIST the same way regardless of provider."""
+    if MODEL_PROVIDER == "anthropic":
+        return ChatAnthropic(model=MODEL, thinking={"type": "adaptive", "display": "summarized"})
+    if MODEL_PROVIDER == "openai":
+        return ChatOpenAI(model=MODEL, use_responses_api=True,
+                           reasoning={"effort": "low", "summary": "auto"})
+    if MODEL_PROVIDER == "gemini":
+        return ChatGoogleGenerativeAI(model=MODEL, reasoning_effort="low", include_thoughts=True)
+    raise ValueError(f"No model factory branch for provider: {MODEL_PROVIDER}")
+
+
 # --- Node functions ------------------------------------------------------
 
 async def agent_node(state: AgentState) -> dict:
@@ -603,10 +627,7 @@ async def agent_node(state: AgentState) -> dict:
     Extended thinking enabled for frontend display value -- incompatible with
     tool_choice="any", so a plain-text finish without submit_answer is
     possible again; verify_node's retry already recovers from that."""
-    model = ChatAnthropic(
-        model=MODEL,
-        thinking={"type": "adaptive", "display": "summarized"},
-    ).bind_tools(BIND_TOOLS_LIST, strict=True)
+    model = build_model().bind_tools(BIND_TOOLS_LIST, strict=True)
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 

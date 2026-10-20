@@ -13,7 +13,13 @@ CONTEXT_DIR = pathlib.Path(__file__).resolve().parent.parent / "context"
 PAGE_INFO_DIR = CONTEXT_DIR / "page_info"
 
 # LLM
-MODEL = "claude-sonnet-5"
+AVAILABLE_MODELS = {
+    "claude-sonnet-5": "anthropic",
+    "gpt-5.6-terra": "openai",
+    "gemini-3.1-pro-preview": "gemini",
+}
+MODEL = "claude-sonnet-5"  # must be a key in AVAILABLE_MODELS
+MODEL_PROVIDER = AVAILABLE_MODELS[MODEL]
 
 # Microsoft Entra ID Configuration
 TENANT_ID = "7e6d319c-ffb2-4bbf-8865-d2e7580a8998"
@@ -31,16 +37,13 @@ TELEMETRY_DATASET = "telemetry"
 TELEMETRY_TABLE = "agent_telemetry"
 
 # agent_chat_history -- restorable past conversations, not analytics
-# (agent_telemetry is the audit/judge-facing table; this is serving data)
 CHAT_HISTORY_DATASET = "agent_chat_history"
 CHAT_HISTORY_TABLE = "turns"
 CONVERSATION_LIST_LIMIT = 50   # GET /conversations -- most recent N, not unbounded
 CONVERSATION_TITLE_MAX_CHARS = 60  # truncation length for a conversation's title
 
 # Both telemetry and chat-history writes go through this identity, reached
-# only via impersonation -- agent-sa has no direct grant on either dataset,
-# so run_bigquery_sql can't reach them even though it shares agent-sa's
-# identity (local-dev-environment-setup.md).
+# only via impersonation
 TURN_WRITER_SA_EMAIL = "turn-writer-sa@instacart-ml-model.iam.gserviceaccount.com"
 
 # vector_db (search_docs, reached only via vector-search-sa impersonation --
@@ -59,18 +62,15 @@ GITHUB_REPO_BRANCH = "main"
 MAX_REPO_FILE_CONTENT_CHARS = 300_000  # final cap on returned text, after any stripping
 
 # Conversation history
-HISTORY_TURN_COUNT = 3    # sessions.history_messages FIFO length (testing; 5 for prod)
-SESSIONS_TTL_DAYS = 30    # sessions documents auto-delete this many days after last_activity_at
+HISTORY_TURN_COUNT = 3    # sessions.history_messages FIFO length
+SESSIONS_TTL_DAYS = 30    # sessions documents auto-delete this many days after last activity
 
 # Live status
 STATUS_MAX_NAMED_SOURCES = 3    # call_tool status names up to this many sources, then a count
 
 # Orchestrator loop guardrail settings
 
-# Tools whose numbers verify_node checks against -- queries, plus combine_results,
-# which only recombines them (including null-to-0 fills). Used by build_numeric_pool
-# (orchestrator.py) and rebuild_paused_messages (entry_exit.py) -- shared data, not
-# config in the traditional sense, but pure and dependency-free either way.
+# Tools whose numbers verify_node checks against -- queries, plus combine_results
 NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
 MAX_ANSWER_CHARS = 7000
@@ -108,17 +108,14 @@ LANGCHAIN_PROJECT = "analytics-agent"
 
 # answer_html styling -- Power Apps' HTML text control doesn't reliably
 # honor a <style> block, so every styled element in the custom mistune
-# renderer (app/gateway/entry_exit.py) builds its style inline from these.
+# renderer builds its style inline from these.
 ANSWER_FONT_FAMILY = "Segoe UI, sans-serif"
-# Power Apps' Size property is in points, not pixels -- these are the
-# pixel equivalents of the point sizes tuned against native Power Apps
-# Labels (1pt ~= 1.33px), not independently chosen pixel values.
+
+#Font Sizes
 ANSWER_BODY_FONT_SIZE = "24px"
 ANSWER_HEADING_FONT_SIZE = "32px"
 ANSWER_SUBHEADING_FONT_SIZE = "27px"
-ANSWER_CODE_FONT_SIZE = "22px"  # ~90% of body, explicit rather than a
-                                # relative 0.9em -- inheritance isn't
-                                # reliable in the Power Apps HTML control
+ANSWER_CODE_FONT_SIZE = "22px"
 ANSWER_TABLE_FONT_SIZE = "24px"
 ANSWER_CODE_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
 ANSWER_CODE_BLOCK_BG = "#282c34"

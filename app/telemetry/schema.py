@@ -48,6 +48,8 @@ DEFERRED_DAX_FIELDS = [
 SCHEMA = [
     # --- Required, real from Phase 1 ---
     bigquery.SchemaField("conversation_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("model", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("model_provider", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("user_id", "STRING", mode="REQUIRED"),        # claims["oid"]
     bigquery.SchemaField("question", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("answer_markdown", "STRING", mode="REQUIRED"),

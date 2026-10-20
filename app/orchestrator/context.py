@@ -15,7 +15,7 @@ from functools import lru_cache
 from google.cloud import bigquery
 
 from app.config import (
-    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, MODEL,
+    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, MODEL, MODEL_PROVIDER,
 )
 from app.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_REGISTRY
 
@@ -147,6 +147,11 @@ Prior turns' tool calls are part of this conversation, exactly as they ran -- ad
 RESPONDING
 You must call submit_answer to respond -- never plain text. The user will not recieve your answer otherwise and the loop will continue."""
 
+GEMINI_THINKING_INSTRUCTIONS = (
+    "Keep your internal thoughts concise, highly summarized, and direct. "
+    "Do not write lengthy stream-of-consciousness lines in your thinking block."
+)
+
 
 def build_static_context(model: str, static_text: str) -> list[dict] | str:
     """The system-prompt payload, shaped for this model's caching mechanism.
@@ -167,7 +172,7 @@ def build_static_context(model: str, static_text: str) -> list[dict] | str:
 
 @lru_cache
 def get_static_context() -> list[dict] | str:
-    static_text = "\n\n".join([
+    components = [
         SYSTEM_INSTRUCTIONS,
         ORIENTATION_BUNDLE,
         TABLE_REGISTRY,
@@ -176,5 +181,8 @@ def get_static_context() -> list[dict] | str:
         PARAMETERS,
         DAX_FEW_SHOT_EXAMPLES,
         get_bigquery_schema(),
-    ])
+    ]
+    if MODEL_PROVIDER == "gemini":
+        components.append(GEMINI_THINKING_INSTRUCTIONS)
+    static_text = "\n\n".join(components)
     return build_static_context(MODEL, static_text)

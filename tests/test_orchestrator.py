@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 from app.config import MAX_ANSWER_TABLE_ROWS, MAX_LENGTH_RETRIES, MAX_VERIFY_RETRIES, PENDING_APPROVAL_THRESHOLD
 import app.orchestrator.orchestrator as orchestrator
@@ -27,6 +30,38 @@ from app.orchestrator.orchestrator import (
     verify_response,
 )
 from app.orchestrator.tools import ToolError
+
+
+# Model factory
+
+def test_build_model(monkeypatch):
+    """Returns the right bare chat model, configured correctly, for each
+    provider; raises on an unrecognized one."""
+    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "anthropic")
+    monkeypatch.setattr(orchestrator, "MODEL", "claude-sonnet-5")
+    anthropic_model = orchestrator.build_model()
+    assert isinstance(anthropic_model, ChatAnthropic)
+    assert anthropic_model.thinking == {"type": "adaptive", "display": "summarized"}
+
+    # ChatOpenAI/ChatGoogleGenerativeAI validate credentials eagerly at
+    # construction, unlike ChatAnthropic -- a fake key is enough since
+    # nothing here makes a real API call.
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "openai")
+    monkeypatch.setattr(orchestrator, "MODEL", "gpt-5.6-terra")
+    openai_model = orchestrator.build_model()
+    assert isinstance(openai_model, ChatOpenAI)
+    assert openai_model.use_responses_api is True
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "gemini")
+    monkeypatch.setattr(orchestrator, "MODEL", "gemini-3.1-pro-preview")
+    gemini_model = orchestrator.build_model()
+    assert isinstance(gemini_model, ChatGoogleGenerativeAI)
+
+    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "nonexistent")
+    with pytest.raises(ValueError, match="No model factory branch"):
+        orchestrator.build_model()
 
 
 # Guardrails

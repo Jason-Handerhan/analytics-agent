@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import app.telemetry.writer as writer
-from app.config import GCP_PROJECT_ID, TELEMETRY_DATASET, TELEMETRY_TABLE
+from app.config import GCP_PROJECT_ID, MODEL, MODEL_PROVIDER, TELEMETRY_DATASET, TELEMETRY_TABLE
 from app.telemetry.schema import SCHEMA
 
 STARTED = datetime(2026, 9, 18, 12, 0, 0, tzinfo=timezone.utc)
@@ -78,6 +78,8 @@ async def test_write_telemetry_row_success(monkeypatch, clarifying_question, exp
 
     # Shape/format checks -- STRING columns JSON-dumped, datetimes left native
     assert row["conversation_id"] == "conv-123"
+    assert row["model"] == MODEL
+    assert row["model_provider"] == MODEL_PROVIDER
     assert row["turn_started_at"] == STARTED
     assert row["turn_completed_at"] == COMPLETED
     assert row["filter_context"] == '[{"table": "orders", "column": "region", "values": ["west"]}]'

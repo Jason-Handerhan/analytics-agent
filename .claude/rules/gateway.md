@@ -312,6 +312,29 @@ def build_updated_history(history_messages: list[dict], state: AgentState) -> li
     return (history_messages + [new_entry])[-HISTORY_TURN_COUNT:]
 ```
 
+**Also strips thinking/reasoning content and a Firestore-illegal Gemini
+key, model-swappability's own real bug found live, 2026-10-19 — not shown
+in the snippet above.** `_strip_thinking_blocks`/`_clean_content_block`
+drop any `thinking`/`reasoning`-typed content block from every `AIMessage`
+(plus a stray `extras` signature key on whatever block remains) before
+storage, and `_drop_gemini_signatures` removes Gemini's
+`additional_kwargs['__gemini_function_call_thought_signatures__']` key —
+Firestore rejects any field name matching its reserved `__name__` pattern
+outright, crashing the write otherwise. Both are safe specifically because
+`sessions.history_messages` is never resumed — Anthropic's own docs scope
+its equivalent "echo thinking blocks back unmodified" requirement to an
+*active* tool_use → tool_result continuation, not finished history, and
+dropping saves real cost too (newer Claude models re-bill kept thinking
+blocks as input tokens on every later turn). **OpenAI's `reasoning` blocks
+are deliberately never dropped**, despite matching the same filter
+category — its Responses API rejects a replayed `function_call` item
+missing its paired `reasoning` item outright, and since nearly every
+production message carries a tool call anyway, a `tool_calls`-aware
+conditional would barely have changed anything — not stripping at all is
+simpler for the same practical effect. `PendingApproval.messages`
+(below) needs the opposite treatment for Gemini's key — renamed, not
+dropped, since that path *is* a live, in-progress continuation.
+
 **Includes `generate_chart`, deliberately — no per-tool exclusion.** A stale
 `chart_url` sitting in history would look exactly as current as a real one;
 redacting it the same way as every other result is simpler and safer than
@@ -473,6 +496,16 @@ single attempt; omit anything already recorded elsewhere.
 - `question` **is carried**, unlike the rest of that omitted group — there's
   no other way to recover it on resume (it's folded into the `HumanMessage`'s
   content, not stored separately), and the response row's telemetry needs it.
+
+**`messages`'s Gemini thought-signature handling is the opposite of
+`sessions.history_messages`'s, deliberately.** `build_pending_approval`
+renames (not drops) Gemini's `additional_kwargs` key via
+`_rename_gemini_signatures_for_storage` — same Firestore-reserved-pattern
+problem as history, but this `messages` field is the literal, in-progress
+dangling `AIMessage.tool_calls` that resume replays straight back into the
+graph, so the real value has to survive the round trip.
+`rebuild_paused_messages` calls `_restore_gemini_signatures` first, before
+anything else, to put the original key back for the replayed call.
 
 **Anything not in these twelve fields resets by construction.** That's the
 safety property, not an oversight: `needs_approval` carried as `True` would

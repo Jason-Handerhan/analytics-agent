@@ -2,7 +2,7 @@ import asyncio
 import json
 from datetime import datetime
 
-from app.config import GCP_PROJECT_ID, TELEMETRY_DATASET, TELEMETRY_TABLE
+from app.config import GCP_PROJECT_ID, MODEL, MODEL_PROVIDER, TELEMETRY_DATASET, TELEMETRY_TABLE
 from app.orchestrator.shared_helpers import get_turn_writer_client
 from app.telemetry.schema import SCHEMA
 
@@ -75,6 +75,8 @@ def build_telemetry_row(
     return {
         "conversation_id": conversation_id,
         "user_id": user_id,
+        "model": MODEL,
+        "model_provider": MODEL_PROVIDER,
         "question": question,
         "answer_markdown": answer_markdown,
         "turn_started_at": turn_started_at,

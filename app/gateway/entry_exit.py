@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import mistune
 from langchain_core.messages import (
-    BaseMessage, HumanMessage, ToolMessage, messages_from_dict, messages_to_dict,
+    AIMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict, messages_to_dict,
 )
 
 from app.config import (
@@ -232,12 +232,65 @@ def _redact_tool_results(messages: list[BaseMessage], notice: str) -> list[BaseM
 
 # --- Conversation history (sessions.history_messages) ---------------------
 
+GEMINI_THOUGHT_SIGNATURES_KEY = "__gemini_function_call_thought_signatures__"
+_GEMINI_SIGNATURES_STORAGE_KEY = "gemini_function_call_thought_signatures"
+
+
+def _clean_content_block(block):
+    """Drops a thinking block entirely, or removes its signature metadata
+    and keeps the rest."""
+    if not isinstance(block, dict):
+        return block
+    if block.get("type") == "thinking":
+        return None
+    if "extras" in block:
+        block = {k: v for k, v in block.items() if k != "extras"}
+    return block
+
+
+def _strip_thinking_blocks(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Drops thinking content blocks, and any leftover signature metadata
+    on the blocks that remain, from every AIMessage."""
+    stripped = []
+    for msg in messages:
+        if isinstance(msg, AIMessage) and isinstance(msg.content, list):
+            content = [_clean_content_block(b) for b in msg.content if _clean_content_block(b) is not None]
+            msg = msg.model_copy(update={"content": content})
+        stripped.append(msg)
+    return stripped
+
+
+def _drop_gemini_signatures(messages: list[dict]) -> list[dict]:
+    """Removes Gemini's thought-signature key from additional_kwargs."""
+    for msg in messages:
+        msg.get("data", {}).get("additional_kwargs", {}).pop(GEMINI_THOUGHT_SIGNATURES_KEY, None)
+    return messages
+
+
+def _rename_gemini_signatures_for_storage(messages: list[dict]) -> list[dict]:
+    """Renames Gemini's thought-signature key to a Firestore-safe name."""
+    for msg in messages:
+        kwargs = msg.get("data", {}).get("additional_kwargs", {})
+        if GEMINI_THOUGHT_SIGNATURES_KEY in kwargs:
+            kwargs[_GEMINI_SIGNATURES_STORAGE_KEY] = kwargs.pop(GEMINI_THOUGHT_SIGNATURES_KEY)
+    return messages
+
+
+def _restore_gemini_signatures(messages: list[dict]) -> list[dict]:
+    """Renames the stored key back to Gemini's original thought-signature key."""
+    for msg in messages:
+        kwargs = msg.get("data", {}).get("additional_kwargs", {})
+        if _GEMINI_SIGNATURES_STORAGE_KEY in kwargs:
+            kwargs[GEMINI_THOUGHT_SIGNATURES_KEY] = kwargs.pop(_GEMINI_SIGNATURES_STORAGE_KEY)
+    return messages
+
+
 def build_updated_history(history_messages: list[dict], state: AgentState) -> list[dict]:
     """Returns the updated history_messages list -- FIFO-trimmed to
-    HISTORY_TURN_COUNT, with this turn's messages appended. Every
-    successful tool result except submit_answer's is redacted first"""
-    redacted = _redact_tool_results(state["messages"], STALE_RESULT_MESSAGE)
-    new_entry = {"messages": messages_to_dict(redacted), "timestamp": datetime.now(timezone.utc)}
+    HISTORY_TURN_COUNT, with this turn's messages appended."""
+    redacted = _strip_thinking_blocks(_redact_tool_results(state["messages"], STALE_RESULT_MESSAGE))
+    new_entry = {"messages": _drop_gemini_signatures(messages_to_dict(redacted)),
+                 "timestamp": datetime.now(timezone.utc)}
     return (history_messages + [new_entry])[-HISTORY_TURN_COUNT:]
 
 
@@ -262,7 +315,8 @@ def build_pending_approval(state: AgentState) -> PendingApproval:
         question=state["question"],
         filter_context=state["filter_context"],
         active_page=state["active_page"],
-        messages=messages_to_dict(_redact_tool_results(state["messages"], PAUSE_REDACTED_MESSAGE)),
+        messages=_rename_gemini_signatures_for_storage(
+            messages_to_dict(_redact_tool_results(state["messages"], PAUSE_REDACTED_MESSAGE))),
         pending_queries=state["pending_queries"],
         deferred_dax=state["deferred_dax"],
         tool_calls=state["tool_calls"],
@@ -280,7 +334,7 @@ def rebuild_paused_messages(messages: list[dict], tool_calls: list[ToolCallRecor
     through unchanged."""
     tc_by_id = {tc["id"]: tc for tc in tool_calls}
     rebuilt = []
-    for msg in messages_from_dict(messages):
+    for msg in messages_from_dict(_restore_gemini_signatures(messages)):
         tc = tc_by_id.get(msg.tool_call_id) if isinstance(msg, ToolMessage) else None
         if tc and tc["name"] in NUMERIC_SOURCE_TOOLS and msg.status != "error":
             tool_message = ToolMessage(content=json.dumps(tc["result"], ensure_ascii=False),

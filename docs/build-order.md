@@ -2,10 +2,12 @@
 
 ## Current status — update this as we go
 
-**Phase 3 complete** (items 1-15, see the entries below) — **Phase 4 in
-progress: item 1 (visual grounding) built and live-verified, 2026-10-10;
-item 2 (`answer_html` rendering + the real control binding) built and
-live-verified end to end, 2026-10-13** (see the Phase 4 entries further
+**Phase 3 complete** (items 1-15, see the entries below) — **Phase 4
+complete, 2026-10-19: item 1 (visual grounding) built and live-verified,
+2026-10-10; item 2 (`answer_html` rendering + the real control binding)
+built and live-verified end to end, 2026-10-13; items 3-5 (cancel button,
+progress indication/thinking log/follow-up chips, chart types) also
+confirmed built and live-verified** (see the Phase 4 entries further
 down, and the item-10-area status below for Phase 3's own history). The
 app itself was rebuilt from scratch partway through item 2's UI work — a
 new Power Apps visual, a flexible-height gallery replacing the original
@@ -1434,39 +1436,98 @@ XMLA is a documented backup only. REST is the plan.
 
 ## Phase 6 — Evaluation & polish
 
-1. **Model swappability — prove it, don't just design for it.** Deliberately
-   placed *before* the judge (#2): the plan is to use the judge itself to
-   compare providers, so swapping has to actually work first, not just be
-   designed to work. Real gap found live (2026-10-01): `get_static_context`/
-   `build_static_context` already branch correctly per provider (Claude/
-   OpenAI/Gemini caching, `.claude/rules/orchestrator.md`), but `agent_node`
-   — the actual LLM call driving the tool loop — hardcodes
-   `ChatAnthropic(model=MODEL, thinking={...})` directly, not
-   `init_chat_model(MODEL)`, and `thinking` is Anthropic-only syntax.
-   Changing `MODEL` in `app/config.py` today would not swap the agent to
-   GPT or Gemini; it would just break. Scope:
-   - Switch `agent_node` to `init_chat_model(MODEL)`, with the `thinking`
-     param made conditional/provider-gated rather than unconditional.
-   - Confirm OpenAI's and Gemini's real `strict=True` equivalents **live**,
-     not assumed (`.claude/rules/orchestrator.md`'s "needs verifying, not
-     assuming" note) — this is also where the `submit_answer` malformed-call
-     fix from the 2026-10-01 live failure gets resolved, since whatever fix
-     is chosen there has to survive this test, not just work for Anthropic.
-     A fix tying `submit_answer` to Anthropic's own raw tool-dict shape
-     (considered, not applied) would fail this item outright.
-   - One real end-to-end turn run against each of the three providers,
-     confirming a correct, verified answer comes back from all three —
-     not just that the call doesn't error.
-   - **`append_thinking` (`app/gateway/gateway.py`) also needs a per-provider
-     answer, not just `agent_node`.** It reads `response.content` for a
-     `{"type": "thinking", ...}` block — Anthropic's own content-block
-     shape, produced by `agent_node`'s `thinking=` param. OpenAI's reasoning
-     models don't expose raw reasoning content the same way via API, and
-     Gemini's "thought" format differs too, so `thinking_log`/
-     `GET /ask/status` would silently go blank (not error) on a non-Anthropic
-     provider unless this is handled explicitly — confirm live per provider,
-     don't assume it degrades gracefully just because it doesn't crash.
-   - `gemini-api-key`/`openai-api-key` secrets already exist (Phase 0 item
+1. **Model swappability — proven live, 2026-10-19, not just designed for
+   it.** Deliberately placed *before* the judge (#2): the plan is to use the
+   judge itself to compare providers, so swapping had to actually work
+   first. Not the originally-sketched fix (`init_chat_model(MODEL)`) — a
+   custom `build_model()` factory in `app/orchestrator/orchestrator.py`,
+   branching on a new `MODEL_PROVIDER` constant (`app/config.py`'s
+   `AVAILABLE_MODELS` dict, `{model_name: provider}`, with `MODEL` and
+   `MODEL_PROVIDER` both derived from it). `agent_node` shrinks to
+   `build_model().bind_tools(BIND_TOOLS_LIST, strict=True)`; the Anthropic
+   branch is the original `thinking={...}` call unchanged, OpenAI uses
+   `use_responses_api=True` + `reasoning={"effort": "low", "summary": "auto"}`
+   (plain `/v1/chat/completions` flatly rejects `reasoning_effort` combined
+   with tool calling — confirmed live, not a config choice), Gemini uses
+   `reasoning_effort="low", include_thoughts=True`. All three pick up their
+   API key from the environment (`OPENAI_API_KEY`/`GOOGLE_API_KEY`, same
+   pattern as `ANTHROPIC_API_KEY` already used) — `init_orchestrator()`
+   fetches only the active provider's secret, not all three.
+   - **`strict=True` confirmed live on all three** — `submit_answer`'s real
+     schema (the exactly-one-of validator included) binds and produces
+     well-formed calls on OpenAI and Gemini exactly as it already did on
+     Anthropic. `generate_chart`'s discriminated-union schema needed
+     Anthropic's `convert_to_anthropic_tool` escape hatch; confirmed OpenAI/
+     Gemini bind the plain schema directly with no workaround —
+     `init_orchestrator()`'s `generate_chart_tool` construction is now the
+     one piece of `BIND_TOOLS_LIST` assembly that's provider-conditional,
+     resolving the cost `.claude/rules/orchestrator.md`'s "Constrained
+     decoding" section had flagged as open.
+   - **Real end-to-end turns run against all three, including pause/
+     resume/cancel** — not just one clean turn each.
+   - **`log_thinking` (`app/gateway/gateway.py`) needed no change at all** —
+     it already matches on the literal block type `"thinking"`, which
+     Gemini produces identically to Anthropic; OpenAI's blocks are typed
+     `"reasoning"`, which the existing filter already never matches, so it
+     silently and correctly no-ops there. **Confirmed live on the Power
+     Apps front end for Gemini, 2026-10-20** — thinking displays correctly;
+     this item's front-end check is closed.
+   - **Three small follow-on improvements made during that front-end pass,
+     2026-10-20:** (1) `get_page_info`'s image block switched from
+     Anthropic's own native shape (`{"type": "image", "source": {...}}`)
+     to the cross-provider `image_url` data-URI shape — confirmed a real,
+     not just theoretical, gap: `langchain_openai` has an explicit
+     "Anthropic image blocks" compatibility branch (so OpenAI happened to
+     work already), but `langchain_google_genai` has no equivalent at all.
+     All three providers' integrations explicitly recognize `image_url` and
+     convert it to their own native shape, including Gemini's
+     `image_loader.load_part`, which decodes the data URI into a real
+     `inline_data` image `Part` — confirmed billed as a vision input, not
+     literal text tokens, before changing this. (2) `chart_tool_call_standin`'s
+     docstring (`app/orchestrator/tools.py`) gained one line steering the
+     model to actively use each chart type's existing `sort_order` option
+     when it would present the data more clearly — Gemini specifically was
+     under-using it, though the fix is provider-agnostic. (3) A
+     Gemini-only addition to `get_static_context()` (`app/orchestrator/context.py`)
+     asking it to keep its thinking concise — Gemini's thinking ran
+     noticeably longer than Anthropic's, costing real reasoning tokens
+     for it; a commonly-reported approach for this with LangChain, not
+     confirmed yet whether it reliably holds.
+   - **A real, unplanned bug found live, not anticipated by this item's
+     original scope: Gemini's Firestore write crashed on a second turn.**
+     `langchain_google_genai` stores a per-call thought-signature map in
+     `additional_kwargs['__gemini_function_call_thought_signatures__']` —
+     Firestore rejects any field name matching its reserved `__name__`
+     pattern outright, crashing `write_history_messages`. Separately,
+     stripping thinking content from stored history (done for a real cost
+     reason — Anthropic's own docs confirm newer Claude models re-bill
+     prior turns' thinking blocks as input tokens if kept) initially broke
+     OpenAI: dropping a `reasoning` block without checking `tool_calls`
+     orphaned the paired `function_call` item, and OpenAI's Responses API
+     rejects a replayed `function_call` missing its `reasoning` item outright
+     — confirmed live, fixed by just not stripping `reasoning` blocks at all
+     (the vast majority of OpenAI's messages carry tool calls anyway, so the
+     conditional barely changed behavior). Fixed in
+     `app/gateway/entry_exit.py`: `_strip_thinking_blocks`/
+     `_clean_content_block` (thinking blocks + stray `extras` signature
+     metadata, `sessions.history_messages` only — never resumed, so dropping
+     is safe); `_drop_gemini_signatures` (history, same reasoning);
+     `_rename_gemini_signatures_for_storage`/`_restore_gemini_signatures`
+     (`PendingApproval.messages` — the live, in-progress resume case, where
+     the signature genuinely must survive, confirmed via Anthropic's own
+     docs scoping its equivalent "must echo thinking blocks unmodified" rule
+     to an active tool_use → tool_result continuation specifically).
+   - **Telemetry**: `model`/`model_provider` added to `agent_telemetry`
+     (`app/telemetry/schema.py`/`writer.py`), populated from `app/config.py`
+     directly — both `finalize_node` and the rejected-approval path
+     (`write_rejected_telemetry`) share the one `build_telemetry_row()`, so
+     one change covers both.
+   - **Tests**: `tests/test_orchestrator.py::test_build_model`;
+     `tests/test_entry_exit.py`'s new `test_strip_thinking_blocks`/
+     `test_gemini_signature_drop_and_round_trip`, plus the three existing
+     history/pause/resume tests extended with a thinking+signature-bearing
+     message; one assertion added to `tests/test_telemetry.py`.
+   - `gemini-api-key`/`openai-api-key` secrets already existed (Phase 0 item
      9), provisioned for exactly this and unused until now.
 2. Judge Cloud Run Job + Cloud Scheduler (`docs/llm-judge.md`) — consumes
    the `agent_telemetry` table already logging since Phase 1. Depends on #1:

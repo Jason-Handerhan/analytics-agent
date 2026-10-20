@@ -753,7 +753,12 @@ numeric bounds aren't representable under it on Claude (`docs/chart-tool.md`,
 `.claude/rules/orchestrator.md`'s "Constrained decoding" section), so it's
 pre-converted to a raw Anthropic tool dict (no `strict` kwarg) that
 `bind_tools(BIND_TOOLS_LIST, strict=True)` passes through untouched —
-every other tool gets real strict enforcement. `SearchDocsArgs.top_k` also
+every other tool gets real strict enforcement. **Claude-only, confirmed
+live (2026-10-19, Phase 6 item 1):** OpenAI and Gemini bind
+`chart_tool_call_standin`'s plain schema directly under `strict=True`, no
+workaround needed — `init_orchestrator()`'s `generate_chart_tool`
+construction is conditional on `MODEL_PROVIDER == "anthropic"`.
+`SearchDocsArgs.top_k` also
 needed reshaping (its `ge=1` dropped, clamped at runtime instead) — strict
 mode's `ge=`/`le=` rejection isn't unique to `generate_chart`, confirmed
 against a second tool.
@@ -873,10 +878,23 @@ async def get_page_info(page_name: Literal[PAGES],
     image_name = resolve_image_name(page_name, filter_context)
     return [
         {"type": "text", "text": f"Page: {page_name}\n\n{content}"},
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                      "data": _page_image_base64(image_name)}},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_page_image_base64(image_name)}"}},
     ]
 ```
+
+**Uses the cross-provider `image_url` data-URI shape, not Anthropic's own
+`{"type": "image", "source": {...}}` — confirmed live, 2026-10-20 (Phase 6
+item 1).** `langchain_openai` has an explicit "Anthropic image blocks"
+compatibility branch that happened to make the Anthropic-native shape work
+for OpenAI too, but `langchain_google_genai` has no equivalent — its
+content-block dispatch never recognized it at all. All three providers'
+LangChain integrations explicitly recognize `image_url` and convert it to
+their own native shape internally (confirmed directly in each package's
+source, including Gemini's `image_loader.load_part`, which decodes the
+data URI into a real `inline_data` image `Part` — billed as a vision input,
+not as literal text tokens from the base64 string). No regression for
+Anthropic: its own integration converts `image_url` right back into the
+exact native shape used before.
 
 **`filter_context` is injected the same way `run_bigquery_sql` injects
 `conversation_id`** — `Annotated[..., InjectedToolArg]`, supplied manually

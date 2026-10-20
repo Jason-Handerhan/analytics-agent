@@ -447,8 +447,7 @@ async def get_page_info(page_name: Literal[PAGES],
     image_name = resolve_image_name(page_name, filter_context)
     return [
         {"type": "text", "text": f"Page: {page_name}\n\n{content}"},
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                      "data": _page_image_base64(image_name)}},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_page_image_base64(image_name)}"}},
     ]
 
 get_page_info.handle_validation_error = lambda e: str(e)
@@ -537,7 +536,10 @@ async def chart_tool_call_standin(**kwargs) -> None:
     image URL. source_ref must be the reference id printed alongside the
     run_bigquery_sql or run_dax_query result you want to chart (e.g.
     'ref_1') -- copy it exactly as shown; never invent one. See the spec
-    type's own description for its exact shape and grain.
+    type's own description for its exact shape and grain. Check whether
+    the spec type offers a sort option and use it whenever a sorted view
+    would present the data more clearly -- don't default to unsorted just
+    because the query didn't order it.
     """
     raise NotImplementedError(
         "generate_chart's real MCP tool object handles dispatch -- this "

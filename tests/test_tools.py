@@ -93,8 +93,7 @@ async def test_get_page_info():
         result = await get_page_info.coroutine(page_name=page_name, filter_context=[])
         assert result == [
             {"type": "text", "text": f"Page: {page_name}\n\n{expected_text}"},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                          "data": expected_image}},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{expected_image}"}},
         ]
 
     # Beeswarm selected -- Model Performance's image switches.
@@ -103,8 +102,8 @@ async def test_get_page_info():
     expected_beeswarm_image = base64.b64encode(
         (PAGE_INFO_DIR / "Model Performance Beeswarm.png").read_bytes()).decode()
     result = await get_page_info.coroutine(page_name="Model Performance", filter_context=beeswarm_context)
-    assert result[1] == {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                                       "data": expected_beeswarm_image}}
+    assert result[1] == {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{expected_beeswarm_image}"}}
 
 
 # run_bigquery_sql -- the cancellation race

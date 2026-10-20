@@ -707,35 +707,30 @@ a real `tool_name`, required fields present. It cannot guarantee the SQL is
 right or a claim is backed. The verification retry loop is unchanged; this is
 a cheap deterministic filter in front of it.
 
-**Confirm at build time — this is provider-specific, which matters here given
-model-swappability:** OpenAI's `strict: true` carries real schema constraints
-(every field in `required`, optionality as nullable types, `additionalProperties:
-false`), so enabling it may mean *reshaping* a schema, not just flipping a
-flag. Gemini has an equivalent enforced JSON-schema mode, but its exact
-parameter surface through the LangChain wrapper — and how closely its
-guarantees match OpenAI's — needs verifying, not assuming. Same category as
-`query_job.result()`'s param name.
+**Confirmed live across all three providers, 2026-10-19 (Phase 6 item 1,
+`docs/build-order.md`) — not just Claude's own schema constraints.**
+`submit_answer`'s real schema (the exactly-one-of validator included) binds
+under `strict=True` and produces well-formed calls on OpenAI and Gemini
+exactly as it already did on Anthropic — no reshaping needed.
 
-**Enabled globally, 2026-10-02 — one tool bound outside it.** Claude's
-`strict=True` rejects `oneOf`/`discriminator` and `ge=`/`le=` outright, both
-of which `generate_chart`'s schema needs (`docs/chart-tool.md`); confirmed
-`ge=`/`le=` also broke `SearchDocsArgs.top_k` (`.claude/rules/tools.md`),
-so the rejection isn't `generate_chart`-specific. The per-tool split this
-section once described as the alternative — pre-convert just one tool to a
-raw Anthropic-format dict, bypassing `strict` for that tool while every
-other tool binds with `strict=True` normally — is what shipped:
-`init_orchestrator()` pre-converts `generate_chart`'s stand-in via
-`convert_to_anthropic_tool()` (no `strict` kwarg), and `agent_node` binds
-with `bind_tools(BIND_TOOLS_LIST, strict=True)`. This does tie
-`generate_chart`'s binding to Anthropic's own tool-dict shape — the
-model-swappable cost this section originally flagged — tracked as something
-Phase 6 item 1 (`docs/build-order.md`) has to resolve or re-confirm when
-proving the graph against OpenAI/Gemini, not solved here. This also
-resolved a real live failure: `submit_answer` previously got no structural
-guarantee at all, and a live run produced a malformed call (a model-emitted
-XML-style fragment inside `answer_markdown`, missing `all_prose_numeric_claims`
-entirely) that Pydantic caught but only after the fact — `strict=True` makes
-that specific shape unsampleable instead.
+**Enabled globally, 2026-10-02 — one tool bound outside it, now
+provider-conditional.** Claude's `strict=True` rejects `oneOf`/
+`discriminator` and `ge=`/`le=` outright, both of which `generate_chart`'s
+schema needs (`docs/chart-tool.md`); confirmed `ge=`/`le=` also broke
+`SearchDocsArgs.top_k` (`.claude/rules/tools.md`), so the rejection isn't
+`generate_chart`-specific. The fix: `init_orchestrator()` pre-converts
+`generate_chart`'s stand-in via `convert_to_anthropic_tool()` (no `strict`
+kwarg) **only when `MODEL_PROVIDER == "anthropic"`** — confirmed live that
+OpenAI/Gemini bind the plain schema directly under `strict=True` with no
+workaround at all, so `generate_chart_tool` is the one piece of
+`BIND_TOOLS_LIST`'s assembly that branches by provider; every other tool
+binds identically regardless. `agent_node` binds with
+`bind_tools(BIND_TOOLS_LIST, strict=True)` unconditionally either way. This
+also resolved a real live failure: `submit_answer` previously got no
+structural guarantee at all, and a live run produced a malformed call (a
+model-emitted XML-style fragment inside `answer_markdown`, missing
+`all_prose_numeric_claims` entirely) that Pydantic caught but only after the
+fact — `strict=True` makes that specific shape unsampleable instead.
 
 ## Shared exceptions
 
@@ -1341,11 +1336,26 @@ ALL_TOOLS = {
 # generate_chart's entry is swapped for a stand-in schema (source_ref + spec,
 # `.claude/rules/tools.md`) in the list bound to the model -- dispatch still
 # uses ALL_TOOLS, which keeps the real MCP-loaded tool object. Pre-converted
-# to a raw Anthropic tool dict (no strict kwarg) so bind_tools(strict=True)
-# below passes it through untouched, leaving it the one non-strict tool.
-generate_chart_tool = convert_to_anthropic_tool(chart_tool_call_standin)
+# to a raw Anthropic tool dict (no strict kwarg) only for Anthropic, so
+# bind_tools(strict=True) below passes it through untouched there --
+# OpenAI/Gemini bind the plain schema directly, confirmed live.
+generate_chart_tool = (convert_to_anthropic_tool(chart_tool_call_standin)
+                       if MODEL_PROVIDER == "anthropic" else chart_tool_call_standin)
 BIND_TOOLS_LIST = [generate_chart_tool if name == "generate_chart" else t
                    for name, t in ALL_TOOLS.items()]
+
+def build_model() -> BaseChatModel:
+    """Bare, correctly-configured chat model for MODEL_PROVIDER -- unbound;
+    agent_node binds BIND_TOOLS_LIST the same way regardless of provider."""
+    if MODEL_PROVIDER == "anthropic":
+        return ChatAnthropic(model=MODEL, thinking={"type": "adaptive", "display": "summarized"})
+    if MODEL_PROVIDER == "openai":
+        return ChatOpenAI(model=MODEL, use_responses_api=True,
+                           reasoning={"effort": "low", "summary": "auto"})
+    if MODEL_PROVIDER == "gemini":
+        return ChatGoogleGenerativeAI(model=MODEL, reasoning_effort="low", include_thoughts=True)
+    raise ValueError(f"No model factory branch for provider: {MODEL_PROVIDER}")
+
 
 async def agent_node(state: AgentState) -> dict:
     """Extended thinking enabled for frontend display value -- incompatible
@@ -1354,13 +1364,19 @@ async def agent_node(state: AgentState) -> dict:
     submit_answer is possible again; verify_node's retry already recovers
     from that. No cost difference: thinking tokens bill the same regardless
     of display."""
-    model = ChatAnthropic(
-        model=MODEL,
-        thinking={"type": "adaptive", "display": "summarized"},
-    ).bind_tools(BIND_TOOLS_LIST, strict=True)
+    model = build_model().bind_tools(BIND_TOOLS_LIST, strict=True)
     response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 ```
+
+**`MODEL_PROVIDER` (`app/config.py`) drives every branch above** — derived
+once from `AVAILABLE_MODELS[MODEL]` (a `{model_name: provider}` dict), not
+threaded through as a parameter. OpenAI's `use_responses_api=True` isn't
+optional: plain `/v1/chat/completions` flatly rejects combining
+`reasoning_effort` with tool calling for a reasoning model — confirmed live,
+not a style choice. Each provider picks up its API key from the environment
+(`init_orchestrator()` fetches only the active provider's secret) — none of
+the three pass `api_key=`/`google_api_key=` explicitly.
 
 | Node | Role |
 |---|---|
