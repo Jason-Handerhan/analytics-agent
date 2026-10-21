@@ -37,9 +37,7 @@ from app.orchestrator.tools import ToolError
 def test_build_model(monkeypatch):
     """Returns the right bare chat model, configured correctly, for each
     provider; raises on an unrecognized one."""
-    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "anthropic")
-    monkeypatch.setattr(orchestrator, "MODEL", "claude-sonnet-5")
-    anthropic_model = orchestrator.build_model()
+    anthropic_model = orchestrator.build_model("claude-sonnet-5", "anthropic")
     assert isinstance(anthropic_model, ChatAnthropic)
     assert anthropic_model.thinking == {"type": "adaptive", "display": "summarized"}
 
@@ -47,21 +45,16 @@ def test_build_model(monkeypatch):
     # construction, unlike ChatAnthropic -- a fake key is enough since
     # nothing here makes a real API call.
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "openai")
-    monkeypatch.setattr(orchestrator, "MODEL", "gpt-5.6-terra")
-    openai_model = orchestrator.build_model()
+    openai_model = orchestrator.build_model("gpt-5.6-terra", "openai")
     assert isinstance(openai_model, ChatOpenAI)
     assert openai_model.use_responses_api is True
 
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "gemini")
-    monkeypatch.setattr(orchestrator, "MODEL", "gemini-3.1-pro-preview")
-    gemini_model = orchestrator.build_model()
+    gemini_model = orchestrator.build_model("gemini-3.1-pro-preview", "gemini")
     assert isinstance(gemini_model, ChatGoogleGenerativeAI)
 
-    monkeypatch.setattr(orchestrator, "MODEL_PROVIDER", "nonexistent")
     with pytest.raises(ValueError, match="No model factory branch"):
-        orchestrator.build_model()
+        orchestrator.build_model("some-model", "nonexistent")
 
 
 # Guardrails
@@ -242,7 +235,8 @@ async def test_finalize_node_message_selection(monkeypatch):
     monkeypatch.setattr(orchestrator, "write_telemetry_row", AsyncMock())
 
     base = {
-        "conversation_id": "c1", "user_id": "u1", "question": "Q",
+        "conversation_id": "c1", "user_id": "u1", "model": "claude-sonnet-5",
+        "model_provider": "anthropic", "question": "Q",
         "turn_started_at": datetime.now(timezone.utc), "filter_context": [], "active_page": None,
         "messages": [], "tool_calls": [], "errors": [], "llm_calls": 0, "bytes_consumed": 0,
         "bytes_consumed_baseline": 0, "iteration_count": 0, "verification_retry_count": 0,

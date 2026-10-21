@@ -53,6 +53,8 @@ def test_build_initial_state():
         question="How many orders?",
         conversation_id="conv-1",
         user_id="user-1",
+        model="claude-sonnet-5",
+        model_provider="anthropic",
         filter_context=[{"filter_column": "department", "value": "produce"}],
         active_page="Financial Impact",
         image_base64=None,
@@ -65,6 +67,8 @@ def test_build_initial_state():
     assert state["question"] == "How many orders?"
     assert state["conversation_id"] == "conv-1"
     assert state["user_id"] == "user-1"
+    assert state["model"] == "claude-sonnet-5"
+    assert state["model_provider"] == "anthropic"
     assert isinstance(state["turn_started_at"], datetime)
     assert state["history_messages"] == []
     assert len(state["messages"]) == 1
@@ -194,7 +198,8 @@ def test_build_pending_approval_redacts_with_pause_message():
     agent_call = AIMessage(content=[],
                            additional_kwargs={GEMINI_THOUGHT_SIGNATURES_KEY: {"call_1": "sig-blob"}})
     state = {
-        "conversation_id": "conv-1", "question": "How many orders?",
+        "conversation_id": "conv-1", "model": "claude-sonnet-5", "model_provider": "anthropic",
+        "question": "How many orders?",
         "filter_context": [], "active_page": None,
         "messages": [agent_call, bq_result],
         "pending_queries": [], "deferred_dax": [], "tool_calls": [],

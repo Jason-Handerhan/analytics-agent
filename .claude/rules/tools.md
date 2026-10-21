@@ -752,12 +752,14 @@ confirmed live (2026-10-02).** `generate_chart`'s discriminated union and
 numeric bounds aren't representable under it on Claude (`docs/chart-tool.md`,
 `.claude/rules/orchestrator.md`'s "Constrained decoding" section), so it's
 pre-converted to a raw Anthropic tool dict (no `strict` kwarg) that
-`bind_tools(BIND_TOOLS_LIST, strict=True)` passes through untouched —
-every other tool gets real strict enforcement. **Claude-only, confirmed
-live (2026-10-19, Phase 6 item 1):** OpenAI and Gemini bind
+`bind_tools(build_tools_list(model_provider), strict=True)` passes through
+untouched — every other tool gets real strict enforcement. **Claude-only,
+confirmed live (2026-10-19, Phase 6 item 1):** OpenAI and Gemini bind
 `chart_tool_call_standin`'s plain schema directly under `strict=True`, no
-workaround needed — `init_orchestrator()`'s `generate_chart_tool`
-construction is conditional on `MODEL_PROVIDER == "anthropic"`.
+workaround needed — `build_tools_list()`'s `generate_chart_tool`
+construction is conditional on `model_provider == "anthropic"`, where
+`model_provider` is now the turn's own `AgentState["model_provider"]`, not a
+fixed module-level constant (`.claude/rules/orchestrator.md`).
 `SearchDocsArgs.top_k` also
 needed reshaping (its `ge=1` dropped, clamped at runtime instead) — strict
 mode's `ge=`/`le=` rejection isn't unique to `generate_chart`, confirmed

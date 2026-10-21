@@ -116,6 +116,16 @@ class AgentState(TypedDict):
                                  # own user_id (`.claude/rules/gateway.md`).
                                  # finalize needs it directly to call
                                  # write_telemetry_row itself
+    model: str                   # AskRequest.model (`.claude/rules/gateway.md`) --
+                                 # per-request now, not a fixed app/config.py value.
+                                 # Carried on PendingApproval too, so a resumed
+                                 # turn continues on the same model it paused on
+    model_provider: str          # AVAILABLE_MODELS[model], derived once in
+                                 # run_agent_turn (`.claude/rules/gateway.md`)
+                                 # before build_initial_state -- every branch
+                                 # that used to read a module-level MODEL_PROVIDER
+                                 # now reads this instead (build_model,
+                                 # build_tools_list, build_static_context, below)
     turn_started_at: datetime    # set at the top of the gateway's
                                  # run_agent_turn, before graph.astream(...)
                                  # — finalize's other write_telemetry_row arg
@@ -133,7 +143,7 @@ class AgentState(TypedDict):
     # into `messages` too, every stored turn would recursively contain every
     # prior one, growing unbounded instead of staying FIFO-trimmed. Prepended
     # at LLM-call time only, same as the static system prompt:
-    # model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]]).
+    # model.ainvoke([system_message, *state["history_messages"], *state["messages"]]).
     history_messages: list[BaseMessage]
 
     # Seeded at invocation with just the question, then accumulated during
@@ -441,10 +451,12 @@ are the real files, moved out of `app/gateway/` once it was clear nothing in
 the gateway package actually touches them (`docs/build-order.md`, Phase 3
 item 3).
 
-- Calling `build_static_context(model, static_text)` — the single caching
-  adapter. **Takes the model name, not a provider**, so switching models is a
-  one-line config change with nothing else to update. **Six components in
-  the static block, two of them split further** — `SYSTEM_INSTRUCTIONS`
+- Calling `build_static_context(model_provider, static_text)` — the single
+  caching adapter. **Takes the provider, not the model name — model choice is
+  per-request now, not a fixed config value** (below), so the dispatch only
+  ever needs to know which of the three caching strategies applies, never
+  which specific model is live. **Six components in the static block, two of
+  them split further** — `SYSTEM_INSTRUCTIONS`
   first, then reference material, with DAX's few-shot examples interleaved
   next to the schema they demonstrate rather than trailing as a separate block:
 
@@ -579,31 +591,35 @@ never enters static context (`.claude/rules/tools.md`).
 **Schema changes need a redeploy**, since this is read at import. Same
 tradeoff as `BIGQUERY_SCHEMA`, now covering the semantic model too.
 
-## Caching dispatch — `build_static_context(model, static_text)`
+## Caching dispatch — `build_static_context(model_provider, static_text)`
 
-**Takes the model name, not a provider.** Switching models is a one-line
-config change; nothing else needs updating. **Returns the payload that goes
-into the LLM call's system slot** — shape differs by provider, which is the
-whole point of the function.
+**Takes the provider, and is called once per turn, not once per process —
+a real change from the original design, now that model choice is per-request
+(`AskRequest.model`, below) rather than a fixed `app/config.py` value.** The
+static *text* is still process-lifetime invariant (see `get_static_context()`
+below) — only the wrapping shape varies, by whichever provider the current
+turn picked. **Returns the payload that goes into the LLM call's system
+slot** — shape differs by provider, which is the whole point of the function.
 
 ```python
-def build_static_context(model: str, static_text: str) -> list[dict] | str:
-    """The system-prompt payload, shaped for this model's caching mechanism.
+def build_static_context(model_provider: str, static_text: str) -> list[dict] | str:
+    """The system-prompt payload, shaped for this provider's caching mechanism.
 
     Anthropic -> list of content blocks, the last carrying cache_control.
     OpenAI    -> plain string; caching is automatic, nothing to mark.
     Gemini    -> plain string; implicit caching above its threshold.
     """
-    if model.startswith("claude-"):
+    if model_provider == "gemini":
+        static_text = static_text + "\n\n" + GEMINI_THINKING_INSTRUCTIONS
+        return static_text
+    if model_provider == "anthropic":
         # Everything up to the marker caches. Everything volatile —
         # question, filter context, history — goes AFTER this, in messages.
         return [{"type": "text", "text": static_text,
                  "cache_control": {"type": "ephemeral"}}]
-    if model.startswith(("gpt-", "o1-", "o3-")):
+    if model_provider == "openai":
         return static_text           # automatic longest-prefix caching
-    if model.startswith("gemini-"):
-        return static_text           # implicit caching above its threshold
-    raise ValueError(f"No caching strategy for model: {model}")
+    raise ValueError(f"No caching strategy for provider: {model_provider}")
 ```
 
 **Only one branch is really "ours".** OpenAI and Gemini cache automatically
@@ -611,6 +627,12 @@ with no markup — returning the string unchanged *is* the correct handling,
 not a stub. Anthropic is the only provider requiring an explicit breakpoint,
 which is also why LangChain ships a caching middleware for Anthropic and none
 for the other two.
+
+**`GEMINI_THINKING_INSTRUCTIONS` folds in here, not in `get_static_context()`
+— deliberately, now that provider varies per turn.** Appending it inside
+`get_static_context()` (the original design) baked in whichever provider was
+live at *first* call, process-wide; appending it here means every turn gets
+the instructions appropriate to the provider *that turn* actually picked.
 
 **`ttl` can be `"1h"` instead of the 5-minute default**, at a higher
 cache-write price. Worth considering here: turns are seconds, but the gap
@@ -623,15 +645,17 @@ model directly, so there's nothing for it to intercept. It also caches
 conversation history, which here is a 5-turn window that changes every turn —
 churn, not savings.
 
-**Call it ONCE per process, not per turn — but lazily, not at import.**
-Both inputs are invariant — the seven components are module constants,
-`MODEL` is config — so computing it once is what *guarantees* the
-byte-identical prefix a cache hit requires. It can't be a bare module-level
-constant the way that reasoning first suggests, though: `static_text`
-includes `get_bigquery_schema()`, which needs a live `bigquery.Client()`
-call, and constructing that at import time would make importing
-`app/orchestrator/context.py` require live credentials — breaking Layer 1
-tests the same way an eager Firestore client would. `@lru_cache` on a
+**`get_static_context()` is still called ONCE per process, not per turn —
+but lazily, not at import — because its output no longer depends on which
+model/provider a turn picks.** The seven components are all module
+constants; nothing about them varies with model choice, so computing the
+joined text once is what *guarantees* the byte-identical prefix a cache hit
+requires regardless of which provider wraps it. It can't be a bare
+module-level constant the way that reasoning first suggests, though:
+`static_text` includes `get_bigquery_schema()`, which needs a live
+`bigquery.Client()` call, and constructing that at import time would make
+importing `app/orchestrator/context.py` require live credentials — breaking
+Layer 1 tests the same way an eager Firestore client would. `@lru_cache` on a
 zero-arg function gets the same "computed once" guarantee without that cost
 — it just moves *when* "once" happens from import time to first real use:
 
@@ -640,46 +664,89 @@ zero-arg function gets the same "computed once" guarantee without that cost
 from functools import lru_cache
 
 @lru_cache
-def get_static_context() -> list[dict] | str:
-    static_text = "\n\n".join([...])   # the components, in the fixed order
-                                        # given under "Assembling the prompt"
-    return build_static_context(MODEL, static_text)
+def get_static_context() -> str:
+    return "\n\n".join([...])   # the components, in the fixed order
+                                 # given under "Assembling the prompt" --
+                                 # no build_static_context call here anymore
 ```
 
 **The component list lives in one place** — that section. Repeating it here
 would be a second list to keep in sync, and it drifted exactly that way once
 already.
 
-**Per-turn code just calls it** — the return value is the `system` argument,
-unchanged:
-
-```python
-llm = init_chat_model(MODEL)          # MODEL is a hardcoded literal in app/config.py
-response = await llm.ainvoke([SystemMessage(content=get_static_context()), *messages])
-```
+**Per-turn code wraps the cached text for that turn's provider** — `agent_node`
+(below) calls `build_static_context(state["model_provider"], get_static_context())`
+fresh every turn and wraps it in a `SystemMessage`. The `get_static_context()`
+call inside that is cheap regardless — `@lru_cache` means every turn after
+the first just returns the same string object, so the per-turn cost is only
+`build_static_context`'s own dict-wrap-or-no-op.
 
 LangChain passes a list of content blocks through to Anthropic as-is, so the
 same call works for all three providers — only what `build_static_context`
-returned at import differs.
+returns for *this turn's* provider differs.
 
-**Verifying it actually cached** — two counters on the response:
+**Verifying it actually cached — confirmed live on all three providers,
+2026-10-20, via `notebooks/phase3_graph.ipynb`: inspect
+`AIMessage.usage_metadata["input_token_details"]` across a turn's rounds**
+(every round's `AIMessage` is in `state["messages"]`, so one multi-tool-call
+turn is enough — no need for two separate turns). The exact keys populated
+differ by provider, confirmed live rather than assumed:
 
 ```python
 response.usage_metadata["input_token_details"]
-# first turn:  {"cache_creation": 12400, "cache_read": 0}      cache written
-# later turns: {"cache_creation": 0,     "cache_read": 12400}  cache HIT
-# broken:      {"cache_creation": 0,     "cache_read": 0}      not caching
+# ANTHROPIC: cache_read behaves as expected -- 0 on the write round, then the
+# full static-block size on every later round (a fixed prefix -- Anthropic's
+# cache_control marks one explicit breakpoint, so cache_read doesn't grow
+# further once that prefix is fully covered). cache_creation is UNRELIABLE,
+# though -- confirmed live it reports 0 even on the real write round. The
+# real write size shows up instead in the sibling ephemeral_5m_input_tokens/
+# ephemeral_1h_input_tokens keys, or in response_metadata's flat
+# cache_creation_input_tokens -- a langchain_anthropic mapping gap, not a
+# caching failure.
+#   round 0: {"cache_read": 0,     "cache_creation": 0, "ephemeral_5m_input_tokens": 32716}
+#   round 1: {"cache_read": 32716, "cache_creation": 0, "ephemeral_5m_input_tokens": 0}
+
+# OPENAI: both keys populate correctly and behave as originally expected --
+# but because OpenAI has no explicit cache-boundary marker (automatic
+# longest-prefix caching), it ends up caching the WHOLE growing prefix each
+# round -- the static block plus however much of this turn's tool-call
+# history has accumulated by then -- not just the static block the way
+# Anthropic's single breakpoint does. cache_read each round equals the
+# PRIOR round's total input; cache_creation is just that round's new
+# increment.
+#   round 0: {"cache_creation": 18421, "cache_read": 0}
+#   round 1: {"cache_creation": 706,   "cache_read": 18421}
+#   round 2: {"cache_creation": 554,   "cache_read": 19127}
+
+# GEMINI: only cache_read is populated at all -- no cache_creation key
+# appears in input_token_details, and response_metadata has no raw
+# fallback for it either (just finish_reason/model_name/safety_ratings/
+# model_provider) -- confirmed live there's no visibility into the write
+# side for this provider/langchain_google_genai version. cache_read still
+# grows turn over turn, same growing-prefix pattern as OpenAI.
+#   round 0: {"cache_read": 0}
+#   round 1: {"cache_read": 19561}
+#   round 2: {"cache_read": 21151}
 ```
 
-Both zero on a Claude model means caching silently isn't happening. The same
-numbers show per-LLM-call in the LangSmith trace tree, so checking during
-development needs no instrumentation.
+**Broken, any provider: `cache_read` stays `0`/absent across every round of
+a turn** (not just round 0) — that's the one signal common to all three,
+since each provider's *write-side* field is either unreliable (Anthropic),
+present (OpenAI), or absent (Gemini). The same numbers show per-LLM-call in
+the LangSmith trace tree, so checking during development needs no
+instrumentation.
 
-**Raise on an unknown model, don't fall through to plain text.** A silent
-default is the worst case: the request succeeds, the answer is correct, and
-the entire static block is re-billed every turn with nothing to signal it.
-Failing at startup on a typo'd model name is cheap; finding it on an invoice
-is not.
+**Raise on an unknown provider, don't fall through to plain text — now
+caught earlier than this function, at request validation.** `AskRequest`'s
+own `_model_must_be_available` field validator (`.claude/rules/gateway.md`)
+rejects a `model` not in `AVAILABLE_MODELS` with a 422 before a turn starts,
+so `build_static_context`'s `raise ValueError` for an unrecognized
+`model_provider` is now a defense against a config.py authoring mistake
+(a model mapped to a provider string outside `{anthropic, openai, gemini}`),
+not something a caller's bad input can reach. Still worth keeping: a silent
+default would otherwise be the worst case — the request succeeds, the answer
+is correct, and the entire static block is re-billed every turn with nothing
+to signal it.
 
 **The minimum cacheable prefix is model-specific** (currently 512–4,096
 tokens) and below it nothing caches, silently. Seven components including the
@@ -720,12 +787,14 @@ schema needs (`docs/chart-tool.md`); confirmed `ge=`/`le=` also broke
 `SearchDocsArgs.top_k` (`.claude/rules/tools.md`), so the rejection isn't
 `generate_chart`-specific. The fix: `init_orchestrator()` pre-converts
 `generate_chart`'s stand-in via `convert_to_anthropic_tool()` (no `strict`
-kwarg) **only when `MODEL_PROVIDER == "anthropic"`** — confirmed live that
-OpenAI/Gemini bind the plain schema directly under `strict=True` with no
-workaround at all, so `generate_chart_tool` is the one piece of
-`BIND_TOOLS_LIST`'s assembly that branches by provider; every other tool
-binds identically regardless. `agent_node` binds with
-`bind_tools(BIND_TOOLS_LIST, strict=True)` unconditionally either way. This
+kwarg) **only when the turn's `model_provider == "anthropic"`** — confirmed
+live that OpenAI/Gemini bind the plain schema directly under `strict=True`
+with no workaround at all, so `generate_chart_tool` is the one piece of
+`build_tools_list(model_provider)`'s assembly (below — rebuilt fresh every
+turn, not a module-level list, now that provider is per-request) that
+branches by provider; every other tool binds identically regardless.
+`agent_node` binds with `bind_tools(build_tools_list(state["model_provider"]),
+strict=True)` unconditionally either way. This
 also resolved a real live failure: `submit_answer` previously got no
 structural guarantee at all, and a live run produced a malformed call (a
 model-emitted XML-style fragment inside `answer_markdown`, missing
@@ -1333,28 +1402,43 @@ ALL_TOOLS = {
 # None of these five is MCP-based (`.claude/rules/tools.md`) -- MCP_TOOLS
 # alone would leave all five uncallable.
 
-# generate_chart's entry is swapped for a stand-in schema (source_ref + spec,
-# `.claude/rules/tools.md`) in the list bound to the model -- dispatch still
-# uses ALL_TOOLS, which keeps the real MCP-loaded tool object. Pre-converted
-# to a raw Anthropic tool dict (no strict kwarg) only for Anthropic, so
-# bind_tools(strict=True) below passes it through untouched there --
-# OpenAI/Gemini bind the plain schema directly, confirmed live.
-generate_chart_tool = (convert_to_anthropic_tool(chart_tool_call_standin)
-                       if MODEL_PROVIDER == "anthropic" else chart_tool_call_standin)
-BIND_TOOLS_LIST = [generate_chart_tool if name == "generate_chart" else t
-                   for name, t in ALL_TOOLS.items()]
+def build_tools_list(model_provider: str) -> list[BaseTool]:
+    """Stand-in tools (generate_chart, combine_results) + every other real
+    tool, assembled fresh per turn -- cheap, no I/O. Replaces an earlier
+    module-level BIND_TOOLS_LIST computed once in init_orchestrator(); that
+    stopped being correct once model_provider became per-request instead of
+    a fixed app/config.py value -- a list built once at startup for whichever
+    provider happened to be configured then would silently keep using it
+    for every turn, regardless of what a later turn's AskRequest.model asked
+    for.
 
-def build_model() -> BaseChatModel:
-    """Bare, correctly-configured chat model for MODEL_PROVIDER -- unbound;
-    agent_node binds BIND_TOOLS_LIST the same way regardless of provider."""
-    if MODEL_PROVIDER == "anthropic":
-        return ChatAnthropic(model=MODEL, thinking={"type": "adaptive", "display": "summarized"})
-    if MODEL_PROVIDER == "openai":
-        return ChatOpenAI(model=MODEL, use_responses_api=True,
+    generate_chart's entry is swapped for a stand-in schema (source_ref +
+    spec, `.claude/rules/tools.md`) -- dispatch still uses ALL_TOOLS, which
+    keeps the real MCP-loaded tool object. Pre-converted to a raw Anthropic
+    tool dict (no strict kwarg) only for Anthropic, so bind_tools(strict=True)
+    below passes it through untouched there -- OpenAI/Gemini bind the plain
+    schema directly, confirmed live."""
+    generate_chart_tool = (convert_to_anthropic_tool(chart_tool_call_standin)
+                           if model_provider == "anthropic" else chart_tool_call_standin)
+    stand_in_tool_names = ["generate_chart", "combine_results"]
+    stand_in_tools = [generate_chart_tool, combine_results_call_standin]
+    non_stand_in_tools = [t for name, t in ALL_TOOLS.items() if name not in stand_in_tool_names]
+    return non_stand_in_tools + stand_in_tools
+
+
+def build_model(model: str, model_provider: str) -> BaseChatModel:
+    """Bare, correctly-configured chat model for model_provider -- unbound;
+    agent_node binds the tools list the same way regardless of provider.
+    Takes both as parameters now, not a module-level MODEL/MODEL_PROVIDER --
+    model choice is per-request (below)."""
+    if model_provider == "anthropic":
+        return ChatAnthropic(model=model, thinking={"type": "adaptive", "display": "summarized"})
+    if model_provider == "openai":
+        return ChatOpenAI(model=model, use_responses_api=True,
                            reasoning={"effort": "low", "summary": "auto"})
-    if MODEL_PROVIDER == "gemini":
-        return ChatGoogleGenerativeAI(model=MODEL, reasoning_effort="low", include_thoughts=True)
-    raise ValueError(f"No model factory branch for provider: {MODEL_PROVIDER}")
+    if model_provider == "gemini":
+        return ChatGoogleGenerativeAI(model=model, reasoning_effort="low", include_thoughts=True)
+    raise ValueError(f"No model factory branch for provider: {model_provider}")
 
 
 async def agent_node(state: AgentState) -> dict:
@@ -1364,19 +1448,30 @@ async def agent_node(state: AgentState) -> dict:
     submit_answer is possible again; verify_node's retry already recovers
     from that. No cost difference: thinking tokens bill the same regardless
     of display."""
-    model = build_model().bind_tools(BIND_TOOLS_LIST, strict=True)
-    response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
+    model = build_model(state["model"], state["model_provider"]).bind_tools(
+        build_tools_list(state["model_provider"]), strict=True)
+    system_message = SystemMessage(content=build_static_context(
+        state["model_provider"], get_static_context()))
+    response = await model.ainvoke([system_message, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 ```
 
-**`MODEL_PROVIDER` (`app/config.py`) drives every branch above** — derived
-once from `AVAILABLE_MODELS[MODEL]` (a `{model_name: provider}` dict), not
-threaded through as a parameter. OpenAI's `use_responses_api=True` isn't
-optional: plain `/v1/chat/completions` flatly rejects combining
-`reasoning_effort` with tool calling for a reasoning model — confirmed live,
-not a style choice. Each provider picks up its API key from the environment
-(`init_orchestrator()` fetches only the active provider's secret) — none of
-the three pass `api_key=`/`google_api_key=` explicitly.
+**`state["model"]`/`state["model_provider"]` drive every branch above —
+per-turn now, not a fixed `app/config.py` pair read once at startup.**
+`AskRequest.model` (`.claude/rules/gateway.md`) defaults to `app/config.py`'s
+`MODEL` but can be overridden per request; `run_agent_turn` derives
+`model_provider` from it (`AVAILABLE_MODELS[model]`) and seeds both onto
+`AgentState`/`PendingApproval`, so a resumed turn continues on the same model
+it paused on rather than whatever `app/config.py` currently says — confirmed
+live, including through a pause/resume round trip. OpenAI's
+`use_responses_api=True` isn't optional: plain `/v1/chat/completions` flatly
+rejects combining `reasoning_effort` with tool calling for a reasoning
+model — confirmed live, not a style choice. Each provider picks up its API
+key from the environment — **`init_orchestrator()` now fetches all three
+providers' secrets unconditionally at startup**, not just the configured
+one, since which provider a given turn needs is no longer known until that
+turn's `AskRequest` arrives; none of the three pass `api_key=`/
+`google_api_key=` explicitly.
 
 | Node | Role |
 |---|---|

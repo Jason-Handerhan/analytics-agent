@@ -110,7 +110,7 @@ drift apart. Re-run `create_table.py` after any schema change (BigQuery can't
 | Field | Real when the table is first built (Phase 1)? | Populated from |
 |---|---|---|
 | `conversation_id`, `user_id`, `question` | Yes | Phase 1 |
-| `model`, `model_provider` | Yes | Phase 6 (model swappability) -- `MODEL`/`MODEL_PROVIDER` from `app/config.py`, same on every row regardless of turn outcome |
+| `model`, `model_provider` | Yes | Phase 6 (model swappability) -- **per-request since 2026-10-20, not a fixed pair on every row.** `AskRequest.model` (default `app/config.py`'s `MODEL`) and its derived `model_provider` flow through `AgentState`/`PendingApproval` to `build_telemetry_row`, so two rows for the same conversation can legitimately show different models if the caller switched between turns |
 | `filter_context`, `active_page` | No — null | Phase 3 (captured through the connector) |
 | `tool_calls` (nested record: `ToolCallRecord` fields + derived `query_text`) | No — empty | Phase 3, one tool at a time as each lands |
 | `answer_markdown` | Yes — the canned echo answer | Phase 1 |

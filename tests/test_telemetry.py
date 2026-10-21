@@ -26,6 +26,8 @@ async def test_write_telemetry_row_success(monkeypatch, clarifying_question, exp
     row = writer.build_telemetry_row(
         conversation_id="conv-123",
         user_id="user-oid-456",
+        model=MODEL,
+        model_provider=MODEL_PROVIDER,
         question="What is the recall at 5?",
         answer_markdown="Echo: What is the recall at 5?",
         turn_started_at=STARTED,

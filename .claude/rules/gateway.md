@@ -151,7 +151,7 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
   it** — an ID that only arrived with the answer would leave turn one
   unpollable.
 - `POST /ask` — body `{question, image_base64, filter_context, active_page,
-  conversation_id, approval_decision}`. **`approval_decision` is
+  conversation_id, approval_decision, model}`. **`approval_decision` is
   `"approved" | "rejected" | None`, mutually exclusive with `question` —
   exactly one of the two is set** (`AskRequest`'s own validator). A fresh
   question omits it; resolving a pending approval omits `question` instead.
@@ -160,6 +160,20 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
   flow). Returns the `AgentResponse` model **serialized as-is — snake_case,
   no field-name conversion** (`.claude/rules/orchestrator.md` is the schema
   of record).
+
+  **`model` is per-request, not read from `app/config.py` directly — proven
+  live, including through a pause/resume round trip, 2026-10-20.** Defaults
+  to `app/config.py`'s `MODEL` when omitted, so every existing caller is
+  unaffected; a caller may override it to any key in `AVAILABLE_MODELS`
+  (`app/config.py`). `AskRequest`'s own `_model_must_be_available` field
+  validator rejects anything else with a 422 before a turn starts — the
+  same "reject, don't silently fall through" principle as the question-length
+  check below, just enforced by Pydantic rather than a manual
+  `HTTPException`. `run_agent_turn` derives `model_provider` from it
+  (`AVAILABLE_MODELS[model]`) and seeds both onto `AgentState` and, on a
+  pause, `PendingApproval` (`.claude/rules/orchestrator.md`) — a resumed
+  turn continues on the model it paused on, not whatever `model` a later
+  `POST /ask` call happens to omit-and-default to.
 
   **Deliberately no camelCase translation.** Power Apps reads property names
   from the connector's OpenAPI schema, which FastAPI generates from the
@@ -229,7 +243,7 @@ normally.
 
 | Collection | Lifetime | Holds | Read by |
 |---|---|---|---|
-| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 12 fields — schema below**) | `status`/`thinking_log` by `GET /ask/status`; `pending_approval` by `POST /ask`'s approval-decision branch; `cancel_requested` by `is_cancelled` (`app/orchestrator/shared_helpers.py`), called from the orchestrator's routing functions and `finalize_node` — not read anywhere in this file directly |
+| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 14 fields — schema below**) | `status`/`thinking_log` by `GET /ask/status`; `pending_approval` by `POST /ask`'s approval-decision branch; `cancel_requested` by `is_cancelled` (`app/orchestrator/shared_helpers.py`), called from the orchestrator's routing functions and `finalize_node` — not read anywhere in this file directly |
 | `sessions/{conversation_id}` | Whole conversation; 30-day TTL | `user_id`, `history_messages`, `last_activity_at` | Prompt assembly, the ownership check |
 
 **`pending_approval` is a field, not a third collection** — it has its own
@@ -457,6 +471,8 @@ from typing import TypedDict
 
 class PendingApproval(TypedDict):
     conversation_id: str
+    model: str                               # carried — see rule below
+    model_provider: str                      # carried — see rule below
     question: str                            # carried -- see rule below
     filter_context: list[dict]               # frozen copy — see rule below
     active_page: str | None                  # which page the user was on
@@ -483,6 +499,13 @@ class PendingApproval(TypedDict):
 consumption or is needed to resume reasoning; reset anything scoped to a
 single attempt; omit anything already recorded elsewhere.
 
+- `model` and `model_provider` **carry** — added 2026-10-20, alongside
+  moving model choice from a fixed `app/config.py` value to per-request
+  (`.claude/rules/orchestrator.md`). Without this, a resumed turn would pick
+  up whatever `AskRequest.model`/`app/config.py` default is current *at
+  resume time*, not what the user was actually talking to when the batch
+  paused — confirmed live that carrying them keeps a resumed turn on the
+  same model throughout.
 - `iteration_count` and `bytes_consumed` **carry** — both are guardrail
   inputs. Resetting `bytes_consumed` would let a turn spend a full budget on
   each side of the pause, making approval a way *around* the absolute cap it
@@ -507,12 +530,12 @@ graph, so the real value has to survive the round trip.
 `rebuild_paused_messages` calls `_restore_gemini_signatures` first, before
 anything else, to put the original key back for the replayed call.
 
-**Anything not in these twelve fields resets by construction.** That's the
+**Anything not in these fourteen fields resets by construction.** That's the
 safety property, not an oversight: `needs_approval` carried as `True` would
 re-pause the resumed turn immediately, and outputs like `answer_markdown` or
 `claims` haven't been produced yet at pause time.
 
-**A minimal checkpointer, scoped to the one point that pauses.** Twelve
+**A minimal checkpointer, scoped to the one point that pauses.** Fourteen
 fields cover the one case that exists; LangGraph's `interrupt()` needs a
 persistent checkpointer with no free GCP-native option. **No `code_version`
 check on resume** — a pause outliving a deploy runs against whatever code is

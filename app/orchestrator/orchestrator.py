@@ -1,5 +1,5 @@
 """LangGraph tool-calling loop: state, nodes, routing, graph.
-init_orchestrator() populates MCP_TOOLS/ALL_TOOLS/SYSTEM_MESSAGE lazily --
+init_orchestrator() populates MCP_TOOLS/ALL_TOOLS lazily --
 call once before running graph. AgentState and its TypedDicts live in
 app/orchestrator/state.py; entry/exit helpers (called by the gateway, never
 the graph) live in app/gateway/entry_exit.py -- kept out of this file so
@@ -54,14 +54,12 @@ from app.config import (
     MCP_SERVER_HEADERS,
     MCP_SERVER_NAME,
     MCP_SERVER_URL,
-    MODEL,
-    MODEL_PROVIDER,
     NUMERIC_SOURCE_TOOLS,
     POWER_BI_DATASET_ID,
     POWER_BI_WORKSPACE_ID,
     get_secret,
 )
-from app.orchestrator.context import get_static_context
+from app.orchestrator.context import build_static_context, get_static_context
 from app.orchestrator.shared_helpers import is_cancelled, label_chartable_result
 from app.orchestrator.state import AgentState, ToolCallRecord, TurnError
 from app.orchestrator.tools import (
@@ -82,8 +80,6 @@ from app.telemetry.writer import build_telemetry_row, write_telemetry_row
 
 MCP_TOOLS: dict[str, BaseTool] = {}
 ALL_TOOLS: dict[str, BaseTool] = {}
-BIND_TOOLS_LIST: list[BaseTool] = []
-SYSTEM_MESSAGE: SystemMessage | None = None
 FILE_DESCRIPTIONS: dict[str, str] = {}
 
 # Tools whose result gets a ref_id, resolvable by generate_chart/combine_results.
@@ -98,19 +94,16 @@ CANCELLED_MESSAGE = "This turn was cancelled."
 
 
 async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
-    """Populates MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE,
-    FILE_DESCRIPTIONS. Idempotent."""
-    global MCP_TOOLS, ALL_TOOLS, BIND_TOOLS_LIST, SYSTEM_MESSAGE, FILE_DESCRIPTIONS
-    if MCP_TOOLS and ALL_TOOLS and SYSTEM_MESSAGE:
+    """Populates MCP_TOOLS, ALL_TOOLS, FILE_DESCRIPTIONS. Idempotent."""
+    global MCP_TOOLS, ALL_TOOLS, FILE_DESCRIPTIONS
+    if MCP_TOOLS and ALL_TOOLS:
         return
 
-    # Set API Key and Tracing Environment Variables
-    if MODEL_PROVIDER == "anthropic":
-        os.environ["ANTHROPIC_API_KEY"] = get_secret("anthropic-api-key", GCP_PROJECT_ID)
-    elif MODEL_PROVIDER == "openai":
-        os.environ["OPENAI_API_KEY"] = get_secret("openai-api-key", GCP_PROJECT_ID)
-    elif MODEL_PROVIDER == "gemini":
-        os.environ["GOOGLE_API_KEY"] = get_secret("gemini-api-key", GCP_PROJECT_ID)
+    # Set API Key and Tracing Environment Variables -- all three providers'
+    # keys are fetched unconditionally, since the model is chosen per turn.
+    os.environ["ANTHROPIC_API_KEY"] = get_secret("anthropic-api-key", GCP_PROJECT_ID)
+    os.environ["OPENAI_API_KEY"] = get_secret("openai-api-key", GCP_PROJECT_ID)
+    os.environ["GOOGLE_API_KEY"] = get_secret("gemini-api-key", GCP_PROJECT_ID)
     os.environ["LANGSMITH_TRACING"] = LANGSMITH_TRACING
     os.environ["LANGSMITH_API_KEY"] = get_secret("langsmith-api-key", GCP_PROJECT_ID)
     os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
@@ -130,20 +123,7 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "search_docs": search_docs,
         "get_page_info": get_page_info,
     }
-    # Model binds here, stand-in tools (generate_chart, combine_results) + non-stand-in tools (the rest)
-
-    # Only Claude's strict=True rejects generate_chart's discriminated-union schema
-    generate_chart_tool = (convert_to_anthropic_tool(chart_tool_call_standin)
-                           if MODEL_PROVIDER == "anthropic" else chart_tool_call_standin)
-
-    stand_in_tool_names = ["generate_chart", "combine_results"]
-    stand_in_tools = [generate_chart_tool, combine_results_call_standin]
-
-    non_stand_in_tools = [t for name, t in ALL_TOOLS.items()
-                          if name not in stand_in_tool_names]
-
-    BIND_TOOLS_LIST = non_stand_in_tools + stand_in_tools
-    SYSTEM_MESSAGE = SystemMessage(content=get_static_context())
+    get_static_context()  # warms the @lru_cache at startup, not on the first real turn
 
 
 # --- Helper functions ----------------------------------------------------
@@ -605,30 +585,41 @@ def build_sources(tool_calls: list[ToolCallRecord]) -> list[str]:
             for name, grp in groupby(names)]
 
 
-def build_model() -> BaseChatModel:
-    """Bare, correctly-configured chat model for MODEL_PROVIDER -- unbound;
-    agent_node binds BIND_TOOLS_LIST the same way regardless of provider."""
-    if MODEL_PROVIDER == "anthropic":
-        return ChatAnthropic(model=MODEL, thinking={"type": "adaptive", "display": "summarized"})
-    if MODEL_PROVIDER == "openai":
-        return ChatOpenAI(model=MODEL, use_responses_api=True,
+def build_tools_list(model_provider: str) -> list[BaseTool]:
+    """Stand-in tools (generate_chart, combine_results) + every other real
+    tool, assembled fresh per turn -- cheap, no I/O"""
+    # Only Claude rejects generate_chart's discriminated-union schema with strict = True
+    generate_chart_tool = (convert_to_anthropic_tool(chart_tool_call_standin)
+                           if model_provider == "anthropic" else chart_tool_call_standin)
+    stand_in_tool_names = ["generate_chart", "combine_results"]
+    stand_in_tools = [generate_chart_tool, combine_results_call_standin]
+    non_stand_in_tools = [t for name, t in ALL_TOOLS.items() if name not in stand_in_tool_names]
+    return non_stand_in_tools + stand_in_tools
+
+
+def build_model(model: str, model_provider: str) -> BaseChatModel:
+    """Bare, correctly-configured chat model for model_provider -- unbound;
+    agent_node binds the tools list the same way regardless of provider.
+    Thinking/reasoning enabled for frontend display"""
+    if model_provider == "anthropic":
+        return ChatAnthropic(model=model, thinking={"type": "adaptive", "display": "summarized"})
+    if model_provider == "openai":
+        return ChatOpenAI(model=model, use_responses_api=True,
                            reasoning={"effort": "low", "summary": "auto"})
-    if MODEL_PROVIDER == "gemini":
-        return ChatGoogleGenerativeAI(model=MODEL, reasoning_effort="low", include_thoughts=True)
-    raise ValueError(f"No model factory branch for provider: {MODEL_PROVIDER}")
+    if model_provider == "gemini":
+        return ChatGoogleGenerativeAI(model=model, reasoning_effort="low", include_thoughts=True)
+    raise ValueError(f"No model factory branch for provider: {model_provider}")
 
 
 # --- Node functions ------------------------------------------------------
 
 async def agent_node(state: AgentState) -> dict:
     """Calls the LLM with tools bound. Emits tool calls -- the final answer
-    only ever arrives via submit_answer, never plain text.
-
-    Extended thinking enabled for frontend display value -- incompatible with
-    tool_choice="any", so a plain-text finish without submit_answer is
-    possible again; verify_node's retry already recovers from that."""
-    model = build_model().bind_tools(BIND_TOOLS_LIST, strict=True)
-    response = await model.ainvoke([SYSTEM_MESSAGE, *state["history_messages"], *state["messages"]])
+    only ever arrives via submit_answer, never plain text (gauranteed by verify node)"""
+    model = build_model(state["model"], state["model_provider"]).bind_tools(
+        build_tools_list(state["model_provider"]), strict=True)
+    system_message = SystemMessage(content=build_static_context(state["model_provider"], get_static_context()))
+    response = await model.ainvoke([system_message, *state["history_messages"], *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 
 
@@ -863,6 +854,8 @@ async def finalize_node(state: AgentState) -> dict:
     row = build_telemetry_row(
         conversation_id=state["conversation_id"],
         user_id=state["user_id"],
+        model=state["model"],
+        model_provider=state["model_provider"],
         question=state["question"],
         answer_markdown=answer_markdown,
         turn_started_at=state["turn_started_at"],

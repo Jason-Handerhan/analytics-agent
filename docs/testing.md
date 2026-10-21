@@ -89,23 +89,39 @@ def test_static_context_contains_all_six_components():
     names and descriptions but NOT dax bodies; leaking those defeats the
     reason the split exists (.claude/rules/gateway.md)."""
 
-@pytest.mark.parametrize("model,expects_marker", [
-    ("claude-sonnet-5-...", True),    # explicit cache_control required
-    ("gpt-4.1-...",         False),   # automatic
-    ("gemini-2.5-pro-...",  False),   # implicit
+@pytest.mark.parametrize("model_provider,expects_cache_block", [
+    ("anthropic", True),    # explicit cache_control required
+    ("openai",    False),   # automatic
+    ("gemini",    False),   # implicit
 ])
-def test_caching_dispatch_matches_the_model(model, expects_marker):
-    """Switching models is a config change — this is what makes that safe.
-    A wrong branch fails SILENTLY: correct answer, full re-billing of the
-    whole static block every turn (.claude/rules/gateway.md). Also covers
-    the raise on an unknown model, which is what stops a typo'd name from
-    quietly falling through to no caching at all."""
-    out = build_static_context(model, "x" * 5000)
-    assert isinstance(out, list) == expects_marker
+def test_build_static_context_dispatches_by_provider(model_provider, expects_cache_block):
+    """Model choice is per-request now (AskRequest.model,
+    .claude/rules/gateway.md), not a fixed config.py value -- this covers
+    the dispatch SHAPE only, not whether each provider's API actually
+    honors it (confirmed separately, live, across all three -- see
+    .claude/rules/orchestrator.md's "Verifying it actually cached"). A
+    wrong branch fails SILENTLY in production: correct answer, full
+    re-billing of the whole static block every turn."""
+    out = build_static_context(model_provider, "x" * 5000)
+    assert isinstance(out, list) == expects_cache_block
+
+
+def test_build_static_context_raises_on_unknown_provider():
+    """Guards a config.py authoring mistake (a model mapped to a provider
+    string outside anthropic/openai/gemini) -- unreachable from a caller's
+    bad `model` today, since AskRequest's own field validator rejects that
+    at request validation, before this function ever runs."""
     with pytest.raises(ValueError):
-        build_static_context("mystery-model-1", "x" * 5000)
+        build_static_context("mystery-provider", "x" * 5000)
 
 ```
+
+Both tests, Layer 1, exist in `tests/test_static_context.py` — no credentials
+needed; this is the dispatch logic only. The live caching behavior itself
+(whether each provider's API genuinely returns a cache hit) is confirmed
+separately, manually, per `.claude/rules/orchestrator.md`'s "Verifying it
+actually cached" — not something a Layer 1 test can assert without a real
+API call.
 
 ## 3. Model schema build — fixture-driven assembly, real API calls stay Layer 2
 

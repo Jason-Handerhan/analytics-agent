@@ -28,6 +28,8 @@ class ToolCallRecord(TypedDict):
 
 class PendingApproval(TypedDict):
     conversation_id: str
+    model: str
+    model_provider: str
     question: str
     filter_context: list[dict]
     active_page: str | None
@@ -59,6 +61,8 @@ class AgentState(TypedDict):
     question: str
     conversation_id: str
     user_id: str
+    model: str
+    model_provider: str
     turn_started_at: datetime
     filter_context: list[dict]
     active_page: str | None

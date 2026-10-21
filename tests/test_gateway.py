@@ -13,10 +13,12 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messages_to_dict
+from pydantic import ValidationError
 
 from app.config import MAX_QUESTION_CHARS, SESSIONS_TTL_DAYS
 import app.gateway.gateway as gateway
 from app.gateway.gateway import app, validate_api_key, validate_entra_token
+from app.gateway.models import AskRequest
 
 client = TestClient(app)
 
@@ -247,6 +249,20 @@ def test_question_too_long_rejected(monkeypatch, patch_jwks, auth_headers):
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize("kwargs, match", [
+    ({"question": "How many orders?", "conversation_id": "conv-1", "model": "not-a-real-model"},
+     "Unknown model"),
+    ({"conversation_id": "conv-1"}, "exactly one of"),
+    ({"question": "How many orders?", "conversation_id": "conv-1", "approval_decision": "approved"},
+     "exactly one of"),
+])
+def test_ask_request_validators_reject_bad_input(kwargs, match):
+    """AskRequest's two validators -- unknown model, and exactly-one-of
+    question/approval_decision -- checked directly, no HTTP client needed."""
+    with pytest.raises(ValidationError, match=match):
+        AskRequest(**kwargs)
+
+
 AGENT_CHUNK = {"type": "updates", "data": {"agent": {
     "messages": [AIMessage(content=[{"type": "thinking", "thinking": "Plan it."}])],
     "llm_calls": 1}}}
@@ -320,6 +336,8 @@ def _fake_pending_approval() -> dict:
     now = datetime.now(timezone.utc)
     return {
         "conversation_id": "some-id",
+        "model": "claude-sonnet-5",
+        "model_provider": "anthropic",
         "question": "How many orders?",
         "filter_context": [{"filter_column": "department", "value": "produce"}],
         "active_page": "Financial Impact",
@@ -387,6 +405,8 @@ def test_post_ask_resume_approved_seeds_state(monkeypatch, patch_jwks, auth_head
         ("delete", None),
     ]
     seeded = recording_graph.captured_state
+    assert seeded["model"] == pending["model"]
+    assert seeded["model_provider"] == pending["model_provider"]
     assert seeded["question"] == pending["question"]
     assert seeded["filter_context"] == pending["filter_context"]
     assert seeded["active_page"] == pending["active_page"]
@@ -427,6 +447,8 @@ def test_post_ask_resume_rejected_returns_message(monkeypatch, patch_jwks, auth_
 NEEDS_APPROVAL_FINALIZE_CHUNK = {"type": "updates", "data": {"finalize": {"needs_approval": True}}}
 PAUSED_VALUES = {"type": "values", "data": {
     "conversation_id": "conv-1",
+    "model": "claude-sonnet-5",
+    "model_provider": "anthropic",
     "question": "How many orders?",
     "filter_context": [{"filter_column": "department", "value": "produce"}],
     "active_page": "Financial Impact",
@@ -466,6 +488,8 @@ async def test_consume_graph_replaces_doc_with_pending_approval_on_pause(monkeyp
             "status": "Approval workflow",
             "pending_approval": {
                 "conversation_id": expected["conversation_id"],
+                "model": expected["model"],
+                "model_provider": expected["model_provider"],
                 "question": expected["question"],
                 "filter_context": expected["filter_context"],
                 "active_page": expected["active_page"],

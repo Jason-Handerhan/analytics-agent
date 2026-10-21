@@ -116,7 +116,8 @@
         "filter_context": { "type": "array", "items": { "type": "object" } },
         "active_page": { "type": "string" },
         "conversation_id": { "type": "string" },
-        "approval_decision": { "type": "string", "enum": ["approved", "rejected"] }
+        "approval_decision": { "type": "string", "enum": ["approved", "rejected"] },
+        "model": { "type": "string" }
       }
     },
     "ConversationResponse": {

@@ -14,9 +14,7 @@ from functools import lru_cache
 
 from google.cloud import bigquery
 
-from app.config import (
-    AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID, MODEL, MODEL_PROVIDER,
-)
+from app.config import AGENT_SAFE_DATASET, CONTEXT_DIR, DAX_ROW_CAP, GCP_PROJECT_ID
 from app.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_REGISTRY
 
 ORIENTATION_DIR = CONTEXT_DIR / "orientation"
@@ -153,26 +151,27 @@ GEMINI_THINKING_INSTRUCTIONS = (
 )
 
 
-def build_static_context(model: str, static_text: str) -> list[dict] | str:
-    """The system-prompt payload, shaped for this model's caching mechanism.
+def build_static_context(model_provider: str, static_text: str) -> list[dict] | str:
+    """The system-prompt payload, shaped for this provider's caching mechanism.
 
     Anthropic -> list of content blocks, the last carrying cache_control.
     OpenAI    -> plain string; caching is automatic, nothing to mark.
     Gemini    -> plain string; implicit caching above its threshold.
     """
-    if model.startswith("claude-"):
+    if model_provider == "gemini":
+        static_text = static_text + "\n\n" + GEMINI_THINKING_INSTRUCTIONS
+        return static_text
+    if model_provider == "anthropic":
         return [{"type": "text", "text": static_text,
                  "cache_control": {"type": "ephemeral"}}]
-    if model.startswith(("gpt-", "o1-", "o3-")):
+    if model_provider == "openai":
         return static_text
-    if model.startswith("gemini-"):
-        return static_text
-    raise ValueError(f"No caching strategy for model: {model}")
+    raise ValueError(f"No caching strategy for provider: {model_provider}")
 
 
 @lru_cache
-def get_static_context() -> list[dict] | str:
-    components = [
+def get_static_context() -> str:
+    return "\n\n".join([
         SYSTEM_INSTRUCTIONS,
         ORIENTATION_BUNDLE,
         TABLE_REGISTRY,
@@ -181,8 +180,4 @@ def get_static_context() -> list[dict] | str:
         PARAMETERS,
         DAX_FEW_SHOT_EXAMPLES,
         get_bigquery_schema(),
-    ]
-    if MODEL_PROVIDER == "gemini":
-        components.append(GEMINI_THINKING_INSTRUCTIONS)
-    static_text = "\n\n".join(components)
-    return build_static_context(MODEL, static_text)
+    ])

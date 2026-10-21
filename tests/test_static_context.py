@@ -2,6 +2,8 @@
 (docs/testing.md). get_bigquery_schema is monkeypatched so this never
 touches a real BigQuery client.
 """
+import pytest
+
 import app.orchestrator.context as context
 
 
@@ -13,10 +15,7 @@ def test_static_context_contains_all_six_components(monkeypatch):
     monkeypatch.setattr(context, "get_bigquery_schema", lambda: "BIGQUERY SCHEMA -- fake")
     context.get_static_context.cache_clear()
 
-    result = context.get_static_context()
-
-    # Claude returns a list of content blocks; OpenAI/Gemini return a string.
-    text = result[0]["text"] if isinstance(result, list) else result
+    text = context.get_static_context()
 
     markers = [
         "SYSTEM INSTRUCTIONS",
@@ -38,3 +37,30 @@ def test_static_context_contains_all_six_components(monkeypatch):
         assert dax.strip() not in MEASURE_REGISTRY
 
     context.get_static_context.cache_clear()
+
+
+@pytest.mark.parametrize("model_provider,expects_cache_block", [
+    ("anthropic", True),
+    ("openai", False),
+    ("gemini", False),
+])
+def test_build_static_context_dispatches_by_provider(model_provider, expects_cache_block):
+    """Anthropic gets an explicit cache_control block; OpenAI/Gemini get a
+    plain string. This ensures proper shape for context cache."""
+    static_text = "x" * 5000
+    out = context.build_static_context(model_provider, static_text)
+
+    assert isinstance(out, list) == expects_cache_block
+    if expects_cache_block:
+        assert out == [{"type": "text", "text": static_text,
+                         "cache_control": {"type": "ephemeral"}}]
+    elif model_provider == "gemini":
+        assert out == static_text + "\n\n" + context.GEMINI_THINKING_INSTRUCTIONS
+    else:
+        assert out == static_text
+
+
+def test_build_static_context_raises_on_unknown_provider():
+    """Test value error raised for config.py authoring mistake"""
+    with pytest.raises(ValueError, match="No caching strategy"):
+        context.build_static_context("mystery-provider", "x" * 5000)

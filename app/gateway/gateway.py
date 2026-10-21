@@ -11,6 +11,7 @@ from fastapi import FastAPI, Header, HTTPException
 from google.cloud import firestore
 
 from app.config import (
+    AVAILABLE_MODELS,
     EXPECTED_AUDIENCE,
     GATEWAY_TURN_TIMEOUT_SECONDS,
     GCP_PROJECT_ID,
@@ -228,6 +229,8 @@ async def write_rejected_telemetry(conversation_id: str, user_id: str, pending: 
     row = build_telemetry_row(
         conversation_id=conversation_id,
         user_id=user_id,
+        model=pending["model"],
+        model_provider=pending["model_provider"],
         question=pending["question"],
         answer_markdown=REJECTED_MESSAGE,
         turn_started_at=now,
@@ -350,6 +353,8 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             question=pending["question"],
             conversation_id=body.conversation_id,
             user_id=user_id,
+            model=pending["model"],
+            model_provider=pending["model_provider"],
             filter_context=pending["filter_context"],
             active_page=pending["active_page"],
             image_base64=None,
@@ -369,6 +374,8 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             question=body.question,
             conversation_id=body.conversation_id,
             user_id=user_id,
+            model=body.model,
+            model_provider=AVAILABLE_MODELS[body.model],
             filter_context=body.filter_context,
             active_page=body.active_page,
             image_base64=body.image_base64,

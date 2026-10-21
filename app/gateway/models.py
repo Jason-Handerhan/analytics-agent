@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+from app.config import AVAILABLE_MODELS, MODEL
 
 
 # --- POST /conversation -----------------------------------------------------
@@ -19,6 +21,14 @@ class AskRequest(BaseModel):
     active_page: str | None = None
     conversation_id: str
     approval_decision: Literal["approved", "rejected"] | None = None
+    model: str = MODEL
+
+    @field_validator("model")
+    @classmethod
+    def _model_must_be_available(cls, value: str) -> str:
+        if value not in AVAILABLE_MODELS:
+            raise ValueError(f"Unknown model: {value}. Available: {list(AVAILABLE_MODELS)}")
+        return value
 
     @model_validator(mode="after")
     def _exactly_one_of_question_or_decision(self) -> "AskRequest":

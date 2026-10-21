@@ -50,7 +50,7 @@ def build_human_message(question: str, filter_context: list[dict], active_page: 
 
 
 def build_initial_state(
-    question: str, conversation_id: str, user_id: str,
+    question: str, conversation_id: str, user_id: str, model: str, model_provider: str,
     filter_context: list[dict], active_page: str | None, image_base64: str | None,
     history_messages: list[BaseMessage],
 ) -> AgentState:
@@ -59,6 +59,8 @@ def build_initial_state(
         question=question,
         conversation_id=conversation_id,
         user_id=user_id,
+        model=model,
+        model_provider=model_provider,
         turn_started_at=datetime.now(timezone.utc),
         filter_context=filter_context,
         active_page=active_page,
@@ -98,101 +100,6 @@ def build_initial_state(
 
 
 # --- Turn teardown (graph output -> gateway wire format) -------------------
-
-# <style> blocks aren't reliably honored by the Power Apps HTML text
-# control, so every element that needs styling gets it inline instead.
-class _AnswerRenderer(mistune.HTMLRenderer):
-    def paragraph(self, text: str) -> str:
-        return (f'<p style="font-family: {ANSWER_FONT_FAMILY}; '
-                f'font-size: {ANSWER_BODY_FONT_SIZE};">{text}</p>\n')
-
-    def heading(self, text: str, level: int, **attrs) -> str:
-        tag = f"h{level}"
-        size = ANSWER_HEADING_FONT_SIZE if level <= 2 else ANSWER_SUBHEADING_FONT_SIZE
-        style = f"font-family: {ANSWER_FONT_FAMILY}; font-size: {size};"
-        heading_id = attrs.get("id")
-        id_attr = f' id="{mistune.util.escape(heading_id)}"' if heading_id else ""
-        return f'<{tag}{id_attr} style="{style}">{text}</{tag}>\n'
-
-    def list_item(self, text: str) -> str:
-        return (f'<li style="font-family: {ANSWER_FONT_FAMILY}; '
-                f'font-size: {ANSWER_BODY_FONT_SIZE};">{text}</li>\n')
-
-    def image(self, text: str, url: str, title: str | None = None) -> str:
-        src = self.safe_url(url)
-        alt = mistune.util.striptags(text)
-        return f'<img src="{src}" alt="{alt}" style="max-width: 100%;" />'
-
-    def block_code(self, code: str, info: str | None = None) -> str:
-        escaped = mistune.util.escape(code)
-        return (
-            '<pre style="display: inline-block; max-width: 100%; overflow-x: auto; '
-            f'font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: {ANSWER_CODE_FONT_SIZE}; '
-            f'white-space: pre-wrap; background-color: {ANSWER_CODE_BLOCK_BG}; '
-            f'color: {ANSWER_CODE_BLOCK_TEXT}; padding: 12px 16px; border-radius: 6px; '
-            'line-height: 1.5;">'
-            f'<code>{escaped}</code></pre>\n'
-        )
-
-    def codespan(self, text: str) -> str:
-        escaped = mistune.util.escape(text)
-        return (
-            f'<code style="font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: {ANSWER_CODE_FONT_SIZE}; '
-            f'background-color: {ANSWER_INLINE_CODE_BG}; border: 1px solid {ANSWER_INLINE_CODE_BORDER}; '
-            f'color: {ANSWER_INLINE_CODE_TEXT}; padding: 2px 5px; '
-            f'border-radius: 3px;">{escaped}</code>'
-        )
-
-
-def _render_table(renderer, text: str) -> str:
-    return f'<table style="border-collapse: collapse; max-width: 100%;">\n{text}</table>\n'
-
-
-def _render_table_head(renderer, text: str) -> str:
-    return f'<thead>\n<tr>\n{text}</tr>\n</thead>\n'
-
-
-def _render_table_body(renderer, text: str) -> str:
-    return f'<tbody>\n{text}</tbody>\n'
-
-
-def _render_table_row(renderer, text: str) -> str:
-    return f'<tr>\n{text}</tr>\n'
-
-
-def _render_table_cell(renderer, text: str, align: str | None = None, head: bool = False) -> str:
-    tag = "th" if head else "td"
-    font = f"font-family: {ANSWER_FONT_FAMILY}; font-size: {ANSWER_TABLE_FONT_SIZE}; "
-    if head:
-        style = (font + f"border: 1px solid {ANSWER_TABLE_HEADER_BORDER}; padding: 6px 10px; "
-                  f"color: {ANSWER_TABLE_HEADER_TEXT}; line-height: 1.3; "
-                  f"background-color: {ANSWER_TABLE_HEADER_BG}; font-weight: bold;")
-    else:
-        style = (font + f"border: 1px solid {ANSWER_TABLE_CELL_BORDER}; padding: 4px 10px; "
-                  f"color: {ANSWER_TABLE_CELL_TEXT}; line-height: 1.3;")
-    if align:
-        style += f" text-align: {align};"
-    return f'  <{tag} style="{style}">{text}</{tag}>\n'
-
-
-# The table plugin registers its own default render functions onto the
-# renderer by name -- registering these again, after create_markdown(),
-# overrides them with the styled versions above. Same plugin used by
-# orchestrator.py's own verification AST parser, for the same markdown shape.
-_answer_markdown = mistune.create_markdown(renderer=_AnswerRenderer(), plugins=["table"])
-_answer_markdown.renderer.register("table", _render_table)
-_answer_markdown.renderer.register("table_head", _render_table_head)
-_answer_markdown.renderer.register("table_body", _render_table_body)
-_answer_markdown.renderer.register("table_row", _render_table_row)
-_answer_markdown.renderer.register("table_cell", _render_table_cell)
-
-
-def render_answer_html(answer_markdown: str) -> str:
-    """Renders answer_markdown to HTML for the Power Apps HTML text control --
-    inline-styled throughout, since the control doesn't reliably honor a
-    <style> block."""
-    return _answer_markdown(answer_markdown)
-
 
 def build_agent_response(state: AgentState) -> AgentResponse:
     """Converts the graph's final state into the gateway's wire format."""
@@ -312,6 +219,8 @@ def build_pending_approval(state: AgentState) -> PendingApproval:
     from their ToolCallRecord on resume)."""
     return PendingApproval(
         conversation_id=state["conversation_id"],
+        model=state["model"],
+        model_provider=state["model_provider"],
         question=state["question"],
         filter_context=state["filter_context"],
         active_page=state["active_page"],
@@ -343,3 +252,97 @@ def rebuild_paused_messages(messages: list[dict], tool_calls: list[ToolCallRecor
         else:
             rebuilt.append(msg)
     return rebuilt
+
+
+# --- Answer HTML rendering (answer_markdown -> answer_html) -----------------
+
+# <style> blocks aren't reliably honored by the Power Apps HTML text
+# control, so every element that needs styling gets it inline instead.
+class _AnswerRenderer(mistune.HTMLRenderer):
+    def paragraph(self, text: str) -> str:
+        return (f'<p style="font-family: {ANSWER_FONT_FAMILY}; '
+                f'font-size: {ANSWER_BODY_FONT_SIZE};">{text}</p>\n')
+
+    def heading(self, text: str, level: int, **attrs) -> str:
+        tag = f"h{level}"
+        size = ANSWER_HEADING_FONT_SIZE if level <= 2 else ANSWER_SUBHEADING_FONT_SIZE
+        style = f"font-family: {ANSWER_FONT_FAMILY}; font-size: {size};"
+        heading_id = attrs.get("id")
+        id_attr = f' id="{mistune.util.escape(heading_id)}"' if heading_id else ""
+        return f'<{tag}{id_attr} style="{style}">{text}</{tag}>\n'
+
+    def list_item(self, text: str) -> str:
+        return (f'<li style="font-family: {ANSWER_FONT_FAMILY}; '
+                f'font-size: {ANSWER_BODY_FONT_SIZE};">{text}</li>\n')
+
+    def image(self, text: str, url: str, title: str | None = None) -> str:
+        src = self.safe_url(url)
+        alt = mistune.util.striptags(text)
+        return f'<img src="{src}" alt="{alt}" style="max-width: 100%;" />'
+
+    def block_code(self, code: str, info: str | None = None) -> str:
+        escaped = mistune.util.escape(code)
+        return (
+            '<pre style="display: inline-block; max-width: 100%; overflow-x: auto; '
+            f'font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: {ANSWER_CODE_FONT_SIZE}; '
+            f'white-space: pre-wrap; background-color: {ANSWER_CODE_BLOCK_BG}; '
+            f'color: {ANSWER_CODE_BLOCK_TEXT}; padding: 12px 16px; border-radius: 6px; '
+            'line-height: 1.5;">'
+            f'<code>{escaped}</code></pre>\n'
+        )
+
+    def codespan(self, text: str) -> str:
+        escaped = mistune.util.escape(text)
+        return (
+            f'<code style="font-family: {ANSWER_CODE_FONT_FAMILY}; font-size: {ANSWER_CODE_FONT_SIZE}; '
+            f'background-color: {ANSWER_INLINE_CODE_BG}; border: 1px solid {ANSWER_INLINE_CODE_BORDER}; '
+            f'color: {ANSWER_INLINE_CODE_TEXT}; padding: 2px 5px; '
+            f'border-radius: 3px;">{escaped}</code>'
+        )
+
+
+def _render_table(renderer, text: str) -> str:
+    return f'<table style="border-collapse: collapse; max-width: 100%;">\n{text}</table>\n'
+
+
+def _render_table_head(renderer, text: str) -> str:
+    return f'<thead>\n<tr>\n{text}</tr>\n</thead>\n'
+
+
+def _render_table_body(renderer, text: str) -> str:
+    return f'<tbody>\n{text}</tbody>\n'
+
+
+def _render_table_row(renderer, text: str) -> str:
+    return f'<tr>\n{text}</tr>\n'
+
+
+def _render_table_cell(renderer, text: str, align: str | None = None, head: bool = False) -> str:
+    tag = "th" if head else "td"
+    font = f"font-family: {ANSWER_FONT_FAMILY}; font-size: {ANSWER_TABLE_FONT_SIZE}; "
+    if head:
+        style = (font + f"border: 1px solid {ANSWER_TABLE_HEADER_BORDER}; padding: 6px 10px; "
+                  f"color: {ANSWER_TABLE_HEADER_TEXT}; line-height: 1.3; "
+                  f"background-color: {ANSWER_TABLE_HEADER_BG}; font-weight: bold;")
+    else:
+        style = (font + f"border: 1px solid {ANSWER_TABLE_CELL_BORDER}; padding: 4px 10px; "
+                  f"color: {ANSWER_TABLE_CELL_TEXT}; line-height: 1.3;")
+    if align:
+        style += f" text-align: {align};"
+    return f'  <{tag} style="{style}">{text}</{tag}>\n'
+
+
+# Re-registers the table plugin's default render functions with the styled versions above.
+_answer_markdown = mistune.create_markdown(renderer=_AnswerRenderer(), plugins=["table"])
+_answer_markdown.renderer.register("table", _render_table)
+_answer_markdown.renderer.register("table_head", _render_table_head)
+_answer_markdown.renderer.register("table_body", _render_table_body)
+_answer_markdown.renderer.register("table_row", _render_table_row)
+_answer_markdown.renderer.register("table_cell", _render_table_cell)
+
+
+def render_answer_html(answer_markdown: str) -> str:
+    """Renders answer_markdown to HTML for the Power Apps HTML text control --
+    inline-styled throughout, since the control doesn't reliably honor a
+    <style> block."""
+    return _answer_markdown(answer_markdown)

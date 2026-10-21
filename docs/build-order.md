@@ -2,6 +2,14 @@
 
 ## Current status — update this as we go
 
+**Phases 1-4 and Phase 6 item 1 (model swappability) are complete. Phase 6
+item 1's per-request follow-on — model choice moved from a fixed
+`app/config.py` value to a per-request `AskRequest.model` field, carried
+through pause/resume via `PendingApproval` — is proven live, 2026-10-20,
+including a full pause/resume round trip in `notebooks/phase3_gateway_e2e.ipynb`**
+(full detail in that item's entry under Phase 6 below). **Next up: Phase 6
+item 2, the judge Cloud Run Job.**
+
 **Phase 3 complete** (items 1-15, see the entries below) — **Phase 4
 complete, 2026-10-19: item 1 (visual grounding) built and live-verified,
 2026-10-10; item 2 (`answer_html` rendering + the real control binding)
@@ -625,9 +633,13 @@ in `docs/auth.md`:
 - FastAPI emits OpenAPI 3.1.0, which Power Platform's importer can't parse
   at all — hand-wrote an equivalent Swagger 2.0 spec instead
   (`gateway-swagger2.json`, committed — kept in sync with the real contract
-  by hand whenever `AgentResponse`/`AskRequest` or the route list changes,
-  most recently 2026-10-11, when it grew from 2 to the current 4 operations
-  — all four re-verified live through the connector that day).
+  by hand whenever `AgentResponse`/`AskRequest` or the route list changes:
+  2026-10-11, grew from 2 to 4 operations, all four re-verified live through
+  the connector that day; 2026-10-14, grew to 6 with the two chat-history
+  read endpoints (`GET /conversations`, `GET /conversations/{id}/history`);
+  2026-10-20, `AskRequest` gained `model` (per-request model swap, Phase 6
+  item 1's follow-on, above) — not yet re-imported/re-verified live as of
+  this edit).
 - A single self-referencing Entra app (as both OAuth client and resource)
   hit a persistent `AADSTS90008` regardless of permissions/consent — fixed
   by splitting into two apps: `analytics-agent-connector` (resource) and a
@@ -1529,6 +1541,48 @@ XMLA is a documented backup only. REST is the plan.
      message; one assertion added to `tests/test_telemetry.py`.
    - `gemini-api-key`/`openai-api-key` secrets already existed (Phase 0 item
      9), provisioned for exactly this and unused until now.
+   - **Follow-on, proven live 2026-10-20: model choice moved from a fixed
+     `app/config.py` value to per-request — corrects the Telemetry bullet
+     above, which still describes the original design.** A new
+     `AskRequest.model` field (defaulting to `app/config.py`'s `MODEL`, so
+     every existing caller is unaffected) lets a caller pick any key in
+     `AVAILABLE_MODELS`, validated by a field validator that 422s on
+     anything else before a turn starts. `model`/`model_provider` are now
+     real `AgentState`/`PendingApproval` fields, not read from `app/config.py`
+     inside the graph at all — `build_model`, the renamed
+     `build_tools_list` (was a module-level `BIND_TOOLS_LIST` computed once
+     in `init_orchestrator()`), and `build_static_context` (now takes
+     `model_provider`, not a model name — `.claude/rules/orchestrator.md`'s
+     "Caching dispatch") all take it as a per-turn parameter instead.
+     `init_orchestrator()` now fetches all three providers' API keys
+     unconditionally at startup, since which one a turn needs isn't known
+     until its `AskRequest` arrives. `agent_telemetry`'s `model`/
+     `model_provider` columns follow the same change — two rows for the same
+     conversation can now legitimately show different models
+     (`.claude/rules/telemetry.md`). **Confirmed live end to end in
+     `notebooks/phase3_gateway_e2e.ipynb`, including a full pause/resume
+     round trip** — a resumed turn continues on the model it paused on,
+     carried via `PendingApproval.model`/`model_provider`, not whatever
+     `app/config.py`'s default is at resume time. New tests:
+     `tests/test_gateway.py::test_ask_request_validators_reject_bad_input`
+     (also covers the pre-existing exactly-one-of-question-or-decision
+     validator, which had no direct test before either), and
+     `tests/test_static_context.py::test_build_static_context_dispatches_by_provider`/
+     `test_build_static_context_raises_on_unknown_provider` — `get_static_context()`
+     stopped exercising `build_static_context` once it became a per-turn
+     call instead of an import-time one, leaving it with no Layer 1
+     coverage until now.
+   - **The live caching behavior itself (not just dispatch shape) confirmed
+     manually across all three providers, 2026-10-20** — inspecting
+     `AIMessage.usage_metadata["input_token_details"]` across a multi-round
+     turn in `notebooks/phase3_graph.ipynb` for each. All three genuinely
+     cache; the exact keys populated differ by provider —
+     `.claude/rules/orchestrator.md`'s "Verifying it actually cached" has
+     the full per-provider breakdown, including a real `langchain_anthropic`
+     mapping gap found along the way (`cache_creation` always reports `0`,
+     even on a real write — the write size only shows up in
+     `ephemeral_5m_input_tokens`/`ephemeral_1h_input_tokens` or
+     `response_metadata`'s `cache_creation_input_tokens`).
 2. Judge Cloud Run Job + Cloud Scheduler (`docs/llm-judge.md`) — consumes
    the `agent_telemetry` table already logging since Phase 1. Depends on #1:
    comparing providers' faithfulness scores needs provider-swapping to
