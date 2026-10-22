@@ -104,6 +104,22 @@
           }
         }
       }
+    },
+    "/conversations/{conversation_id}": {
+      "delete": {
+        "summary": "Soft-delete a conversation",
+        "operationId": "DeleteConversation",
+        "parameters": [
+          { "name": "conversation_id", "in": "path", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/DeleteConversationResponse" }
+          }
+        }
+      }
     }
   },
   "definitions": {
@@ -199,6 +215,13 @@
       "required": ["turns"],
       "properties": {
         "turns": { "type": "array", "items": { "$ref": "#/definitions/ConversationTurn" } }
+      }
+    },
+    "DeleteConversationResponse": {
+      "type": "object",
+      "required": ["deleted"],
+      "properties": {
+        "deleted": { "type": "boolean" }
       }
     }
   }

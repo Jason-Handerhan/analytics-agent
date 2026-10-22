@@ -22,10 +22,7 @@ def get_firestore_client() -> firestore.AsyncClient:
 @lru_cache
 def get_turn_writer_client() -> bigquery.Client:
     """BigQuery client impersonating turn-writer-sa -- the only identity with
-    access to telemetry/agent_chat_history; agent-sa itself has no direct
-    grant on either, so run_bigquery_sql can't reach them. Shared by both
-    datasets' writers and readers -- one impersonated identity, one client
-    getter."""
+    access to telemetry/agent_chat_history"""
     source_credentials, _ = google.auth.default()
     impersonated = google.auth.impersonated_credentials.Credentials(
         source_credentials=source_credentials,

@@ -17,9 +17,10 @@ from app.config import (
     CHAT_HISTORY_TABLE,
     CONVERSATION_LIST_LIMIT,
     CONVERSATION_TITLE_MAX_CHARS,
+    DELETED_CONVERSATIONS_TABLE,
     GCP_PROJECT_ID,
 )
-from app.gateway.chat_history.schema import SCHEMA
+from app.gateway.chat_history.schema import CHAT_HISTORY_SCHEMA, DELETED_CONVERSATIONS_SCHEMA
 
 COMPLETED = datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -64,7 +65,7 @@ async def test_write_turn_row_success(monkeypatch):
 
     assert errors == []
     fake_client.insert_rows.assert_called_once_with(
-        f"{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{CHAT_HISTORY_TABLE}", [row], selected_fields=SCHEMA
+        f"{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{CHAT_HISTORY_TABLE}", [row], selected_fields=CHAT_HISTORY_SCHEMA
     )
 
     assert row["conversation_id"] == "conv-123"
@@ -79,6 +80,36 @@ async def test_write_turn_row_success(monkeypatch):
         "sources": ["Query warehouse"],
         "suggested_follow_ups": ["What about last quarter?"],
         "needs_approval": False,
+    }
+
+
+# --- build_deletion_row / write_deletion_row ---------------------------------
+
+@pytest.mark.asyncio
+async def test_write_deletion_row_success(monkeypatch):
+    """Builds a deletion-marker row and inserts it into the separate
+    deleted_conversations table -- not the turns table."""
+    fake_client = MagicMock()
+    fake_client.insert_rows.return_value = []
+    monkeypatch.setattr(writer, "get_turn_writer_client", lambda: fake_client)
+
+    row = writer.build_deletion_row(
+        conversation_id="conv-123",
+        user_id="user-oid-456",
+        deleted_at=COMPLETED,
+    )
+
+    errors = await writer.write_deletion_row(row)
+
+    assert errors == []
+    fake_client.insert_rows.assert_called_once_with(
+        f"{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{DELETED_CONVERSATIONS_TABLE}", [row],
+        selected_fields=DELETED_CONVERSATIONS_SCHEMA
+    )
+    assert row == {
+        "conversation_id": "conv-123",
+        "user_id": "user-oid-456",
+        "deleted_at": COMPLETED,
     }
 
 
@@ -99,9 +130,10 @@ async def test_list_conversations_passes_params_and_maps_rows(monkeypatch):
 
     result = await reader.list_conversations("user-oid-456")
 
-    _, kwargs = fake_client.query.call_args
+    (sql,), kwargs = fake_client.query.call_args
     params = {p.name: (p.type_, p.value) for p in kwargs["job_config"].query_parameters}
     assert params == {"user_id": ("STRING", "user-oid-456"), "limit": ("INT64", CONVERSATION_LIST_LIMIT)}
+    assert f"NOT IN (SELECT conversation_id FROM `{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{DELETED_CONVERSATIONS_TABLE}`)" in sql
 
     assert len(result) == 1
     assert result[0].conversation_id == "conv-1"
@@ -123,9 +155,10 @@ async def test_get_conversation_history_passes_params_and_decodes_rows(monkeypat
 
     result = await reader.get_conversation_history("conv-1")
 
-    _, kwargs = fake_client.query.call_args
+    (sql,), kwargs = fake_client.query.call_args
     params = {p.name: (p.type_, p.value) for p in kwargs["job_config"].query_parameters}
     assert params == {"conversation_id": ("STRING", "conv-1")}
+    assert f"NOT IN (SELECT conversation_id FROM `{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{DELETED_CONVERSATIONS_TABLE}`)" in sql
 
     assert len(result) == 1
     assert result[0].question == turn_data["question"]

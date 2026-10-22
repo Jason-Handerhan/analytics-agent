@@ -566,3 +566,19 @@ def test_post_ask_cancel_writes_flag(monkeypatch, owner_stubs):
     assert resp.status_code == 200
     assert resp.json() == {"cancel_requested": True}
     assert live.writes == [("set", {"cancel_requested": True})]
+
+
+def test_delete_conversation_writes_marker(monkeypatch, owner_stubs):
+    """Writes a deleted_conversations marker row and confirms it in the
+    response -- doesn't touch sessions or the turns table."""
+    _patch_docs(monkeypatch, session=_Doc({"user_id": "user-1"}))
+    mock_write = AsyncMock()
+    monkeypatch.setattr(gateway, "write_deletion_row", mock_write)
+
+    resp = client.delete("/conversations/conv-1", headers=HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": True}
+    row = mock_write.call_args[0][0]
+    assert row["conversation_id"] == "conv-1"
+    assert row["user_id"] == "user-1"

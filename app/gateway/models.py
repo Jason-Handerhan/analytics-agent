@@ -94,3 +94,10 @@ class ConversationTurn(BaseModel):
 
 class ConversationHistoryResponse(BaseModel):
     turns: list[ConversationTurn]
+
+
+# --- DELETE /conversations/{conversation_id} -----------------------------------
+
+class DeleteConversationResponse(BaseModel):
+    """Confirms the soft-delete marker was written."""
+    deleted: bool

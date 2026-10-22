@@ -31,6 +31,13 @@ from app.gateway.entry_exit import (
     render_answer_html,
 )
 from app.gateway.chat_history.reader import get_conversation_history, list_conversations
+from app.gateway.chat_history.writer import (
+    build_deletion_row,
+    build_turn_row,
+    write_deletion_row,
+    write_turn_row,
+)
+from app.telemetry.writer import build_telemetry_row, write_telemetry_row
 from app.gateway.models import (
     AgentResponse,
     AskRequest,
@@ -38,13 +45,12 @@ from app.gateway.models import (
     ConversationHistoryResponse,
     ConversationListResponse,
     ConversationResponse,
+    DeleteConversationResponse,
     StatusResponse,
 )
 from app.orchestrator.orchestrator import graph, init_orchestrator
 from app.orchestrator.shared_helpers import get_firestore_client, live_turn_doc
 from app.orchestrator.state import AgentState
-from app.gateway.chat_history.writer import build_turn_row, write_turn_row
-from app.telemetry.writer import build_telemetry_row, write_telemetry_row
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +103,7 @@ def validate_api_key(x_api_key: str) -> None:
 
 
 async def assert_owns_conversation(conversation_id: str, claims: dict) -> None:
-    """Raises 404 unless claims owns this conversation."""
+    """Raises 404 unless user (claims oid) owns this conversation."""
     snap = await session_doc(conversation_id).get()
     if not snap.exists or snap.to_dict().get("user_id") != claims["oid"]:
         raise HTTPException(404, "Conversation not found.")
@@ -478,3 +484,17 @@ async def get_conversation_history_endpoint(
     claims = await asyncio.to_thread(validate_entra_token, authorization)
     await assert_owns_conversation(conversation_id, claims)
     return ConversationHistoryResponse(turns=await get_conversation_history(conversation_id))
+
+
+@app.delete("/conversations/{conversation_id}", response_model=DeleteConversationResponse)
+async def delete_conversation(
+    conversation_id: str, authorization: str = Header(...), x_api_key: str = Header(...)
+):
+    """Soft-deletes a conversation -- writes a deleted_conversations marker
+    row, doesn't touch the turns (chat history) table itself."""
+    validate_api_key(x_api_key)
+    claims = await asyncio.to_thread(validate_entra_token, authorization)
+    await assert_owns_conversation(conversation_id, claims)
+    row = build_deletion_row(conversation_id, claims["oid"], datetime.now(timezone.utc))
+    await write_deletion_row(row)
+    return DeleteConversationResponse(deleted=True)

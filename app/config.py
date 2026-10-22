@@ -39,7 +39,9 @@ TELEMETRY_TABLE = "agent_telemetry"
 # agent_chat_history -- restorable past conversations, not analytics
 CHAT_HISTORY_DATASET = "agent_chat_history"
 CHAT_HISTORY_TABLE = "turns"
-CONVERSATION_LIST_LIMIT = 50   # GET /conversations -- most recent N, not unbounded
+DELETED_CONVERSATIONS_TABLE = "deleted_conversations"  # soft-delete marker rows,
+                                                        # same dataset as CHAT_HISTORY_TABLE
+CONVERSATION_LIST_LIMIT = 50   # GET /conversations -- most recent N
 CONVERSATION_TITLE_MAX_CHARS = 60  # truncation length for a conversation's title
 
 # Both telemetry and chat-history writes go through this identity, reached

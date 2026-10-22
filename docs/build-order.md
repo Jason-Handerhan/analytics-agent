@@ -638,8 +638,10 @@ in `docs/auth.md`:
   the connector that day; 2026-10-14, grew to 6 with the two chat-history
   read endpoints (`GET /conversations`, `GET /conversations/{id}/history`);
   2026-10-20, `AskRequest` gained `model` (per-request model swap, Phase 6
-  item 1's follow-on, above) — not yet re-imported/re-verified live as of
-  this edit).
+  item 1's follow-on, above) — re-imported and confirmed working live the
+  same day; 2026-10-21, grew to 7 with `DELETE /conversations/{id}`
+  (soft-delete, below) — not yet re-imported/re-verified live as of this
+  edit.
 - A single self-referencing Entra app (as both OAuth client and resource)
   hit a persistent `AADSTS90008` regardless of permissions/consent — fixed
   by splitting into two apps: `analytics-agent-connector` (resource) and a

@@ -8,6 +8,7 @@ from app.config import (
     CHAT_HISTORY_TABLE,
     CONVERSATION_LIST_LIMIT,
     CONVERSATION_TITLE_MAX_CHARS,
+    DELETED_CONVERSATIONS_TABLE,
     GCP_PROJECT_ID,
 )
 from app.gateway.models import ConversationSummary, ConversationTurn
@@ -17,6 +18,7 @@ GET_HISTORY_SQL = f"""
 SELECT turn_data
 FROM `{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{CHAT_HISTORY_TABLE}`
 WHERE conversation_id = @conversation_id
+  AND conversation_id NOT IN (SELECT conversation_id FROM `{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{DELETED_CONVERSATIONS_TABLE}`)
 ORDER BY completed_at ASC
 """
 
@@ -27,6 +29,7 @@ WITH ranked_turns AS (
          MAX(completed_at) OVER (PARTITION BY conversation_id) AS last_activity_at
   FROM `{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{CHAT_HISTORY_TABLE}`
   WHERE user_id = @user_id
+    AND conversation_id NOT IN (SELECT conversation_id FROM `{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{DELETED_CONVERSATIONS_TABLE}`)
 )
 SELECT conversation_id, question AS first_question, last_activity_at
 FROM ranked_turns
