@@ -767,3 +767,51 @@ actually rendered on screen.
 **Still open:** whether the New Chat button's `OnSelect` (which mirrors
 `App.OnStart`) also resets `varShowConversationPicker` to `false` — flagged
 during this build, not yet confirmed done.
+
+## Deleting a conversation — built and live-verified, 2026-10-21
+
+Soft-delete, not a real `DELETE` — `DELETE /conversations/{id}` writes a
+marker row to a separate `deleted_conversations` table; both read endpoints
+exclude soft-deleted `conversation_id`s instead (`.claude/rules/gateway.md`
+has the full reasoning, including why a real `DELETE` doesn't work reliably
+against BigQuery's streaming-insert buffer). Never touches `sessions` —
+chat-history management stays entirely a BigQuery concern, deliberately.
+
+**An X icon inside the existing picker gallery template**, alongside the
+title label, not a separate row:
+- `DisplayMode: If(ThisItem.ConversationId = varConversationId, DisplayMode.Disabled, DisplayMode.Edit)`
+  — disabled specifically on whichever conversation is currently open, so
+  there's no "deleted the conversation I'm chatting in" case to handle at
+  all; the backend already guarantees a paused turn resumes on the model it
+  paused on regardless (`.claude/rules/orchestrator.md`'s `PendingApproval`
+  carry rule) — this makes that guarantee visible to the user too, not just
+  true underneath.
+- `OnSelect`:
+  ```
+  Set(varPendingDeleteId, ThisItem.ConversationId);
+  Set(varPendingDeleteTitle, ThisItem.Title);
+  Set(varShowDeleteConfirm, true)
+  ```
+
+**A confirm popup (`grpDeleteConfirm`)**, same construction pattern as
+`grpConversationPicker`/the model picker's container — a title/warning
+label, Yes/No buttons, gated by one `Visible` flag:
+- `Visible: varShowDeleteConfirm`
+- Warning text references `varPendingDeleteTitle` and states the deletion
+  can't be undone.
+- **Yes** — `OnSelect`:
+  ```
+  Set(varShowDeleteConfirm, false);
+  AnalyticsAgent.DeleteConversation(varPendingDeleteId);
+  RemoveIf(colConversations, ConversationId = varPendingDeleteId);
+  Set(varPendingDeleteId, Blank());
+  Set(varPendingDeleteTitle, Blank());
+  ```
+  `RemoveIf` on `colConversations` gives instant UI feedback rather than
+  waiting on a full `GetConversations` refetch.
+- **No** — `OnSelect`: same `Set(varShowDeleteConfirm, false)` plus clearing
+  both pending variables, no connector call.
+
+**`varShowDeleteConfirm` seeded `false` in `App.OnStart`** alongside the
+app's other loose variables; `varPendingDeleteId`/`varPendingDeleteTitle`
+need no seeding, since they're only ever set immediately before use.

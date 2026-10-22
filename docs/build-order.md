@@ -7,8 +7,17 @@ item 1's per-request follow-on — model choice moved from a fixed
 `app/config.py` value to a per-request `AskRequest.model` field, carried
 through pause/resume via `PendingApproval` — is proven live, 2026-10-20,
 including a full pause/resume round trip in `notebooks/phase3_gateway_e2e.ipynb`**
-(full detail in that item's entry under Phase 6 below). **Next up: Phase 6
-item 2, the judge Cloud Run Job.**
+(full detail in that item's entry under Phase 6 below). **Conversation
+deletion (soft-delete via a `deleted_conversations` marker table, outside
+the numbered phase items — a side addition alongside chat history) is also
+complete and live-verified, 2026-10-21**: new `DELETE /conversations/{id}`
+endpoint, `turns` table recreated clustered on `(user_id, conversation_id)`
+(no partitioning — would scatter one conversation's rows across
+`completed_at` partitions with no pruning benefit, since neither read query
+filters by time), full picker UI (X icon + confirm popup) built and working
+(`docs/frontend.md`'s "Deleting a conversation" section,
+`.claude/rules/gateway.md`'s endpoint table). **Next up: Phase 6 item 2, the
+judge Cloud Run Job.**
 
 **Phase 3 complete** (items 1-15, see the entries below) — **Phase 4
 complete, 2026-10-19: item 1 (visual grounding) built and live-verified,
@@ -640,8 +649,8 @@ in `docs/auth.md`:
   2026-10-20, `AskRequest` gained `model` (per-request model swap, Phase 6
   item 1's follow-on, above) — re-imported and confirmed working live the
   same day; 2026-10-21, grew to 7 with `DELETE /conversations/{id}`
-  (soft-delete, below) — not yet re-imported/re-verified live as of this
-  edit.
+  (soft-delete, below) — re-imported, deployed to Cloud Run, and confirmed
+  working live the same day.
 - A single self-referencing Entra app (as both OAuth client and resource)
   hit a persistent `AADSTS90008` regardless of permissions/consent — fixed
   by splitting into two apps: `analytics-agent-connector` (resource) and a

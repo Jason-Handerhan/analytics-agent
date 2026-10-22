@@ -63,15 +63,11 @@ FROM (
 )
 Note: user_-prefixed columns (user_distinct_product_count, user_reorder_ratio, user_avg_basket_size, etc.) are precomputed per user and repeat on every order-line row for that user. Averaging one directly over product_order_analysis over-weights users with more order lines -- deduplicate to one row per user first.
 
-Q: "Do users who reorder products more quickly have a higher reorder rate for that product?"
-SELECT
-  CASE WHEN user_prod_avg_days_between_purchases < 7 THEN 'under 7 days' ELSE '7+ days' END AS pace_bucket,
-  ROUND(AVG(label_reordered), 4) AS reorder_rate,
-  COUNT(*) AS n
-FROM `instacart-ml-model.agent_safe.candidate_reorder_features`
-WHERE user_prod_avg_days_between_purchases IS NOT NULL
-GROUP BY pace_bucket
-Note: candidate_reorder_features is the right table for correlating an engineered feature against reorder likelihood (label_reordered) -- product_order_analysis is order-line grain with no candidate/label structure for this kind of question.
+Q: "Show me a heatmap of order volume by day of week and hour of day."
+SELECT order_dow, order_hour_of_day, COUNT(DISTINCT order_id) AS order_count
+FROM `instacart-ml-model.agent_safe.product_order_analysis`
+GROUP BY order_dow, order_hour_of_day
+Note: product_order_analysis is order-line grain -- COUNT(*) here counts order-lines (inflated by basket size), not orders. Always COUNT(DISTINCT order_id) when a question asks for order counts or order volume.
 
 Q: "Which engineered features correlate most strongly with reorder likelihood?"
 SELECT

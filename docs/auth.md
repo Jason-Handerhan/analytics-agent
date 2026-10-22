@@ -206,3 +206,22 @@ correct.
    snake_case, straight from the Pydantic model).
 5. Test in the connector's Test tab before wiring into the app — this catches
    a missing `x-api-key` immediately, before any Power Apps wiring.
+
+**Re-importing the Swagger spec can wipe the entire Security tab, not just
+the `x-api-key` setting — confirmed live, 2026-10-21.** `docs/frontend.md`'s
+`answer_html` section already documents that a spec re-import resets
+`x-api-key`'s Internal-visibility/default-value layered setting; this is the
+same class of bug but more severe — after re-importing an updated spec (the
+`DELETE /conversations/{id}` addition), the connector's Security tab reverted
+to **No authentication** entirely, OAuth 2.0 config gone. Symptom was
+confusing: every call failed with a `429` from Power Platform's token
+*exchange* endpoint (`token.azure-apihub.net`), which reads like token-service
+throttling or an expired client secret, not "there's no auth configured at
+all" — neither recreating the connection nor deleting duplicate connections
+fixed it, because the actual break was one layer up, in the connector itself.
+**Fix:** re-enter OAuth 2.0 / Azure Active Directory (Client id, Client
+secret, Tenant ID, Resource URL, Scope — same values as the Build steps
+above) in the Security tab, save, re-verify `x-api-key` survived too (don't
+assume it did just because the Security tab is what visibly broke this time),
+then recreate the connection fresh against the corrected connector. **Treat
+this as a checklist item on every future spec re-import**, not a one-off.

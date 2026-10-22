@@ -136,10 +136,15 @@ owner before any turn runs.
 | `POST /ask` | Run one turn end to end, **or** resume/resolve a paused one (`approval_decision`); returns `AgentResponse` | **Yes** — the long one (rejection returns fast, no graph run) |
 | `GET /ask/status/{conversation_id}` | Read the current status string and accumulated `thinking_log` | No — polled every 1–2s |
 | `POST /ask/cancel/{conversation_id}` | Set the cancel flag | No — returns immediately |
+| `GET /conversations` | List this user's past conversations, most recent first | No — fast BigQuery read |
+| `GET /conversations/{conversation_id}/history` | Every turn for one conversation, oldest first — restores `colChat` | No — fast BigQuery read |
+| `DELETE /conversations/{conversation_id}` | Soft-delete a conversation (writes a marker row, never a real `DELETE`) | No — fast BigQuery write |
 
-**Every endpoint except `POST /conversation` takes a `conversation_id` and
-must check ownership** (see below). `POST /ask` and `GET /ask/status` run
-*concurrently* — that pairing is why the ID can't come from `POST /ask`.
+**Every endpoint except `POST /conversation` and `GET /conversations` takes a
+`conversation_id` and must check ownership** (see below) — `GET /conversations`
+has none to check, since it's scoped to the caller's own `user_id` instead.
+`POST /ask` and `GET /ask/status` run *concurrently* — that pairing is why
+the ID can't come from `POST /ask`.
 
 - `POST /conversation` — no body. Mints a UUID, creates
   `sessions/{conversation_id}` with `user_id` from the token's `oid`, empty
@@ -191,6 +196,27 @@ must check ownership** (see below). `POST /ask` and `GET /ask/status` run
   section below for why. The response confirms the write landed, not that
   the turn has stopped; the turn ends when a routing function next checks
   (`.claude/rules/orchestrator.md`).
+- `GET /conversations` — no body, no `conversation_id` to own. Returns
+  `ConversationListResponse` — most recent first, each title truncated from
+  that conversation's first question. Reads `agent_chat_history.turns`,
+  via the same `turn-writer-sa` impersonation telemetry writes use
+  (`.claude/rules/telemetry.md`), filtered to exclude soft-deleted
+  conversations (below).
+- `GET /conversations/{conversation_id}/history` — no body. Returns
+  `ConversationHistoryResponse` — every turn for this conversation, oldest
+  first, each already shaped to match `colChat`. Powers "restore this
+  conversation" from the picker.
+- `DELETE /conversations/{conversation_id}` — no body. **Soft-delete, not a
+  real `DELETE`** — writes a marker row to
+  `agent_chat_history.deleted_conversations` instead. A real `DELETE`
+  statement can't target rows BigQuery's streaming-insert buffer still
+  holds (roughly the last 30 minutes), so it would unpredictably fail
+  against a conversation the user just chatted in; both `GET /conversations`
+  and `GET /conversations/{id}/history` exclude soft-deleted
+  `conversation_id`s instead of the rows ever being physically removed.
+  Never touches `sessions` — deliberately, chat history management stays
+  entirely a BigQuery concern. Returns `DeleteConversationResponse`
+  (`{deleted: true}`).
 
 ### Request validation — before any turn work starts
 

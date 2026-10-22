@@ -3,7 +3,7 @@ config {
   schema: "agent_safe",
   name: "product_order_analysis",
   tags: ["agent_safe"],
-  description: "Order-line grain (one row per order x product), enriched with precomputed user, user-product, user-aisle, and user-department cumulative behavioral metrics -- reorder ratios, purchase concentrations, day-of-week/time-of-day affinities -- so most product and order questions don't require recomputing them from raw history.",
+  description: "Order-line grain (one row per order x product), enriched with precomputed user, user-product, user-aisle, and user-department cumulative behavioral metrics -- reorder ratios, purchase concentrations, day-of-week/time-of-day affinities. Counting rows counts order-lines, not orders -- use COUNT(DISTINCT order_id) for order counts/order volume, never COUNT(*).",
   bigquery: {
     // product_id leads -- product-level drill-down ("why does product X
     // underperform") is the more likely single-column filter for a
