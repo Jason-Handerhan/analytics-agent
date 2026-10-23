@@ -2,7 +2,7 @@
   "tables": [
     {
       "name": "beeswarm_plot_data",
-      "description": "One row per prediction, per input feature — the underlying points for the SHAP beeswarm plot.",
+      "description": "One row per prediction, per input feature — the underlying points for the SHAP beeswarm plot (small sample only used for power bi beeswarm due to power bi plotting limits). Do not use this to answer questions explaining SHAP for individual predictions or slices of predictions. BigQuery prediction_explanations table is the better source.",
       "columns": [
         {
           "name": "unique_plot_id",
@@ -162,7 +162,7 @@
     },
     {
       "name": "power_bi_shap_barplots",
-      "description": "Feature-importance data (mean absolute SHAP) for the bar chart, one row per feature/model/split combination.",
+      "description": "Feature-importance data (mean absolute SHAP) for the bar chart, one row per feature/model/split combination. Contains full population (not a sample).",
       "columns": [
         {
           "name": "split",
@@ -187,7 +187,7 @@
         {
           "name": "mean_absolute_shap",
           "type": "Number",
-          "description": "Average magnitude of this feature's SHAP value, used for feature-importance ranking"
+          "description": "Average magnitude of this feature's SHAP value, used for feature-importance ranking (log-odds for classifiers, raw score units for rankers)"
         },
         {
           "name": "model_type",

@@ -75,7 +75,38 @@ SELECT
   CORR(user_avg_basket_size, label_reordered) AS corr_avg_basket_size,
   CORR(user_prod_avg_days_between_purchases, label_reordered) AS corr_avg_days_between_purchases
 FROM `instacart-ml-model.agent_safe.candidate_reorder_features` TABLESAMPLE SYSTEM (1 PERCENT)
-Note: correlation is a statistical estimate -- TABLESAMPLE cuts cost on a multi-million-row table with no meaningful accuracy loss. Compute every correlation in ONE query, not one call per column: splitting it into parallel calls still scans the same total bytes, summed against the same cost cap.'''
+Note: correlation is a statistical estimate -- TABLESAMPLE cuts cost on a multi-million-row table with no meaningful accuracy loss. Compute every correlation in ONE query, not one call per column: splitting it into parallel calls still scans the same total bytes, summed against the same cost cap.
+
+Q: "Show a waterfall chart of how each feature contributes, to the LightGBM Classifier's reorder predictions for Banana on the test split."
+WITH steps AS (
+  SELECT driver, AVG(contribution) AS amount, AVG(base_value) AS base_value
+  FROM (
+    SELECT * FROM `instacart-ml-model.agent_safe.prediction_explanations`
+    WHERE model = 'LightGBM Classifier' AND split = 'test' AND product_name = 'Banana'
+  )
+  UNPIVOT (contribution FOR driver IN (
+    shap_user_product_order_penetration_ratio AS 'Order Penetration Ratio',
+    shap_user_product_consecutive_order_skips AS 'Consecutive Order Skips',
+    shap_user_prod_avg_days_between_purchases AS 'Avg Days Between Purchases',
+    shap_user_product_last3order_streak AS 'Last 3 Order Streak',
+    shap_user_reorder_ratio AS 'User Reorder Ratio',
+    shap_user_product_avg_cart_position AS 'Avg Cart Position',
+    shap_user_product_nearing_reorder_ratio AS 'Nearing Reorder Ratio',
+    shap_label_user_product_days_since_last_purchased AS 'Days Since Last Purchased',
+    shap_user_product_cart_position_last_order AS 'Cart Position Last Order',
+    shap_user_product_cumulative_purchases AS 'Cumulative Purchases',
+    shap_user_product_reorder_concentration AS 'Reorder Concentration',
+    shap_user_deptartment_share AS 'Department Share',
+    shap_user_product_purchase_concentration AS 'Purchase Concentration',
+    shap_user_aisle_share AS 'Aisle Share',
+    shap_user_distinct_product_count AS 'Distinct Product Count'))
+  GROUP BY driver
+)
+SELECT 'Base Value' AS driver, ANY_VALUE(base_value) AS amount, TRUE AS is_total, 0 AS sort_order FROM steps
+UNION ALL SELECT driver, amount, FALSE, ROW_NUMBER() OVER (ORDER BY ABS(amount) DESC) FROM steps
+UNION ALL SELECT 'Final Prediction (Avg Log-Odds)', ANY_VALUE(base_value) + SUM(amount), TRUE, COUNT(*) + 1 FROM steps
+ORDER BY sort_order
+Note: a waterfall comes from ONE query in long form -- a base row and a final row with is_total = TRUE, one row per feature, and sort_order fixing the step order (rows are drawn in the order given; here largest absolute contribution first). Compute the final row in SQL as base_value plus every averaged contribution. A classifier averages log-odds, so the final bar is the average log-odds, not a probability: converting it with the sigmoid does not give the slice's average probability, because the sigmoid is non-linear. Get that from its own query, AVG(prediction), and report both without converting one into the other. A ranker's contributions and final bar are raw scores -- there is no probability to reconcile.'''
 
 
 @lru_cache
@@ -84,9 +115,8 @@ def get_bq_client() -> bigquery.Client:
 
 
 class BigQuerySqlArgs(BaseModel):
-    query: str = Field(description="A SQL query to run against agent_safe -- the only dataset "
-                                    "this can reach. Filter or aggregate rather than relying on "
-                                    "LIMIT, which doesn't reduce bytes scanned.")
+    query: str = Field(description="A SQL query to run against agent_safe. Filter or aggregate "
+                                    "rather than relying on LIMIT, which doesn't reduce bytes scanned.")
 
 
 def _wait_for_query_result(job: bigquery.QueryJob) -> tuple[list[dict], dict]:
@@ -148,8 +178,9 @@ def _cancel_job_quietly(job_id: str) -> None:
 @tool(args_schema=BigQuerySqlArgs, response_format="content_and_artifact")
 async def run_bigquery_sql(query: str, conversation_id: Annotated[str, InjectedToolArg]) -> tuple[list[dict], dict]:
     """Runs a SQL query against agent_safe (BigQuery) -- upstream/warehouse data:
-    raw order and product features, pre-model. The only dataset this can reach
-    (IAM-scoped).
+    raw order and product features, pre-model. Exception: prediction_explanations
+    holds row-level model predictions with their SHAP explanations. All other
+    post-model questions use run_dax_query.
 
     Guardrails: results cap at 1,000 rows -- filter or aggregate rather than
     relying on LIMIT, which reduces rows returned but not bytes scanned;

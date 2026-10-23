@@ -375,6 +375,13 @@ def test_waterfall():
     for no_zoom in (big_step, all_totals):
         assert validate_and_render(no_zoom, spec, WaterfallChartSpec).axes[0].get_ylim()[0] <= 0
 
+    # A running total below zero leaves axis margin past the lowest bar.
+    below_zero = [{"driver": "Start", "amount": -3, "is_total": True},
+                  {"driver": "Gain", "amount": 1.5, "is_total": False},
+                  {"driver": "End", "amount": -1.5, "is_total": True}]
+    fig_below = validate_and_render(below_zero, spec, WaterfallChartSpec)
+    assert fig_below.axes[0].get_ylim()[0] < -3
+
     # Zoomed into thousands, ticks land 50 apart -- every y label must still be distinct.
     profit = [{"driver": "Baseline", "amount": 2757.9, "is_total": True},
               {"driver": "Churn", "amount": 50.7, "is_total": False},

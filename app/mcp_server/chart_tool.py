@@ -822,7 +822,13 @@ class WaterfallChartSpec(ChartSpecBase, FormattedValueSpec):
                 running_total += value
 
         fig, ax = self._setup()
-        ax.bar(df[self.category_field], heights, bottom=bottoms, color=colors)
+        bars = ax.bar(df[self.category_field], heights, bottom=bottoms, color=colors)
+        
+        # Stop step bars from pinning the axis limit to their edge, to ensure
+        #  margin between x-axis and lowest step bar.)
+        for bar, is_total in zip(bars, df[self.is_total_field]):
+            if not is_total:
+                bar.sticky_edges.y.clear()
         # Labels show the signed delta, not the bar's own (always-positive) height.
         self._annotate_values(ax, width_aware=True,
                               labels=[self._format_value(v, self.value_format) for v in df[self.value_field]])
