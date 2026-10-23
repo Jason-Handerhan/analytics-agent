@@ -46,7 +46,7 @@ MAX_HEATMAP_AXIS           = 30
 HEATMAP_FONT_FACTOR        = 18   # cell size (inches) to annotation fontsize (points)
 MAX_HEATMAP_ANNOT_FONTSIZE = 14
 MIN_HEATMAP_ANNOT_FONTSIZE = 5    # below this, annotations are dropped
-MAX_WATERFALL_STEPS        = 15   # named driver/step chart, not a high-cardinality one
+MAX_WATERFALL_STEPS        = 20   # named driver/step chart, not a high-cardinality one
 WATERFALL_ZOOM_TRIGGER     = 0.3  # zoom when step span / |baseline| is below this
 WATERFALL_ZOOM_TARGET      = 0.5  # step span / visible |baseline| after zooming
 
