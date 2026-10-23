@@ -1,0 +1,111 @@
+config {
+  type: "table",
+  schema: "agent_safe",
+  name: "prediction_explanations",
+  tags: ["agent_safe"],
+  description: "One row per (split, model, user, anchor order, candidate product): a sampled reorder prediction with its SHAP explanation, each feature's raw value, and its contribution to that prediction. All four models score the same rows within a split. USE FOR: finding a prediction to explain (e.g. a high reorder probability), explaining why one prediction is high or low, and per-feature contribution breakdowns (waterfall charts) for one row or for a product/aisle/department slice averaged across rows -- report the row count, small slices are noisy. DO NOT USE FOR: population-wide feature importance or any count/rate over the full population -- this is a random sample, so those go to the semantic model (DAX). COLUMNS: raw_<feature> is a feature's input value; shap_<feature> is its contribution to the row's model output. UNITS (apply to base_value, prediction, and every shap_ column): CLASSIFIERS: base_value and shap_* are log-odds; prediction is the probability (0-1). probability = 1 / (1 + EXP(-(base_value + SUM(shap_*)))); EXP(shap_x) is the factor feature x multiplies the odds of a reorder by. Averaging log-odds over a slice does not give the slice's mean probability. RANKERS: base_value, shap_*, and prediction are all raw score units; prediction = base_value + SUM(shap_*), no conversion. Not a probability, comparable only within one model, so use a classifier for likelihood questions. Mean absolute SHAP here is in the same units as the semantic model's SHAP measures. State the unit when reporting a SHAP number; do sums and conversions in SQL.",
+  bigquery: {
+    // Every query filters both: pick a split and a model, then rank or explain rows.
+    clusterBy: ["split", "model"]
+  },
+  columns: {
+    split: "Dataset split the prediction was made on: 'validation' or 'test'.",
+    model: "Model that produced the prediction: 'LightGBM Classifier', 'XGBoost Classifier', 'LightGBM Ranker', or 'XGBoost Ranker'. Classifiers predict a reorder probability; rankers predict a raw relevance score.",
+    user_id: "Unique identifier for the customer this prediction is for.",
+    anchor_order_number: "Sequential order number of the anchor order within this user's order history — the prediction is for the order immediately after it.",
+    candidate_product_id: "Product being evaluated as a reorder candidate for the order after the anchor order.",
+    product_name: "Human-readable name of the candidate product.",
+    aisle: "Human-readable aisle name for the candidate product.",
+    department: "Human-readable department name for the candidate product.",
+    label_reordered: "1 if the candidate product actually appeared in the order after the anchor order, 0 if not — the observed outcome the prediction is trying to match.",
+    base_value: "The model's average output before any feature contributes — the starting point of a waterfall; constant within one split and model.",
+    prediction: "The model's output for this row: reorder probability for classifiers, raw score for rankers.",
+    raw_user_prod_avg_days_between_purchases: "This user's average days between purchases of the candidate product, as of the anchor order.",
+    raw_user_product_consecutive_order_skips: "Number of orders since this user last purchased the candidate product, as of the anchor order.",
+    raw_user_product_order_penetration_ratio: "Share of this user's orders, up to the anchor order, that contained the candidate product.",
+    raw_user_product_reorder_concentration: "Share of this user's cumulative reordered line items that are the candidate product.",
+    raw_label_user_product_days_since_last_purchased: "Days between the user's last purchase of the candidate product, as of the anchor order, and the order being predicted.",
+    raw_user_product_last3order_streak: "How many of this user's last 3 consecutive orders, as of the anchor order, included the candidate product (0-3).",
+    raw_user_product_cumulative_purchases: "Number of times this user has purchased the candidate product, as of the anchor order.",
+    raw_user_product_purchase_concentration: "Share of this user's cumulative product line items that are the candidate product.",
+    raw_user_product_nearing_reorder_ratio: "Days since last purchase of the candidate product divided by this user's average days between purchases of it. Values near or above 1 suggest a reorder is due.",
+    raw_user_reorder_ratio: "Share of this user's cumulative product line items that were reorders, as of the anchor order.",
+    raw_user_product_cart_position_last_order: "Add-to-cart position of the candidate product in the anchor order, if it was purchased then; null otherwise.",
+    raw_user_product_avg_cart_position: "This user's average add-to-cart position for the candidate product, as of the anchor order.",
+    raw_user_distinct_product_count: "Count of distinct products this user has ever ordered, as of the anchor order.",
+    raw_user_deptartment_share: "Share of this user's cumulative product line items that come from the candidate product's department. Column name is misspelled in the source ML table — preserved as-is.",
+    raw_user_aisle_share: "Share of this user's cumulative product line items that come from the candidate product's aisle.",
+    shap_user_prod_avg_days_between_purchases: "Contribution of raw_user_prod_avg_days_between_purchases to this row's model output.",
+    shap_user_product_consecutive_order_skips: "Contribution of raw_user_product_consecutive_order_skips to this row's model output.",
+    shap_user_product_order_penetration_ratio: "Contribution of raw_user_product_order_penetration_ratio to this row's model output.",
+    shap_user_product_reorder_concentration: "Contribution of raw_user_product_reorder_concentration to this row's model output.",
+    shap_label_user_product_days_since_last_purchased: "Contribution of raw_label_user_product_days_since_last_purchased to this row's model output.",
+    shap_user_product_last3order_streak: "Contribution of raw_user_product_last3order_streak to this row's model output.",
+    shap_user_product_cumulative_purchases: "Contribution of raw_user_product_cumulative_purchases to this row's model output.",
+    shap_user_product_purchase_concentration: "Contribution of raw_user_product_purchase_concentration to this row's model output.",
+    shap_user_product_nearing_reorder_ratio: "Contribution of raw_user_product_nearing_reorder_ratio to this row's model output.",
+    shap_user_reorder_ratio: "Contribution of raw_user_reorder_ratio to this row's model output.",
+    shap_user_product_cart_position_last_order: "Contribution of raw_user_product_cart_position_last_order to this row's model output.",
+    shap_user_product_avg_cart_position: "Contribution of raw_user_product_avg_cart_position to this row's model output.",
+    shap_user_distinct_product_count: "Contribution of raw_user_distinct_product_count to this row's model output.",
+    shap_user_deptartment_share: "Contribution of raw_user_deptartment_share to this row's model output.",
+    shap_user_aisle_share: "Contribution of raw_user_aisle_share to this row's model output."
+  },
+  assertions: {
+    rowConditions: [
+      "split IN ('validation', 'test')",
+      "model IN ('LightGBM Classifier', 'XGBoost Classifier', 'LightGBM Ranker', 'XGBoost Ranker')",
+      "user_id IS NOT NULL",
+      "anchor_order_number IS NOT NULL",
+      "candidate_product_id IS NOT NULL",
+      "label_reordered IN (0, 1)",
+      "base_value IS NOT NULL",
+      "prediction IS NOT NULL",
+      // Classifier predictions are probabilities; ranker scores are unbounded.
+      "model NOT LIKE '%Classifier' OR prediction BETWEEN 0 AND 1",
+      // Verify the added name join matched, same as candidate_reorder_features.
+      "product_name IS NOT NULL",
+      "aisle IS NOT NULL",
+      "department IS NOT NULL"
+    ]
+  }
+}
+
+-- Grain: one row per (split, model, user, anchor order, candidate product).
+-- UNION ALL BY NAME, not positional: the eight sources are written by the same
+-- notebook, but nothing guarantees their column order matches.
+-- Names looked up from base_analytical_table, deduped before the join so it
+-- can't fan out rows (same join as candidate_reorder_features).
+WITH explanations AS (
+  SELECT 'validation' AS split, 'LightGBM Classifier' AS model, * FROM ${ref("validation_lgbm_classifier_base_model_row_level_shap")}
+  UNION ALL BY NAME
+  SELECT 'validation' AS split, 'XGBoost Classifier' AS model, * FROM ${ref("validation_xgboost_classifier_base_model_row_level_shap")}
+  UNION ALL BY NAME
+  SELECT 'validation' AS split, 'LightGBM Ranker' AS model, * FROM ${ref("validation_lgbm_ranker_base_model_row_level_shap")}
+  UNION ALL BY NAME
+  SELECT 'validation' AS split, 'XGBoost Ranker' AS model, * FROM ${ref("validation_xgboost_ranker_base_model_row_level_shap")}
+  UNION ALL BY NAME
+  SELECT 'test' AS split, 'LightGBM Classifier' AS model, * FROM ${ref("test_lgbm_classifier_base_model_row_level_shap")}
+  UNION ALL BY NAME
+  SELECT 'test' AS split, 'XGBoost Classifier' AS model, * FROM ${ref("test_xgboost_classifier_base_model_row_level_shap")}
+  UNION ALL BY NAME
+  SELECT 'test' AS split, 'LightGBM Ranker' AS model, * FROM ${ref("test_lgbm_ranker_base_model_row_level_shap")}
+  UNION ALL BY NAME
+  SELECT 'test' AS split, 'XGBoost Ranker' AS model, * FROM ${ref("test_xgboost_ranker_base_model_row_level_shap")}
+)
+SELECT
+  e.split,
+  e.model,
+  e.user_id,
+  e.anchor_order_number,
+  e.candidate_product_id,
+  p.product_name,
+  p.aisle,
+  p.department,
+  e.* EXCEPT (split, model, user_id, anchor_order_number, candidate_product_id)
+FROM explanations e
+LEFT JOIN (
+  SELECT DISTINCT product_id, product_name, aisle, department
+  FROM ${ref("base_analytical_table")}
+) p
+  ON e.candidate_product_id = p.product_id

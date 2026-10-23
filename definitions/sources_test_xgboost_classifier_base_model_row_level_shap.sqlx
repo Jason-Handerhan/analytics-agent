@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "instacart-ml-model",
+  schema: "ml_model_results",
+  name: "test_xgboost_classifier_base_model_row_level_shap",
+  description: "Row-level predictions and SHAP contributions, test split, XGBoost Classifier."
+}

@@ -1,0 +1,28 @@
+-- base_value + SUM(shap_*) must reproduce prediction (through the sigmoid for classifiers).
+-- 0.001 absorbs float32 rounding in the source predictions.
+config { type: "assertion", tags: ["agent_safe"] }
+
+js {
+  const features = [
+    "user_prod_avg_days_between_purchases",
+    "user_product_consecutive_order_skips",
+    "user_product_order_penetration_ratio",
+    "user_product_reorder_concentration",
+    "label_user_product_days_since_last_purchased",
+    "user_product_last3order_streak",
+    "user_product_cumulative_purchases",
+    "user_product_purchase_concentration",
+    "user_product_nearing_reorder_ratio",
+    "user_reorder_ratio",
+    "user_product_cart_position_last_order",
+    "user_product_avg_cart_position",
+    "user_distinct_product_count",
+    "user_deptartment_share",
+    "user_aisle_share"
+  ];
+  const margin = "base_value + " + features.map(f => `shap_${f}`).join(" + ");
+}
+
+SELECT split, model, user_id, anchor_order_number, candidate_product_id, base_value, prediction
+FROM ${ref("prediction_explanations")}
+WHERE ABS(IF(model LIKE '%Classifier', 1 / (1 + EXP(-(${margin}))), ${margin}) - prediction) >= 0.001
