@@ -16,6 +16,13 @@ paths:
 > composition test is the important one). Read `docs/approval-workflow.md`
 > before building the cost tiers or `/ask/respond`.
 
+**New ideas get built in `notebooks/phase3_graph.ipynb` first, then ported
+here once proven** — never the reverse. The notebook keeps its own copy of
+this module's logic rather than importing it, specifically so an in-progress
+experiment can't leak into the real module through shared mutable state
+(`ALL_TOOLS`, `FILE_DESCRIPTIONS`, etc.); resyncing is a manual copy-paste
+right after a real change lands here, not an automated step.
+
 ## The verification contract — implement exactly
 
 **The model declares its final answer through a forced-shape tool,

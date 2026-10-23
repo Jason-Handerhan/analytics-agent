@@ -15,16 +15,20 @@ from fastmcp.exceptions import ToolError
 from matplotlib.figure import Figure
 from pydantic import ValidationError
 
+from matplotlib.colors import to_rgba
+
 from app.mcp_server.chart_tool import (
     ChartSpecBase,
     GenerateChartArgs,
     BarChartSpec, HorizontalBarChartSpec, GroupedBarChartSpec,
     StackedHorizontalBarChartSpec, LineChartSpec, HistogramChartSpec,
     BoxChartSpec, HeatmapChartSpec, ConcentrationChartSpec, ParetoChartSpec,
+    WaterfallChartSpec,
     MAX_BAR_CATEGORIES, MAX_GROUPED_BAR_CATEGORIES, MAX_STACKED_BAR_CATEGORIES,
     MAX_STACKED_BAR_SEGMENTS, MAX_LINE_POINTS, MAX_LINE_HUE_GROUPS,
     MAX_HISTOGRAM_BUCKETS, MAX_BOX_CATEGORIES, MAX_HEATMAP_AXIS,
     MAX_HEATMAP_ANNOT_FONTSIZE, MAX_PARETO_LABELS, MAX_CATEGORY_LABEL_LENGTH,
+    MAX_WATERFALL_STEPS,
     TITLE_FONTSIZE, AXIS_LABEL_FONTSIZE, TICK_LABEL_FONTSIZE, LEGEND_FONTSIZE,
     AXIS_LABEL_WRAP_CHARS, GROUPED_BAR_VALUE_FONTSIZE,
 )
@@ -63,6 +67,15 @@ def test_clean_label_and_format_value():
     assert spec._format_value(0.5, "percent") == "50.0%"
     assert spec._format_value(500, "currency") == "$500.00"
     assert spec._format_value(50_000_000, "currency") == "$50M"
+
+    # Tick spacing finer than one decimal adds decimals, so neighbors stay distinct.
+    assert spec._format_value(2750, "currency", step=50) == "$2.75K"
+    assert spec._format_value(2800, "currency", step=50) == "$2.80K"
+    assert spec._format_value(3000, "currency", step=50) == "$3K"
+    assert spec._format_value(0.3845, "percent", step=0.0005) == "38.45%"
+    # Coarse spacing keeps the one-decimal default.
+    assert spec._format_value(2500, "auto", step=500) == "2.5K"
+    assert spec._format_value(0.5, "percent", step=0.1) == "50.0%"
 
 
 @pytest.mark.parametrize("cls,chart_type,x_field,y_field", [
@@ -314,3 +327,74 @@ def test_pareto():
     over_cap = [{"department": f"a{i}", "orders": i} for i in range(MAX_BAR_CATEGORIES + 1)]
     with pytest.raises(ToolError, match="Too many categories"):
         validate_and_render(over_cap, spec, ParetoChartSpec)
+
+
+def test_waterfall():
+    """Floating-bar positions and colors for total/increase/decrease steps;
+    labels show the signed delta, not the bar's own (always-positive)
+    height; max-steps cap."""
+    data = [
+        {"driver": "Start", "amount": 100, "is_total": True},
+        {"driver": "Gain", "amount": 30, "is_total": False},
+        {"driver": "Loss", "amount": -10, "is_total": False},
+        {"driver": "End", "amount": 120, "is_total": True},
+    ]
+    spec = {"chart_type": "waterfall", "category_field": "driver", "value_field": "amount",
+            "is_total_field": "is_total", **LABELS}
+    fig = validate_and_render(data, spec, WaterfallChartSpec)
+    ax = fig.axes[0]
+    bars = ax.patches
+
+    # Start: full bar from 0, running total becomes 100.
+    assert (bars[0].get_y(), bars[0].get_height()) == (0, 100)
+    # Gain: floats from 100 to 130.
+    assert (bars[1].get_y(), bars[1].get_height()) == (100, 30)
+    # Loss: floats from 120 down to 130 -- drawn bottom is the lower of the two.
+    assert (bars[2].get_y(), bars[2].get_height()) == (120, 10)
+    # End: full bar from 0, not a float off the running total.
+    assert (bars[3].get_y(), bars[3].get_height()) == (0, 120)
+
+    # Zoom: step span 30 (100 to 130) / largest total 120 = 0.25, under the
+    # trigger -> bottom moves so the span is half the visible baseline: 120 - 30/0.5.
+    assert ax.get_ylim()[0] == 60
+
+    # Negative baseline mirrors it: top moves down instead, -1030 + 30/0.5.
+    negative = [{"driver": "Start", "amount": -1000, "is_total": True},
+                {"driver": "Drop", "amount": -30, "is_total": False},
+                {"driver": "End", "amount": -1030, "is_total": True}]
+    fig_neg = validate_and_render(negative, spec, WaterfallChartSpec)
+    assert fig_neg.axes[0].get_ylim()[1] == -970
+
+    # No zoom when the steps are already large next to the baseline, or when
+    # there are no step bars at all -- the natural range starts at or below 0.
+    big_step = [{"driver": "Start", "amount": 100, "is_total": True},
+                {"driver": "Gain", "amount": 500, "is_total": False},
+                {"driver": "End", "amount": 600, "is_total": True}]
+    all_totals = [{"driver": "A", "amount": 50, "is_total": True},
+                  {"driver": "B", "amount": 80, "is_total": True}]
+    for no_zoom in (big_step, all_totals):
+        assert validate_and_render(no_zoom, spec, WaterfallChartSpec).axes[0].get_ylim()[0] <= 0
+
+    # Zoomed into thousands, ticks land 50 apart -- every y label must still be distinct.
+    profit = [{"driver": "Baseline", "amount": 2757.9, "is_total": True},
+              {"driver": "Churn", "amount": 50.7, "is_total": False},
+              {"driver": "AOV", "amount": 47.0, "is_total": False},
+              {"driver": "Conversion", "amount": 20.3, "is_total": False},
+              {"driver": "Total", "amount": 2875.9, "is_total": True}]
+    fig_profit = validate_and_render(profit, spec, WaterfallChartSpec)
+    fig_profit.canvas.draw()
+    y_labels = [t.get_text() for t in fig_profit.axes[0].get_yticklabels() if t.get_text()]
+    assert len(y_labels) == len(set(y_labels))
+
+    default_spec = WaterfallChartSpec.model_validate({**spec})
+    assert [b.get_facecolor() for b in bars] == [
+        to_rgba(default_spec.total_color), to_rgba(default_spec.increase_color),
+        to_rgba(default_spec.decrease_color), to_rgba(default_spec.total_color),
+    ]
+
+    # Signed deltas, not abs(height) -- the loss must show as negative.
+    assert [t.get_text() for t in ax.texts] == ["100", "30", "-10", "120"]
+
+    over_cap = [{"driver": f"d{i}", "amount": i, "is_total": False} for i in range(MAX_WATERFALL_STEPS + 1)]
+    with pytest.raises(ToolError, match="Too many steps"):
+        validate_and_render(over_cap, spec, WaterfallChartSpec)

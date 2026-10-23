@@ -1,5 +1,6 @@
 import datetime
 import io
+import math
 import re
 import textwrap
 import uuid
@@ -9,6 +10,7 @@ from typing import Annotated, Literal, Union
 import matplotlib
 matplotlib.use("Agg")          # non-interactive backend
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
 import seaborn as sns
 import pandas as pd
@@ -44,6 +46,9 @@ MAX_HEATMAP_AXIS           = 30
 HEATMAP_FONT_FACTOR        = 18   # cell size (inches) to annotation fontsize (points)
 MAX_HEATMAP_ANNOT_FONTSIZE = 14
 MIN_HEATMAP_ANNOT_FONTSIZE = 5    # below this, annotations are dropped
+MAX_WATERFALL_STEPS        = 15   # named driver/step chart, not a high-cardinality one
+WATERFALL_ZOOM_TRIGGER     = 0.3  # zoom when step span / |baseline| is below this
+WATERFALL_ZOOM_TARGET      = 0.5  # step span / visible |baseline| after zooming
 
 MAX_CATEGORY_LABEL_LENGTH = 40   # horizontal_bar, stacked_horizontal_bar only
 
@@ -140,55 +145,62 @@ class ChartSpecBase(BaseModel, ABC):
         return fig
 
     def _annotate_values(self, ax: plt.Axes, fontsize: float = VALUE_ANNOTATION_FONTSIZE,
-                          width_aware: bool = False) -> None:
+                          width_aware: bool = False, labels: list[str] | None = None) -> None:
         """Bar value labels, skipped entirely past MAX_LABELED_BARS bars per
         container. width_aware=True also blanks an individual label wider
-        than its own bar."""
+        than its own bar. labels overrides the text directly, instead of
+        formatting each bar's own height."""
         # Skip labels when any bar container is too crowded.
         if any(len(container) > MAX_LABELED_BARS for container in ax.containers):
             return
         value_format = getattr(self, "value_format", "auto")
         # Label each bar container with its formatted value.
         for container in ax.containers:
-            labels = ax.bar_label(container, fmt=lambda v: self._format_value(v, value_format),
-                                  padding=2, fontsize=fontsize)
+            bar_labels = ax.bar_label(container, labels=labels,
+                                      fmt=lambda v: self._format_value(v, value_format),
+                                      padding=2, fontsize=fontsize)
             if width_aware:
                 # Blank out any label wider than the bar it labels.
                 axes_width_inches = ax.get_position().width * FIGSIZE[0]
                 x_range = ax.get_xlim()[1] - ax.get_xlim()[0]
-                for patch, label in zip(container.patches, labels):
+                for patch, label in zip(container.patches, bar_labels):
                     bar_width_points = (patch.get_width() / x_range) * axes_width_inches * 72
                     estimated_label_width = len(label.get_text()) * fontsize * CHAR_WIDTH_FACTOR
                     if estimated_label_width > bar_width_points * LABEL_FIT_MARGIN:
                         label.set_text("")
 
-    def _format_value(self, value: float, value_format: str) -> str:
+    def _format_value(self, value: float, value_format: str, step: float | None = None) -> str:
         """Formats one value for an axis tick or bar label. 'auto' picks based
-        on magnitude"""
-        # Fraction to one-decimal percent.
+        on magnitude. step (tick spacing) adds decimals until adjacent ticks
+        can't round to the same label."""
+        # Fraction to percent, one decimal unless ticks are finer.
         if value_format == "percent":
-            return f"{value:.1%}"
+            decimals = max(1, math.ceil(-math.log10(step * 100))) if step else 1
+            return f"{value:.{decimals}%}"
         # Dollar sign for currency.
         prefix = "$" if value_format == "currency" else ""
         abs_value = abs(value)
-        # Abbreviate billions, millions, and thousands, dropping a trailing .0.
+        # Abbreviate billions, millions, and thousands, dropping an all-zero fraction.
         for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
             if abs_value >= threshold:
-                text = f"{value / threshold:.1f}"
-                return f"{prefix}{text[:-2] if text.endswith('.0') else text}{suffix}"
+                decimals = max(1, math.ceil(-math.log10(step / threshold))) if step else 1
+                whole, fraction = f"{value / threshold:.{decimals}f}".split(".")
+                return f"{prefix}{whole if set(fraction) == {'0'} else f'{whole}.{fraction}'}{suffix}"
         # Two decimals for currency under 1,000.
         if value_format == "currency":
             return f"{prefix}{value:,.2f}"
         # Up to four significant digits otherwise.
         return f"{value:,.4g}"
 
-    def _apply_value_format(self, ax: plt.Axes, axis: Literal["x", "y"]) -> None:
+    def _apply_value_format(self, ax: plt.Axes, axis: Literal["x", "y"],
+                             step: float | None = None) -> None:
         """Formats an axis's tick labels using self.value_format, defaulting
-        to 'auto' for a class that has no such field."""
+        to 'auto' for a class that has no such field. step is the tick
+        spacing, for an axis whose ticks are pinned."""
         value_format = getattr(self, "value_format", "auto")
         # Set the tick formatter on that axis.
         getattr(ax, f"{axis}axis").set_major_formatter(
-            FuncFormatter(lambda v, pos: self._format_value(v, value_format)))
+            FuncFormatter(lambda v, pos: self._format_value(v, value_format, step)))
 
     def _check_no_duplicate_grain(self, df: pd.DataFrame, columns: list[str]) -> None:
         """Raises if any combination of `columns` repeats -- the data isn't
@@ -763,12 +775,88 @@ class ParetoChartSpec(ChartSpecBase):
         return self._finish(fig, ax1)
 
 
+class WaterfallChartSpec(ChartSpecBase, FormattedValueSpec):
+    """Floating bars showing a running cumulative total across sequential
+    steps -- "how did we get from the starting value to the ending value?"
+    Fields: category_field, value_field, is_total_field.
+
+        [{"driver": "Baseline Profit",         "amount": 2757.9, "is_total": true},
+         {"driver": "Churn Profit Lift",        "amount": 50.7,  "is_total": false},
+         {"driver": "AOV Profit Lift",          "amount": 47.0,  "is_total": false},
+         {"driver": "Conversion Profit Lift",   "amount": 20.3,  "is_total": false},
+         {"driver": "Total",                    "amount": 2875.9, "is_total": true}]
+
+    Row order in `data` IS the step order, left to right -- not sorted here,
+    unlike pareto.
+    """
+    chart_type: Literal["waterfall"] = Field(description='Always "waterfall".')
+    category_field: str = Field(description="Column with each step's label.")
+    value_field: str = Field(description="Column with each step's signed delta; the running "
+                                          "total (signed, not absolute) for an is_total row.")
+    is_total_field: str = Field(description="Boolean column -- true for a bar drawn in full from "
+                                             "zero (a starting baseline, subtotal, or grand total), "
+                                             "false for an incremental step.")
+    increase_color: str = Field(default="#2ca02c", description="Bar color for a positive step.")
+    decrease_color: str = Field(default="#d62728", description="Bar color for a negative step.")
+    total_color: str = Field(default="#1f77b4", description="Bar color for an is_total row.")
+
+    def required_fields(self) -> list[str]:
+        return [self.category_field, self.value_field, self.is_total_field]
+
+    def render(self, df: pd.DataFrame) -> plt.Figure:
+        self._check_no_duplicate_grain(df, [self.category_field])
+        self._check_max_categories(df[self.category_field].nunique(), MAX_WATERFALL_STEPS, "steps")
+
+        running_total = 0.0
+        bottoms, heights, colors = [], [], []
+        for value, is_total in zip(df[self.value_field], df[self.is_total_field]):
+            if is_total:
+                bottoms.append(0)
+                heights.append(value)
+                colors.append(self.total_color)
+                running_total = value
+            else:
+                bottoms.append(min(running_total, running_total + value))
+                heights.append(abs(value))
+                colors.append(self.increase_color if value >= 0 else self.decrease_color)
+                running_total += value
+
+        fig, ax = self._setup()
+        ax.bar(df[self.category_field], heights, bottom=bottoms, color=colors)
+        # Labels show the signed delta, not the bar's own (always-positive) height.
+        self._annotate_values(ax, width_aware=True,
+                              labels=[self._format_value(v, self.value_format) for v in df[self.value_field]])
+        ax.legend(handles=[
+            Patch(color=self.increase_color, label="Increase"),
+            Patch(color=self.decrease_color, label="Decrease"),
+            Patch(color=self.total_color, label="Total"),
+        ])
+        # Zoom toward the steps when their combined span is small next to the largest total.
+        steps = [(b, h) for b, h, is_total in zip(bottoms, heights, df[self.is_total_field]) if not is_total]
+        totals = [v for v, is_total in zip(df[self.value_field], df[self.is_total_field]) if is_total]
+        if steps and totals:
+            span = max(b + h for b, h in steps) - min(b for b, _ in steps)
+            baseline = max(totals, key=abs)
+            if span > 0 and baseline != 0 and span / abs(baseline) < WATERFALL_ZOOM_TRIGGER:
+                if baseline > 0:
+                    ax.set_ylim(bottom=baseline - span / WATERFALL_ZOOM_TARGET)
+                else:
+                    ax.set_ylim(top=baseline + span / WATERFALL_ZOOM_TARGET)
+        # Pin the visible y-ticks, then label them with enough decimals for their spacing.
+        bottom, top = ax.get_ylim()
+        ticks = [t for t in ax.get_yticks() if bottom <= t <= top]
+        ax.set_yticks(ticks)
+        self._apply_value_format(ax, "y", step=ticks[1] - ticks[0] if len(ticks) > 1 else None)
+        return self._finish(fig, ax)
+
+
 class GenerateChartArgs(BaseModel):
     data: list[dict]
     spec: Annotated[
         Union[BarChartSpec, HorizontalBarChartSpec, GroupedBarChartSpec,
               StackedHorizontalBarChartSpec, LineChartSpec, HistogramChartSpec,
-              BoxChartSpec, HeatmapChartSpec, ConcentrationChartSpec, ParetoChartSpec],
+              BoxChartSpec, HeatmapChartSpec, ConcentrationChartSpec, ParetoChartSpec,
+              WaterfallChartSpec],
         Field(discriminator="chart_type",
               description="Which chart type to render, with that type's own fields."),
     ]
@@ -822,10 +910,7 @@ def generate_chart(
         raise ToolError(
             f"Field(s) {missing} not in source data. Available: {list(df.columns)}")
 
-    # One check for every chart type, present and future -- required_fields()
-    # is already implemented polymorphically by each spec, so this needs no
-    # per-chart-type null handling. Charts render missing data as gaps or not
-    # at all rather than erroring, so a null here fails silently without this.
+    # Ensure no nulls in required columns and return actionable error if one or more do
     nulls = [f for f in args.spec.required_fields() if df[f].isna().any()]
     if nulls:
         raise ToolError(
