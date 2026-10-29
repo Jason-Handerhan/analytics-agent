@@ -95,6 +95,7 @@ jobs:
             --image us-docker.pkg.dev/YOUR_PROJECT/analytics-gateway/analytics-gateway:${{ github.sha }} \
             --service-account=${{ vars.PROD_SERVICE_ACCOUNT }} \
             --allow-unauthenticated \
+            --memory=2Gi \
             --region=${{ vars.PROD_REGION }} \
             --set-env-vars=<every var from CLAUDE.md's deploy command>
             # NOT a subset. Omitting EXPECTED_AUDIENCE breaks auth,

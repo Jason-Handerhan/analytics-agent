@@ -52,11 +52,12 @@ LangGraph orchestrator (StateGraph, typed state)
  [assemble AgentResponse]
  run_bigquery_sql — plain @tool, not MCP-hosted; get_bigquery_schema() reads
    agent_safe directly into the static context bundle, not an MCP resource
+ generate_beeswarm — plain @tool, not MCP-hosted; plots a prediction_explanations sample
         │  MCP (MultiServerMCPClient, streamable_http → localhost)
         ▼
 MCP tool server · FastMCP
- run_dax_query · get_measure_dax · list_repo_files ·
- read_repo_file · search_docs · get_page_info · generate_chart
+ run_dax_query · get_measure_dax · get_repo_contents ·
+ search_docs · get_page_info · generate_chart
         ▼
 Data + governance layer
  BigQuery (gold tables + 6 vector tables) · Power BI semantic model ·

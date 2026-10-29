@@ -1,6 +1,7 @@
 ---
 paths:
   - 'app/orchestrator/**'
+  - 'app/shared_helpers.py'
   - 'app/model_schema.py'
   - 'app/exceptions.py'
   - 'tests/test_guardrails.py'
@@ -8,6 +9,7 @@ paths:
   - 'tests/test_submit_answer.py'
   - 'tests/test_e2e.py'
   - 'tests/test_static_context.py'
+  - 'tests/test_conversation_memory.py'
 ---
 
 # Orchestrator: verification contract + guardrails
@@ -45,6 +47,9 @@ class SubmitAnswerArgs(BaseModel):
     suggested_follow_ups: list[str] = []   # cleared by call_tool_node on question turns
     clarifying_question: str = ""  # set INSTEAD of answer_markdown; exactly one
                                    # of the two is set (model validator)
+    title: str = ""                # per-turn tags for conversation_findings
+    topics: list[str] = []         # (docs/conversation-memory.md); a validator
+    entities: list[str] = []       # strips, dedupes and caps each list at 6
 
 class AgentResponse(BaseModel):
     answer_markdown: str
@@ -259,6 +264,9 @@ class AgentState(TypedDict):
                                             # against build_numeric_pool()
     suggested_follow_ups: list[str]        # same source; flows straight to
                                             # AgentResponse, unlike the claims
+    title: str                             # same source; written to
+    topics: list[str]                       # conversation_findings by
+    entities: list[str]                     # finalize, never to AgentResponse
     chart_urls: list[str]
     sources: list[str]
 ```
@@ -317,18 +325,24 @@ transcription-drift risk, and the model doesn't pay extra tokens re-stating
 a table it already wrote.
 
 ```python
-# NUMERIC_SOURCE_TOOLS lives in app/config.py, not here -- entry_exit.py's
-# rebuild_paused_messages needs it too, and config.py is the shared,
-# dependency-light module both sides can import without pulling in the other.
+# NUMERIC_SOURCE_TOOLS and MEMORY_SOURCE_TOOLS live in app/config.py, not
+# here -- entry_exit.py's rebuild_paused_messages needs the first too, and
+# config.py is the shared, dependency-light module both sides can import
+# without pulling in the other.
 
 def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
-    """Every number from this turn's successful query results, plus
-    combine_results output (which only recombines them, including null-to-0
-    fills) -- never incidental numbers embedded in code, doc chunks, or metadata."""
+    """Every number the answer may cite: this turn's successful query results
+    (and combine_results output, which only recombines them, including null-to-0
+    fills), every numeric leaf -- never incidental numbers embedded in code, doc
+    chunks, or metadata -- plus the verified_numbers of a successful recall."""
     pool: set[float] = set()
     for tc in tool_calls:
-        if tc["success"] and tc["name"] in NUMERIC_SOURCE_TOOLS:
+        if not tc["success"]:
+            continue
+        if tc["name"] in NUMERIC_SOURCE_TOOLS:
             pool.update(extract_numeric_values(tc["result"]))
+        elif tc["name"] in MEMORY_SOURCE_TOOLS:
+            pool.update(extract_verified_numbers(tc["result"]))
     return pool
 
 def claim_matches_pool(claim: float, pool: set[float]) -> bool:
@@ -433,6 +447,11 @@ own Layer-1 test — see `docs/testing.md`):
   found. Handles both BigQuery row dicts and `executeQueries`'
   `results[0].tables[0].rows` shape, where keys are fully qualified
   (`Table[Column]`) — irrelevant here since this returns values, not keys.
+- `extract_verified_numbers(result) -> list[float]` — **called by
+  `build_numeric_pool` for `MEMORY_SOURCE_TOOLS`** (`get_conversation_findings`,
+  `docs/conversation-memory.md`). Returns only each turn's `verified_numbers`,
+  so nothing else in a recall result (`turn`, `approx_tokens`, decoded `args`)
+  can reach the pool; a dict result (the overview view) returns `[]`.
 - `extract_table_values(answer_markdown) -> list[float]` — **called by
   `verify_response`.** Shares `_markdown_ast` (mistune's GFM table parser, an
   AST walk) with `check_table_rows` above — not duplicated, per the
@@ -469,7 +488,7 @@ item 3).
 
   1. **`SYSTEM_INSTRUCTIONS`** — role and behavioral rules, established
      before the model sees any reference material.
-  2. **Orientation bundle** — exec summary + navigator + architecture diagram.
+  2. **Orientation bundle** — exec summary + navigator + architecture summary.
   3. **`TABLE_REGISTRY`** — every semantic-model table with its columns,
      types, and descriptions. Includes *disconnected* tables (measure-only
      and parameter tables), which never appear in relationships, so this is
@@ -556,8 +575,18 @@ def build_human_message(question: str, filter_context: list[dict],
         content += f"\n\nCurrently viewing: {active_page}"
     if filter_context:
         content += f"\n\nFilters active: {filter_context}"
-    return HumanMessage(content=content)
+    return HumanMessage(content=content, additional_kwargs={
+        "turn_start": datetime.now(timezone.utc).isoformat()})
 ```
+
+`turn_start` marks the question as a turn's first message, and its value is the
+turn's start time (UTC ISO string). The history cache breakpoints (below) find
+turn boundaries with it by truthiness, and compaction uses the time to find the
+ledger rows that fall before the first kept turn
+(`docs/conversation-memory.md`). The retry notes stay unmarked, user-role
+`HumanMessage`s. History stored before 2026-10-28 has `True` here and can't
+compact (reading the time fails and the error is logged); a new conversation
+replaces it.
 
 ## Model schema — one parse, six artifacts
 
@@ -847,7 +876,7 @@ collapsed with a count.**
 ```python
 from itertools import groupby
 
-# Separate from FRIENDLY_TOOL_NAMES (.claude/rules/gateway.md): those are
+# Separate from SOURCE_NAMES (.claude/rules/gateway.md): those are
 # present-tense progress messages, these are past-tense badges. No tool jargon
 # — the reader is field-operations staff. "Model fields" is the SEMANTIC
 # model's, not BigQuery's.
@@ -856,10 +885,11 @@ SOURCE_LABELS = {
     "run_dax_query":    "Query dashboard",
     "get_measure_dax":  "Measure Lookup",
     "get_page_info":    "PBI page info",
-    "list_repo_files":  "list code",
-    "read_repo_file":   "Read code",
+    "get_repo_contents": "Read code",
     "search_docs":      "Doc Search",
+    "get_conversation_findings": "Searched Memory",
     "generate_chart":   "Create chart",
+    "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
 }
 
@@ -1160,7 +1190,7 @@ the five routing functions (`route_entry`, `route_after_agent`,
 `async def` and independently calls `is_cancelled` first, returning
 `"finalize"` directly if it's set — covering every edge in the graph, not
 just the ones leading into slow nodes. `is_cancelled` itself lives in
-`app/orchestrator/shared_helpers.py`, not here — the first thing in this
+`app/shared_helpers.py`, not here — the first thing in this
 whole codebase where orchestrator-layer code reads Firestore directly rather
 than the gateway:
 
@@ -1405,9 +1435,10 @@ ALL_TOOLS = {
     "get_measure_dax": get_measure_dax,
     "search_docs": search_docs,
     "get_page_info": get_page_info,
+    "generate_beeswarm": generate_beeswarm,
 }
-# None of these five is MCP-based (`.claude/rules/tools.md`) -- MCP_TOOLS
-# alone would leave all five uncallable.
+# None of these six is MCP-based (`.claude/rules/tools.md`) -- MCP_TOOLS
+# alone would leave all six uncallable.
 
 def build_tools_list(model_provider: str) -> list[BaseTool]:
     """Stand-in tools (generate_chart, combine_results) + every other real
@@ -1439,7 +1470,7 @@ def build_model(model: str, model_provider: str) -> BaseChatModel:
     Takes both as parameters now, not a module-level MODEL/MODEL_PROVIDER --
     model choice is per-request (below)."""
     if model_provider == "anthropic":
-        return ChatAnthropic(model=model, thinking={"type": "adaptive", "display": "summarized"})
+        return ChatAnthropic(model=model, thinking={"type": "adaptive", "display": "summarized"}, effort="medium")
     if model_provider == "openai":
         return ChatOpenAI(model=model, use_responses_api=True,
                            reasoning={"effort": "low", "summary": "auto"})
@@ -1459,9 +1490,23 @@ async def agent_node(state: AgentState) -> dict:
         build_tools_list(state["model_provider"]), strict=True)
     system_message = SystemMessage(content=build_static_context(
         state["model_provider"], get_static_context()))
-    response = await model.ainvoke([system_message, *state["history_messages"], *state["messages"]])
+    history = state["history_messages"]
+    if state["model_provider"] == "anthropic":
+        history = mark_anthropic_history_cache(history)
+    response = await model.ainvoke([system_message, *history, *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 ```
+
+**History is cached with two Anthropic breakpoints (2026-10-26).**
+`mark_anthropic_history_cache` puts `cache_control` on the last message of the
+previous stored turn and of the newest one, found via the `turn_start` marker.
+The older one exactly matches the previous turn's newest breakpoint, so a turn
+reads earlier history from cache and writes only the newest turn; with one
+breakpoint, a turn past the 20-position lookback window re-wrote the whole
+history. Confirmed live. It needs byte-stable history: `build_history_messages`
+sorts map keys (`.claude/rules/gateway.md`), and a history that has
+that grows without bound defeats it (the first entry changes every turn),
+which compaction prevents. OpenAI and Gemini cache automatically.
 
 **`state["model"]`/`state["model_provider"]` drive every branch above —
 per-turn now, not a fixed `app/config.py` pair read once at startup.**
@@ -1531,7 +1576,7 @@ this table and the code ever disagree.
 
 | From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
 |---|---|---|---|---|
-| any routing function | `is_cancelled` (live Firestore read, not `state["cancelled"]` -- nothing sets that until Layer 2 lands) | Cancelled | `answer_markdown` = real answer only if `verify_node` already confirmed it this turn, else `CANCELLED_MESSAGE`; `needs_approval` forced to `False` regardless of what `call_tool` last set it to | Normal row, `cancelled: True`, `needs_approval: False` |
+| any routing function | `is_cancelled` (live Firestore read, not `state["cancelled"]` -- nothing sets that until Layer 2 lands) | Cancelled | `answer_markdown` = `CANCELLED_MESSAGE` always, even if `verify_node` already confirmed an answer (a cancelled turn is discarded, never written to history); `needs_approval` forced to `False` regardless of what `call_tool` last set it to | Normal row, `cancelled: True`, `needs_approval: False` |
 | `call_tool` | `needs_approval` (only reached if not also cancelled) | Approval pause | `answer_markdown` = `PENDING_APPROVAL_MESSAGE`; `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
 | `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question | Normal row |
 | `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit`/`cost_cap_exceeded` set `True` if either is how this turn got here | Normal row |
@@ -1540,18 +1585,24 @@ this table and the code ever disagree.
 `answer_markdown`'s four canned-message constants (`VERIFICATION_FAILURE_MESSAGE`,
 `PENDING_APPROVAL_MESSAGE`, `CANCELLED_MESSAGE`, plus the success case's real
 text) are picked by one `if`/`elif`/`elif`/`else` chain in `finalize_node`,
-in that priority order — **`cancelled` first** (a cancel request should win
-over a pause determined in the same tick, and checking it first is also what
-makes the `verify_node`-confirmed gate correct — a cancel landing right
-after `submit_answer`, before verification ran, must not display an
-unverified `answer_markdown`), then `needs_approval`, then `not verified`,
-then the real answer.
+in that priority order — **`cancelled` first** (a cancel request wins over a
+pause determined in the same tick, and a cancelled turn is always discarded:
+`CANCELLED_MESSAGE`, never a draft or even a verified answer, so what the user
+sees matches what history and the ledger keep), then `needs_approval`, then
+`not verified`, then the real answer.
+
+**`finalize` also writes `conversation_findings`** (`docs/conversation-memory.md`):
+when `verified and not cancelled`, it builds the row from the values it already
+holds plus `verified_numbers` (`all_prose_numeric_claims` +
+`extract_table_values(answer_markdown)`) and awaits it in an `asyncio.gather`
+with the telemetry write. The findings writer logs its own failures, so a
+ledger gap can't fail the turn.
 
 **`finalize` never touches `live_turns` — that lives in `consume_graph`
 (`app/gateway/gateway.py`) instead.** `live_turns` is gateway-owned
 (`.claude/rules/gateway.md`); splitting its writes across two modules risks
 drift. `finalize` only sets the `AgentState` fields above and writes
-`agent_telemetry`. `consume_graph`'s own `finally` block, after the `astream`
+`agent_telemetry` (and the findings row, above). `consume_graph`'s own `finally` block, after the `astream`
 loop ends, decides what happens to the document:
 
 ```python
@@ -1604,7 +1655,7 @@ change in the same step.
   `tool_calls` are seeded fresh at each invocation; nothing accumulates
   turn over turn in memory. What a later turn sees of an earlier one is only
   what's reconstructed from Firestore, deliberately bounded by
-  `HISTORY_TURN_COUNT` and per-turn redaction (`.claude/rules/gateway.md`).
+  compaction and per-turn redaction (`.claude/rules/gateway.md`).
 - **Confirm parallel dispatch isn't accidentally serialized** — LangGraph runs
   multiple tool calls concurrently by default. A free win, not something to
   build.

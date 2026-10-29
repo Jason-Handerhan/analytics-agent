@@ -10,7 +10,7 @@ committed file. Only project docs are chunked and embedded.
 
 | # | Source | Built by | Output | Read by |
 |---|---|---|---|---|
-| **1** | Instacart bronze tables | Dataform (`agent_safe` tag) | `agent_safe.*` tables | `run_bigquery_sql`, `bigquery_schema` |
+| **1** | Instacart bronze tables, ML model results | Dataform (`agent_safe` tag) | `agent_safe.*` tables | `run_bigquery_sql`, `bigquery_schema` |
 | **2** | Live Power BI (`executeQueries` + Scanner API) | `scripts/build_model_context.py` (local, **no Dataform**) | `context/schema/model_schema.json`, committed | static context + `get_measure_dax` |
 | **3** | `context/docs/*.md`, `*.html` | `scripts/build_vector_db.py` → Dataform (`vector_db` tag) | `vector_db.chunks_docs_embedded` | `search_docs` |
 
@@ -25,7 +25,7 @@ almost identically.
 
 **Not in any pipeline:** `context/page_info/` (read whole by `get_page_info`)
 and the ML repo's Python and SQLX (read live via
-`list_repo_files`/`read_repo_file`).
+`get_repo_contents`).
 
 **Pipeline 3 is two steps, and order matters.** `build_vector_db.py` runs
 locally and writes `staging.doc_chunks`; then Dataform's `vector_db` tag reads
@@ -196,6 +196,39 @@ order) grain — supplemented with `product_name`/`aisle`/`department` only.
 It answers a different question shape (correlating features against the
 reorder label), so collapsing it to `product_order_analysis`'s grain would
 destroy the history that question needs.
+
+**`prediction_explanations`** (2026-10-23) is a third table, and the one
+post-model exception in `agent_safe` (`.claude/rules/tools.md`'s domain
+split). One row per (split, model, user, anchor order, candidate product): the
+model's `prediction` and `base_value`, each feature's raw value (`raw_*`) and
+SHAP contribution (`shap_*`), plus `product_name`/`aisle`/`department`.
+
+- **Sources:** the ML repo's eight `ml_model_results.<split>_<model>_row_level_shap`
+  tables (`get_shap_plots` in its `model_evaluation` notebook — up to 150,000
+  sampled rows each, the same rows for all four models within a split), each
+  declared in its own flat `definitions/sources_*.sqlx`, combined with
+  `UNION ALL BY NAME` plus literal `split`/`model` columns (display names,
+  matching the dashboard's). The notebook's output gained `candidate_product_id`
+  and `base_value` for this. Clustered by `(split, model)`.
+- **Units live in the table description only**, once, covering `base_value`,
+  `prediction`, and every `shap_*` column: classifier SHAP and `base_value` are
+  log-odds and `prediction` is the probability; a ranker's are all raw scores.
+  Averaged log-odds don't convert to an average probability (the sigmoid is
+  non-linear), so a slice's probability is `AVG(prediction)`, reported
+  separately — `BIGQUERY_FEW_SHOT_EXAMPLES`' waterfall example shows it.
+- **Assertions:** `rowConditions` (allowed `split`/`model` values, non-null keys
+  and name join, classifier probabilities in 0-1); a separate additivity
+  assertion (`base_value + SUM(shap_*)` reproduces `prediction` within 0.001,
+  through the sigmoid for classifiers — a `js { }` block builds the 15-term sum
+  once); and a non-empty assertion.
+- **Refresh:** re-run `get_shap_plots` for both splits (it rewrites the eight
+  source tables), then execute the `agent_safe` tag. The Power BI SHAP tables
+  come from the same notebook run — re-run its remaining cells in one pass,
+  since the sample is `data.sample(random_state=42)` and can pick different
+  rows if the load order changes.
+- **Consumers:** `generate_beeswarm` samples it (`docs/chart-tool.md`), and the waterfall
+  example in `BIGQUERY_FEW_SHOT_EXAMPLES` unpivots it. Both label features from
+  `SHAP_FEATURE_DISPLAY_NAMES` (`app/config.py`).
 
 **Those `columns:` descriptions are the agent's schema grounding, not
 documentation.** `get_bigquery_schema()` (`.claude/rules/orchestrator.md`,
@@ -623,6 +656,12 @@ above the declaration with no blank line between, are the details most likely
 to differ from the assumption above. A mismatch **fails silently** — the
 description sits in the file, never reaches `chunk_text`, and nothing errors.
 
+**`unstructured` downloads a spaCy model for itself.** `partition_md`/`partition_html`
+call `en_core_web_sm` for sentence splitting, and on first use `unstructured` installs it
+into the environment — it isn't in `uv.lock`. `uv sync`, `uv add` and `uv remove` delete
+it as an extra package, and the next partition run quietly downloads it again (about 12MB,
+needs network). Nothing to fix; it explains a slow first chunking run after a dependency change.
+
 ### Load to staging
 
 ```python
@@ -680,7 +719,7 @@ DOC_SOURCES = {
 #                          call. Relationships too — structural, needed on
 #                          nearly every DAX composition, never retrieved.
 #   page_info HTML      -> served whole by get_page_info.
-#   ML repo .py / .sqlx -> read live via list_repo_files / read_repo_file.
+#   ML repo .py / .sqlx -> read live via get_repo_contents.
 
 def main() -> None:
     all_chunks: list[Chunk] = []

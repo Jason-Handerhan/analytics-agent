@@ -2,6 +2,7 @@
 paths:
   - 'app/gateway/**'
   - 'app/config.py'
+  - 'app/shared_helpers.py'
   - 'tests/test_gateway.py'
   - 'tests/test_static_context.py'
   - 'tests/test_entry_exit.py'
@@ -269,7 +270,7 @@ normally.
 
 | Collection | Lifetime | Holds | Read by |
 |---|---|---|---|
-| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 14 fields — schema below**) | `status`/`thinking_log` by `GET /ask/status`; `pending_approval` by `POST /ask`'s approval-decision branch; `cancel_requested` by `is_cancelled` (`app/orchestrator/shared_helpers.py`), called from the orchestrator's routing functions and `finalize_node` — not read anywhere in this file directly |
+| `live_turns/{conversation_id}` | One in-flight turn; cleared at turn end | `status` (string), `thinking_log` (list of `{seq, text}`), `cancel_requested` (bool), `pending_approval` (**nested object, 14 fields — schema below**) | `status`/`thinking_log` by `GET /ask/status`; `pending_approval` by `POST /ask`'s approval-decision branch; `cancel_requested` by `is_cancelled` (`app/shared_helpers.py`), called from the orchestrator's routing functions and `finalize_node` — not read anywhere in this file directly |
 | `sessions/{conversation_id}` | Whole conversation; 30-day TTL | `user_id`, `history_messages`, `last_activity_at` | Prompt assembly, the ownership check |
 
 **`pending_approval` is a field, not a third collection** — it has its own
@@ -305,7 +306,7 @@ live_turns/{conversation_id}          # scoped to ONE in-flight turn
 sessions/{conversation_id}            # spans the whole conversation
 {
   "user_id": "...",                        # claims["oid"] — same source as telemetry
-  "history_messages": [                    # FIFO, last HISTORY_TURN_COUNT
+  "history_messages": [                    # compacted by compact_history_pipeline
     {
       "messages": [...],                   # messages_to_dict(state["messages"]), non-submit_answer
                                            # tool results already redacted
@@ -349,7 +350,7 @@ def build_updated_history(history_messages: list[dict], state: AgentState) -> li
                                tool_call_id=msg.tool_call_id, status=msg.status)
         redacted.append(msg)
     new_entry = {"messages": messages_to_dict(redacted), "timestamp": datetime.now(timezone.utc)}
-    return (history_messages + [new_entry])[-HISTORY_TURN_COUNT:]
+    return history_messages + [new_entry]
 ```
 
 **Also strips thinking/reasoning content and a Firestore-illegal Gemini
@@ -394,9 +395,9 @@ and seeing what didn't work last time is plausibly useful, not just inert.
 earlier design row-capped each `ToolCallRecord.result` before storing it
 (`HISTORY_ROW_CAP`); that was never built, and once every non-`submit_answer`
 result is replaced with a short fixed string instead, there's no real row
-data left to cap. Document size is bounded by `HISTORY_TURN_COUNT` ×
-a handful of fixed-size redaction strings, comfortably under Firestore's
-1MB document cap.
+data left to cap. Document size is kept down by compaction
+(measured at about 23 KB per stored turn, 2026-10-29, so a heavy turn is about
+28 KB) against Firestore's 1 MiB document cap.
 
 **No separate answer truncation.** Redacted tool results are now small and
 fixed-size, so there's no size pressure left for a character cap on the
@@ -406,10 +407,6 @@ final answer's text to relieve. Revisit if real turns show otherwise.
 already has the filter-context block folded into its content (see "What
 arrives in a request" above) — `messages_to_dict` captures that verbatim, so
 a parallel copy would just be the same data stored twice.
-
-**`HISTORY_TURN_COUNT` (`app/config.py`, default 5)** governs both the FIFO
-trim on write and how many turns get read back — tunable without a schema
-change.
 
 **No `question`/`answer` fields.** Both are `messages[0].content` /
 `messages[-1].content` if ever needed — `agent_telemetry` already keeps a
@@ -451,9 +448,17 @@ async def fetch_history_messages(conversation_id: str) -> list[dict]:
 def build_history_messages(history_messages: list[dict]) -> list[BaseMessage]:
     result: list[BaseMessage] = []
     for turn in history_messages:
-        result.extend(messages_from_dict(turn["messages"]))
+        sorted_messages = json.loads(json.dumps(turn["messages"], sort_keys=True))
+        result.extend(messages_from_dict(sorted_messages))
     return result
 ```
+
+**Map keys are sorted on rebuild — Firestore returns them in varying order.**
+The same stored history rendered differently each turn (a `generate_chart`
+spec's keys came back reordered), changing the prompt bytes and missing the
+prompt cache from that block onward — found and fixed live, 2026-10-26.
+`rebuild_paused_messages` (the approval resume) doesn't need it: those
+messages sit after the last cache breakpoint.
 
 **The result seeds `AgentState.history_messages`, a separate field from
 `messages`** — call it once, before `graph.astream(...)`, and pass it in as
@@ -572,7 +577,7 @@ live. Why, and the upgrade path: component reference §9.2a.
 **Cancel is a signal, not stored state.** An `asyncio.Task` is running code in
 one process's memory — there's nothing JSON-shaped to persist. So
 `POST /ask/cancel` writes `cancel_requested: true`, read by `is_cancelled`
-(`app/orchestrator/shared_helpers.py`).
+(`app/shared_helpers.py`).
 
 **The check isn't in this file's `astream` loop — an earlier design put it
 there, but that risked abandoning `consume_graph` mid-node with an
@@ -647,13 +652,26 @@ Power Apps polls the status route about once a second while `POST /ask` is pendi
 is the final state. `updates` chunks carry `{node: returned_update}` for the node that
 just finished, so each status describes a step that already happened.
 
+**Compaction runs first, in `run_agent_turn`, before `consume_graph`**
+(`docs/conversation-memory.md`). On a normal (non-resume) turn, when
+`measure_history_size` shows the stored history over
+`COMPACTION_HISTORY_TOKEN_THRESHOLD` estimated tokens or
+`COMPACTION_HISTORY_MAX_BYTES` stored bytes, the gateway sets the status to
+`"Compacting..."` and awaits `compact_history_pipeline`. A compaction that
+produced a summary is saved immediately — the new history and the
+`turn_range_summaries` row in one `asyncio.gather` — before the answer starts, so
+a later timeout can't lose it. The compacted history then seeds the turn and its
+telemetry fields (`compacted`, `compaction_failed`, the two token counts) go on
+the initial state. `consume_graph`'s first write replaces the status with
+`"Thinking..."`.
+
 **`consume_graph(initial_state)` writes the status**, in `app/gateway/gateway.py`:
 - **Start:** creates `live_turns/{conversation_id}` with `status: "Thinking..."` and `thinking_log: []`.
 - **`agent`:** `"Thought"`. Any thinking text in the reply is appended to `thinking_log`
   as `{seq, text}` via `ArrayUnion`. `seq` is a per-turn counter, so the front end can
   show only entries it hasn't seen. Adaptive thinking means some rounds have none.
 - **`call_tool`:** `call_tool_status(names)`, from the tools the batch dispatched.
-  `submit_answer` is ignored. A chart in the batch gives `"Prepared the chart"`, a combine
+  `submit_answer` is ignored. A chart in the batch (`generate_chart` or `generate_beeswarm` -- `CHART_TOOLS`, `app/config.py`) gives `"Prepared the chart"`, a combine
   gives `"Combined results"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
   `app/config.py`) distinct sources, such as `"Gathered results from BigQuery, project
   documentation, and semantic model"`, or `"Gathered results from {n} sources"` above that.
@@ -723,8 +741,11 @@ own `finally` block unconditionally replaces or deletes the whole document
 by the time this turn ends regardless, so a stale `pending_approval` sitting
 there in the meantime is inert.
 
-**The whole stream runs inside `asyncio.wait_for(consume_graph(...), GATEWAY_TURN_TIMEOUT_SECONDS)`.**
-On timeout or error, `POST /ask` returns a plain `AgentResponse`, not an HTTP error.
+**`post_ask` wraps `run_agent_turn` (compaction and the whole stream) in one
+`asyncio.timeout(GATEWAY_TURN_TIMEOUT_SECONDS)`.** The graph gets whatever compaction
+left. `run_agent_turn` raises on timeout or error; on either, `post_ask` deletes
+the `live_turns` document (so a timeout during compaction leaves no stale status)
+and returns a plain `AgentResponse`, not an HTTP error.
 
 **`GET /ask/status/{conversation_id}`** validates the key and token, checks ownership
 with `assert_owns_conversation`, and returns `{status, thinking_log}` from

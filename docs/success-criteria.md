@@ -177,7 +177,7 @@ A phase isn't done because the code runs — it's done when the guarantee holds.
 
 *Remaining tools — docs, page info, code*
 - [ ] A code question (*"how does the chunking script work?"*) resolves via
-      `list_repo_files` → `read_repo_file`, not a vector search. Check the
+      `get_repo_contents`, not a vector search. Check the
       tool_calls in telemetry, don't assume from the answer.
 - [ ] A *"what does page X show"* question routes to
       `get_page_info`, not `search_docs` — and asking about the *other*

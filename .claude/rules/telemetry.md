@@ -26,7 +26,7 @@ tool_calls = [
      "args": json.dumps({"query": "model evaluation methodology", "top_k": 5}),
      "query_text": "model evaluation methodology",  # the search string, not SQL/DAX
      "result": json.dumps(chunks), "success": True, "error": None},
-    {"name": "list_repo_files", "started_at": t5, "completed_at": t6,
+    {"name": "get_repo_contents", "started_at": t5, "completed_at": t6,
      "args": json.dumps({}), "query_text": None,    # no meaningful query
      "result": json.dumps(paths), "success": True, "error": None},
 ]
@@ -124,6 +124,7 @@ drift apart. Re-run `create_table.py` after any schema change (BigQuery can't
 | `chart_urls` | No — empty | Phase 3 (`generate_chart`) — every successful chart URL this turn, not just one |
 | `suggested_follow_ups` | No — empty | Phase 3 item 6, via `submit_answer` (`.claude/rules/orchestrator.md`) — moved up from its original Phase 4 slot |
 | `clarifying_question` | No — NULL | Clarifying-question feature (`.claude/rules/orchestrator.md`) -- the question asked instead of answering. The writer maps an empty string to NULL, so answer turns stay NULL; on question turns `answer_markdown` holds the same text |
+| `compacted`, `compaction_failed`, `compaction_prompt_tokens`, `compaction_completion_tokens` | Nullable (added to the live table with `ALTER TABLE`); the writer always sends `False`/`0` when no compaction ran | History compaction, run by the gateway before the graph (`docs/conversation-memory.md`) -- `compacted` is whether the stored history was shrunk, `compaction_failed` whether it was attempted and errored (logged, history left as it was), and the two token counts are the summarizing model's own usage. Set on the initial state, written by `finalize`; a resumed approval turn never compacts, so it carries the defaults |
 | `all_prose_numeric_claims` | No — empty | Phase 3 item 6, via `submit_answer` — the model's declared prose claims, promoted to a top-level `REPEATED FLOAT` column for the same reason as `query_text`: direct queryability, no `JSON_VALUE(args, ...)` needed on the `submit_answer` entry in `tool_calls` |
 | `is_projection` | **Not a field yet** | Added *with* the Phase 7 `run_projection` tool, not before |
 | `prompt_tokens`, `completion_tokens`, `llm_calls` | No — 0 | Accumulated in `AgentState` across every LLM call. **Instrument, don't gate**: `max_iterations` and the retry caps already bound LLM spend, and there's no unbounded-tail case like a table scan. Also the signal for prompt bloat — rising prompt tokens means static context grew or cache hits dropped |

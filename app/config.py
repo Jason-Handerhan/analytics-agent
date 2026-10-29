@@ -6,7 +6,7 @@ from google.cloud import secretmanager
 GCP_PROJECT_ID = "instacart-ml-model"
 GCS_CHART_BUCKET = "instacart-ml-model-charts"
 AGENT_SA_EMAIL = "agent-sa@instacart-ml-model.iam.gserviceaccount.com"
-CHART_URL_EXPIRATION_HOURS = 1.0
+CHART_URL_EXPIRATION_HOURS = 168
 
 # Repo-relative paths
 CONTEXT_DIR = pathlib.Path(__file__).resolve().parent.parent / "context"
@@ -31,6 +31,26 @@ POWER_BI_WORKSPACE_ID = "8e20abd3-703e-46b8-9832-950249767864"
 
 # agent_safe (the only dataset agent-sa can read)
 AGENT_SAFE_DATASET = "agent_safe"
+PREDICTION_EXPLANATIONS_TABLE = "prediction_explanations"
+
+# Raw feature column -> the label the Power BI dashboard uses.
+SHAP_FEATURE_DISPLAY_NAMES = {
+    "user_prod_avg_days_between_purchases": "Avg Days Between Product Purchases",
+    "user_product_consecutive_order_skips": "Consecutive Product Order Skips",
+    "label_user_product_days_since_last_purchased": "Days Since Last Purchase",
+    "user_product_reorder_concentration": "Product Reorder Concentration",
+    "user_product_purchase_concentration": "Product Purchase Concentration",
+    "user_reorder_ratio": "User Reorder Rate",
+    "user_deptartment_share": "Department Share of Order History",
+    "user_product_nearing_reorder_ratio": "Nearing Reorder Threshold Ratio",
+    "user_product_avg_cart_position": "Avg Cart Position",
+    "user_product_order_penetration_ratio": "Product Order Penetration Rate",
+    "user_product_cumulative_purchases": "Cumulative Product Purchases",
+    "user_product_last3order_streak": "Last 3 Orders Purchase Streak",
+    "user_distinct_product_count": "Distinct Product Count",
+    "user_product_cart_position_last_order": "Last Order Cart Position",
+    "user_aisle_share": "Aisle Share of Order History",
+}
 
 # agent_telemetry
 TELEMETRY_DATASET = "telemetry"
@@ -38,10 +58,13 @@ TELEMETRY_TABLE = "agent_telemetry"
 
 # agent_chat_history -- restorable past conversations, not analytics
 CHAT_HISTORY_DATASET = "agent_chat_history"
-CHAT_HISTORY_TABLE = "turns"
+CHAT_HISTORY_TABLE = "turns" # chat history for front end
 DELETED_CONVERSATIONS_TABLE = "deleted_conversations"  # soft-delete marker rows,
                                                         # same dataset as CHAT_HISTORY_TABLE
-CONVERSATION_LIST_LIMIT = 50   # GET /conversations -- most recent N
+
+CONVERSATION_FINDINGS_TABLE = "conversation_findings"  # uses chat_history_dataset -- verified-turn history for agent retrieval
+TURN_RANGE_SUMMARIES_TABLE = "turn_range_summaries"  # same dataset -- one summary per compaction, over a range of turns
+CONVERSATION_LIST_LIMIT = 50  # GET /conversations -- most recent N
 CONVERSATION_TITLE_MAX_CHARS = 60  # truncation length for a conversation's title
 
 # Both telemetry and chat-history writes go through this identity, reached
@@ -64,8 +87,14 @@ GITHUB_REPO_BRANCH = "main"
 MAX_REPO_FILE_CONTENT_CHARS = 300_000  # final cap on returned text, after any stripping
 
 # Conversation history
-HISTORY_TURN_COUNT = 3    # sessions.history_messages FIFO length
 SESSIONS_TTL_DAYS = 30    # sessions documents auto-delete this many days after last activity
+MEMORY_RECALL_TOKEN_BUDGET = 20_000    # max approx tokens one get_conversation_findings call returns; placeholder, tune
+
+# Compaction
+COMPACTION_HISTORY_TOKEN_THRESHOLD = 32_000    # estimated history tokens (chars // 4) that trigger it; low for testing, raise later
+COMPACTION_HISTORY_MAX_BYTES = 600_000    # stored-history bytes that trigger it; low for testing
+COMPACTION_KEEP_TURNS = 2    # newest stored turns left verbatim; everything older is folded (3 for prod--> set to to two for testing)
+COMPACTION_MODEL = "claude-haiku-5-5"    # not in AVAILABLE_MODELS -- the user never picks it
 
 # Live status
 STATUS_MAX_NAMED_SOURCES = 3    # call_tool status names up to this many sources, then a count
@@ -74,6 +103,12 @@ STATUS_MAX_NAMED_SOURCES = 3    # call_tool status names up to this many sources
 
 # Tools whose numbers verify_node checks against -- queries, plus combine_results
 NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
+
+# Tools whose results carry verified_numbers from earlier turns -- only that field feeds the pool
+MEMORY_SOURCE_TOOLS = {"get_conversation_findings"}
+
+# Tools whose results carry a chart_url
+CHART_TOOLS = {"generate_chart", "generate_beeswarm"}
 
 MAX_ANSWER_CHARS = 7000
 MAX_ANSWER_TABLE_ROWS = 25  # cap on any single markdown table in an answer -- a display limit, not a fetch limit

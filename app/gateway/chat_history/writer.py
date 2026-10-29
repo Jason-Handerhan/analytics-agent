@@ -9,7 +9,7 @@ from app.config import (
     GCP_PROJECT_ID,
 )
 from app.gateway.chat_history.schema import CHAT_HISTORY_SCHEMA, DELETED_CONVERSATIONS_SCHEMA
-from app.orchestrator.shared_helpers import get_turn_writer_client
+from app.shared_helpers import get_turn_writer_client
 
 
 def build_turn_row(

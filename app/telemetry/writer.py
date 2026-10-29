@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 
 from app.config import GCP_PROJECT_ID, TELEMETRY_DATASET, TELEMETRY_TABLE
-from app.orchestrator.shared_helpers import get_turn_writer_client
+from app.shared_helpers import get_turn_writer_client
 from app.telemetry.schema import SCHEMA
 
 
@@ -69,6 +69,10 @@ def build_telemetry_row(
     suggested_follow_ups: list[str],
     all_prose_numeric_claims: list[float],
     clarifying_question: str = "",
+    compacted: bool = False,
+    compaction_failed: bool = False,
+    compaction_prompt_tokens: int = 0,
+    compaction_completion_tokens: int = 0,
 ) -> dict:
     """Full agent_telemetry row. `pending_query` and `approval_decision` stay
     null -- nothing produces them yet (route_entry/execute_approved and the
@@ -108,6 +112,10 @@ def build_telemetry_row(
         "suggested_follow_ups": suggested_follow_ups,
         "all_prose_numeric_claims": all_prose_numeric_claims,
         "clarifying_question": clarifying_question or None,
+        "compacted": compacted,
+        "compaction_failed": compaction_failed,
+        "compaction_prompt_tokens": compaction_prompt_tokens,
+        "compaction_completion_tokens": compaction_completion_tokens,
     }
 
 

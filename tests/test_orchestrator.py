@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
@@ -57,6 +57,40 @@ def test_build_model(monkeypatch):
         orchestrator.build_model("some-model", "nonexistent")
 
 
+# Prompt-cache breakpoints
+
+def test_mark_anthropic_history_cache():
+    """Breakpoints land on the last message of the previous turn and of the newest turn, whether
+    that message's content is a string or a list; the input messages stay unmarked."""
+    def question(text):
+        return HumanMessage(content=text, additional_kwargs={"turn_start": True})
+
+    def reply(text):
+        return AIMessage(content=[{"type": "text", "text": text}])
+
+    done = ToolMessage(content="done", name="submit_answer", tool_call_id="t")
+    # Turn 2 ends on an AIMessage (list content), turns 1 and 3 on a ToolMessage (string content).
+    history = [question("q1"), reply("a1"), done, question("q2"), reply("a2"), question("q3"), reply("a3"), done]
+
+    def breakpoints(messages):
+        return [i for i, msg in enumerate(messages)
+                if isinstance(msg.content, list) and any("cache_control" in block for block in msg.content)]
+
+    marked = orchestrator.mark_anthropic_history_cache(history)
+    assert breakpoints(marked) == [4, 7]
+    assert marked[4].content == [{"type": "text", "text": "a2", "cache_control": {"type": "ephemeral"}}]
+    assert marked[7].content == [{"type": "text", "text": "done", "cache_control": {"type": "ephemeral"}}]
+    assert breakpoints(history) == [] and history[7].content == "done"
+
+    # One stored turn, or history without turn markers: only the last message is marked.
+    assert breakpoints(orchestrator.mark_anthropic_history_cache(history[:3])) == [2]
+    unmarked = [msg.model_copy(update={"additional_kwargs": {}}) for msg in history]
+    assert breakpoints(orchestrator.mark_anthropic_history_cache(unmarked)) == [7]
+    assert orchestrator.mark_anthropic_history_cache([]) == []
+    # An empty last message can't carry a breakpoint; it's skipped, not an error.
+    assert breakpoints(orchestrator.mark_anthropic_history_cache([question("q"), AIMessage(content="")])) == []
+
+
 # Guardrails
 
 def test_check_table_rows():
@@ -99,6 +133,9 @@ def test_verify_response():
         # Number in a non-query tool's result
         {"name": "read_repo_file", "success": True,
          "result": [{"content": "MAX_ROWS = 1000"}]},
+        # Recall: only verified_numbers feed the pool, not turn or approx_tokens
+        {"name": "get_conversation_findings", "success": True,
+         "result": [{"turn": 3, "approx_tokens": 812, "verified_numbers": [0.4412], "question": "Q"}]},
     ]
 
     # No submit_answer call -- empty answer_markdown
@@ -116,6 +153,22 @@ def test_verify_response():
         "tool_calls": tool_calls,
     }
     assert verify_response(good) == (True, None)
+
+    recalled = {**good, "answer_markdown": "Some answer.", "all_prose_numeric_claims": [0.4412]}
+    assert verify_response(recalled) == (True, None)
+
+    stray = {**good, "answer_markdown": "Some answer.", "all_prose_numeric_claims": [812.0, 3.0]}
+    verified, message = verify_response(stray)
+    assert verified is False
+    assert "812.0" in message and "3.0" in message
+
+    # The overview view returns a dict: it adds nothing to the pool and doesn't break it
+    overview_call = {"name": "get_conversation_findings", "success": True,
+                     "result": {"total_turns": 7, "turns": [{"turn": 1, "approx_tokens": 99}]}}
+    overview_only = {"answer_markdown": "Some answer.", "all_prose_numeric_claims": [42.0],
+                     "suggested_follow_ups": [], "tool_calls": [overview_call]}
+    verified, message = verify_response(overview_only)
+    assert verified is False and "42.0" in message
 
     # Claim with no matching pool value
     bad = {
@@ -229,10 +282,12 @@ async def test_route_after_verify(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_finalize_node_message_selection(monkeypatch):
-    """needs_approval -> pending message; verified -> real answer kept, cancelled
-    or not; unverified and cancelled -> CANCELLED_MESSAGE, never the unverified draft."""
+    """needs_approval -> pending message; verified -> real answer kept; cancelled ->
+    CANCELLED_MESSAGE, verified or not."""
     monkeypatch.setattr(orchestrator, "build_telemetry_row", lambda **kwargs: kwargs)
     monkeypatch.setattr(orchestrator, "write_telemetry_row", AsyncMock())
+    write_findings = AsyncMock()
+    monkeypatch.setattr(orchestrator, "write_findings_row", write_findings)
 
     base = {
         "conversation_id": "c1", "user_id": "u1", "model": "claude-sonnet-5",
@@ -245,16 +300,20 @@ async def test_finalize_node_message_selection(monkeypatch):
         "largest_pending_query": None, "approval_decision": None, "deferred_dax": [],
         "chart_urls": [], "suggested_follow_ups": [], "all_prose_numeric_claims": [],
         "clarifying_question": "", "answer_markdown": "The real, verified answer.", "verified": True,
+        "title": "", "topics": [], "entities": [],
+        "compacted": False, "compaction_failed": False,
+        "compaction_prompt_tokens": 0, "compaction_completion_tokens": 0,
     }
 
     monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
     update = await finalize_node(base)
     assert update["answer_markdown"] == "The real, verified answer."
     assert update["cancelled"] is False
+    write_findings.assert_awaited_once()
 
     monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=True))
     cancelled_but_verified = await finalize_node(base)
-    assert cancelled_but_verified["answer_markdown"] == "The real, verified answer."
+    assert cancelled_but_verified["answer_markdown"] == orchestrator.CANCELLED_MESSAGE
     assert cancelled_but_verified["cancelled"] is True
 
     # The bug this guards against: a cancel landing right after submit_answer,
@@ -265,12 +324,15 @@ async def test_finalize_node_message_selection(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
     pending = await finalize_node({
-        **base, "needs_approval": True,
+        **base, "verified": False, "needs_approval": True,
         "estimated_cost": "$1.25", "largest_pending_query": "SELECT * FROM big_table",
     })
     assert pending["answer_markdown"].startswith(orchestrator.PENDING_APPROVAL_MESSAGE)
     assert "$1.25" in pending["answer_markdown"]
     assert "```sql\nSELECT * FROM big_table\n```" in pending["answer_markdown"]
+
+    # Only the first, verified and uncancelled turn wrote a findings row.
+    write_findings.assert_awaited_once()
 
 
 # Iteration cap guardrail

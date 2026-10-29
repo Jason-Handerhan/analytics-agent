@@ -1,8 +1,7 @@
 # Code Search — agentic, not vector
 
-How `list_repo_files` and `read_repo_file` work, and why code search doesn't
-use the vector index `search_docs` uses. Read before building either
-tool.
+How `get_repo_contents` works, and why code search doesn't use the vector
+index `search_docs` uses. Read before touching it.
 
 ## Why not vector search
 
@@ -21,7 +20,7 @@ a small, stable codebase — see "Known gap" below.
 relevance signal there. The semantic model isn't searched at all: it's small
 enough to sit in static context (`.claude/rules/gateway.md`).
 
-## The two tools
+## The tool
 
 ```python
 # file_descriptions is an injected arg (hand-written, this repo), not a
@@ -32,23 +31,34 @@ file_descriptions = {
     "utils/metrics.py":   "Evaluation metrics: precision, recall, F1, AUC",
 }
 
-def list_repo_files(file_descriptions: dict[str, str]) -> list[dict]:
-    """One Trees API call. Filters to described paths only, when any are
-    known -- unfiltered otherwise, so a deployer with no descriptions yet
-    still gets a usable listing instead of an empty one."""
-    paths = _github_tree()                 # GET /repos/{o}/{r}/git/trees/{sha}?recursive=1
-    if file_descriptions:
-        paths = [p for p in paths if p in file_descriptions]
-    return [{"path": p, "description": file_descriptions.get(p)} for p in paths]
-
-def read_repo_file(path: str) -> str:
-    """One Contents API call."""
-    return _github_contents(path)          # GET /repos/{o}/{r}/contents/{path}
+def get_repo_contents(path: str | None, file_descriptions: dict[str, str]) -> dict:
+    """Always a dict -- "type" says which shape came back."""
+    if not path:                           # whole repo: one Trees API call
+        paths = _github_tree()             # GET /repos/{o}/{r}/git/trees/{sha}?recursive=1
+        if file_descriptions:              # described paths only, when any are known --
+            paths = [p for p in paths if p in file_descriptions]   # unfiltered otherwise, so a
+        return {"type": "files",           # deployer with none yet still gets a usable listing
+                "entries": [{"path": p, "description": file_descriptions.get(p)} for p in paths]}
+    data = _github_contents(path)          # GET /repos/{o}/{r}/contents/{path}
+    if isinstance(data, list):             # a folder: its immediate contents, one level
+        return {"type": "files",
+                "entries": [{"path": e["path"], "description": file_descriptions.get(e["path"])} for e in data]}
+    return {"type": "file", "path": path, "content": _decode(data)}   # a file's text
 ```
 
-**Two tools, not one.** A single tool with a mode switch and conditionally
-required args is harder for the model to call correctly than two unambiguous
-ones.
+**One tool, not two (2026-10-02/03).** This was designed as a
+`list_repo_files`/`read_repo_file` pair, on the theory that a mode switch is
+harder for a model to call than two unambiguous tools. Dropped once built:
+GitHub's Contents API already returns either a list or a file from the same
+endpoint, so one tool with a single optional `path` covers both — no mode
+switch, no conditionally required args.
+
+**Reads are bounded.** A file over GitHub's 1MB inline limit comes back with no
+content, so notebooks are refetched via `download_url` and stripped of outputs,
+execution counts, and attachments (`nbformat`) — a real 3.6MB notebook became
+63KB, and unstripped it overflowed the model's context window. Anything over
+`MAX_REPO_FILE_CONTENT_CHARS` (300,000 characters) after that fails with an
+actionable error.
 
 **Domain-agnostic by design.** Splitting by domain matters for vector search
 specifically, to avoid wasting half a search on the wrong corpus — the agent
@@ -72,7 +82,7 @@ token is for the rate limit, not access.
 
 ## Descriptions live in the tool, not static context
 
-Descriptions are returned by `list_repo_files`, **not** added to the
+Descriptions are returned by `get_repo_contents`, **not** added to the
 always-injected orientation bundle. Static context is paid on *every* turn,
 including DAX and BigQuery questions that never touch code. Returning it from
 the tool means only code-exploration turns pay for it — same conditional-cost

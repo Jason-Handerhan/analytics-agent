@@ -11,7 +11,7 @@ Every `render()`: start with `self._setup()`, end with `self._finish(fig, ax)`.
 That keeps styling consistent without each class reimplementing it.
 
 ```python
-# app/mcp_server/chart_tool.py
+# app/shared_chart.py
 from abc import ABC, abstractmethod
 from typing import Literal, Union, Annotated
 import matplotlib
@@ -52,6 +52,9 @@ MAX_LINE_HUE_GROUPS        = 8
 MAX_HISTOGRAM_BUCKETS      = 50
 MAX_BOX_CATEGORIES         = 30
 MAX_HEATMAP_AXIS           = 30
+MAX_WATERFALL_STEPS        = 20   # a full 15-feature SHAP waterfall is 17 rows, totals included
+WATERFALL_ZOOM_TRIGGER     = 0.3  # zoom when step span / |baseline| is below this
+WATERFALL_ZOOM_TARGET      = 0.5  # step span / visible |baseline| after zooming
 
 class ChartSpecBase(BaseModel, ABC):
     # source_tool_call_id is NOT here. It's on the model-facing schema only
@@ -409,7 +412,8 @@ Build `bar`, `line`, and `concentration` first — they cover the most likely
 questions. Add the rest as real questions call for them. No new dependencies:
 all are stock seaborn/matplotlib.
 
-**All ten are written out in full.** Four of them aren't inferable from the
+**Ten of the eleven are written out in full below; `waterfall` follows them,
+documented by its decisions.** Four of the ten aren't inferable from the
 others: `histogram` uses `ax.bar` on already-binned data (`sns.histplot` would
 re-bin the bucket edges), `box` uses `ax.bxp` whose input dict keys are
 matplotlib's contract rather than ours, `heatmap` pivots to wide form first,
@@ -420,8 +424,8 @@ matplotlib has no native stacked-barh.
 destroys the chart's meaning, and raw points blow the 1,000-row cap. Neither
 is needed: correlation at category grain reads fine as `bar`, and mean
 absolute SHAP is one number per feature — `horizontal_bar` over a DAX result.
-A real beeswarm would need its own tool that queries BigQuery and returns only
-a URL, since the cap protects the prompt, not matplotlib.
+A real beeswarm has its own tool, `generate_beeswarm` (below), that queries
+BigQuery itself, since the cap protects the prompt, not matplotlib.
 
 **`histogram` and `box` take pre-computed statistics, not raw rows** — the cap
 would otherwise truncate a distribution to an arbitrary slice and draw a
@@ -939,6 +943,116 @@ class ParetoChartSpec(ChartSpecBase):
         return self._finish(fig, ax1)
 ```
 
+## `waterfall` — floating bars, one row per step (the eleventh type)
+
+Not written out in full; `WaterfallChartSpec` in `shared_chart.py` is the
+reference. The decisions:
+
+- **Data contract:** one row per step, in step order — drawn left to right as
+  given, never sorted here. `value_field` is the signed delta for a step, and
+  the signed running total for an `is_total` row (a boolean column), drawn in
+  full from zero. Computing the base and final rows is the query's job. Max
+  `MAX_WATERFALL_STEPS` (20) rows, `is_total` rows included.
+- **Geometry:** a step floats from the running total to running total + value,
+  colored by sign; an `is_total` row resets the running total to its value.
+  Labels show the signed delta, not the bar's own (always-positive) height.
+- **A total bar hangs from zero.** With a negative total (a log-odds base of
+  −3, say) the first step starts at that bar's far end, not its top — correct,
+  but easy to misread.
+- **Y-zoom:** when the steps' combined span is under `WATERFALL_ZOOM_TRIGGER`
+  of the largest total, the baseline-side limit moves so the span fills
+  `WATERFALL_ZOOM_TARGET` of the visible range — the bottom limit for a
+  positive baseline, the top for a negative one. The data decides; no
+  model-supplied flag.
+- **Ticks** are pinned to the visible range and labeled with enough decimals
+  that adjacent ticks can't repeat (`_format_value`'s `step`).
+- **Axis margin:** step bars' sticky y edges are cleared, otherwise matplotlib
+  pins the limit to a floating bar's bottom and a running total below zero
+  ends flush against the axis.
+- **Value labels are width-aware, so a dense chart can lose all of them** — at
+  17 bars with four-significant-digit values every label is wider than its
+  bar. Accepted: the numbers are in the answer's table. A collision-aware
+  version (keep the largest labels, drop overlaps) was considered, not built.
+- **The SHAP use case** (`prediction_explanations`, `docs/data-pipeline.md`):
+  `BIGQUERY_FEW_SHOT_EXAMPLES` has the query shape — one UNPIVOT query
+  returning the base row, steps ordered by absolute contribution, and the
+  final row computed in SQL.
+
+## `generate_beeswarm` — a separate, local tool (2026-10-24)
+
+Not a `generate_chart` spec type: a beeswarm needs tens of thousands of raw
+rows, far past the 1,000-row cap `generate_chart`'s `data` must fit under, so the tool
+fetches its own data. It lives in `app/orchestrator/tools.py`, not on the MCP
+server (`.claude/rules/tools.md`). The model supplies two enums, `split` and
+`model`, a `title`, and optionally lists of exact names (`departments`,
+`aisles`, `product_names`) to narrow the plot to a slice.
+
+- **Data:** two fixed queries against `agent_safe.prediction_explanations` — a
+  deterministic sample (`ORDER BY FARM_FINGERPRINT(...) LIMIT 30000`, so the same
+  inputs always plot the same rows) and the mean absolute SHAP per feature over
+  *every* row. **The sample comes back packed: one comma-separated string per row,
+  5 significant digits, parsed with one `read_csv`.** Measured (2026-10-24), the
+  REST download time follows bytes, not cells: BigQuery's per-cell JSON was 49 MB
+  and took 18 seconds, the packed rows 6.5 MB and 5.6 seconds, same plot. The
+  alternative, the Storage Read API, needs two new packages and a role for `agent-sa`. Features are ordered by that full-data importance, so the order
+  matches the dashboard's bar chart; only the points are sampled. For scale,
+  Power BI's beeswarm table holds 600 points per feature.
+- **Slices (2026-10-24):** optional lists, matched case-insensitively and always
+  sent as array parameters, so an empty list means "no filter" and the SQL never
+  changes shape (`LOWER(department) IN UNNEST(@departments)`). Any-of within a
+  list, AND across lists. Features are ranked by mean |SHAP| *within* the slice;
+  unfiltered keeps the global order. Both queries are submitted together, and
+  before the sample downloads the tool checks that every requested name matched a
+  real value (the importance query returns the matched names, which a pydantic
+  validator can't do: it runs before any data is read) and that the slice has at
+  least `BEESWARM_MIN_ROWS` (300) rows. 200 rows still reads well as a picture,
+  but mean |SHAP| rankings carry roughly ±7% noise there, and rows aren't
+  independent (the same user can appear under several anchor orders), which hits
+  a single product hardest.
+- **The agent writes the `title`**, as with `generate_chart`, so a multi-name slice
+  never needs a generated label; the tool appends only `n = 4,812 predictions`
+  beneath it. To quote that count, the docstring tells the agent to run
+  `SELECT LEAST(COUNT(*), 30000)` over the same split, model, and filters (the
+  number is filled in from `BEESWARM_SAMPLE_ROWS`). A live `run_bigquery_sql` result
+  backs it, so the verification contract is unchanged.
+- **No BigQuery guardrails:** the query shape is fixed and every value that reaches
+  it (two enums, optional name lists) is a parameter, so it skips the dry-run, approval, cumulative cap, row cap and cancel watcher
+  that `run_bigquery_sql` needs. Its bytes aren't counted in `bytes_consumed`.
+- **Render:** `shap.plots.beeswarm(..., ax=ax, plot_size=None)` onto a bare
+  `matplotlib.figure.Figure`, so concurrent renders share no pyplot state.
+  `shap` is imported at module load, not on first call. Rasterizing and saving
+  30,000 rows took about 2 seconds on real data locally, and the plot already looks
+  full at that density. End to end on Cloud Run, through the real app, "Prepared the
+  chart" took 13.2 seconds (it was over 60 before the packed fetch).
+- **Missing values:** the ML pipeline `COALESCE`s three features to 999 when
+  they're undefined (`NULL_FILLED_FEATURES`). Those become NaN so `shap` draws
+  them gray, noted in the subtitle; left as 999 they clip to the top color and wash out
+  the gradient for the whole feature. The replacement is `== 999` on those three
+  features only: real values can exceed 999 (days since last purchase), so a `>=`
+  or an all-feature rule would gray real data. True NULLs already arrive as NaN.
+- **Labels:** `SHAP_FEATURE_DISPLAY_NAMES` in `app/config.py`, the dashboard's
+  names. The waterfall few-shot's UNPIVOT aliases are generated from the same
+  dict, so the two charts and the dashboard name features identically.
+- **The image goes back to the model.** Every other chart is built from data the
+  agent already holds, so it knows what the picture shows; here it plots rows
+  the agent never sees. The tool returns two content blocks — a text block
+  `{"chart_url": ...}` and an `image_url` data URI, the shape `get_page_info`
+  uses. `_unwrap_content` reads the first block, so the tool record, the
+  `chart_urls` collection and telemetry are unchanged; history redaction drops the
+  image like any other tool result. `render_and_upload` returns `(url, png)` for
+  this, and `generate_chart` discards the bytes. The docstring says the plot isn't
+  a number source.
+- **Wiring:** `CHART_TOOLS` in `app/config.py` (the chart-URL collection and the
+  gateway's "Prepared the chart" status), `SOURCE_LABELS`, dispatch through
+  `inject_chart_args`, and `submit_answer`'s chart-URL wording.
+- **Testing:** `test_render_beeswarm` renders a dummy frame in which each
+  feature's SHAP values sit around its own index, then asserts per row that all
+  points are present, the label matches its data, and the gray count is exact.
+  The fetch and upload are Layer 2.
+- **Open:** models read color direction from a picture less reliably than a
+  ranking. If descriptions get direction wrong, add a short deterministic text
+  block (feature order and per-feature direction) beside the image.
+
 ## Discriminated union — makes the LLM's choice type-safe
 
 **No shared `ChartSpec` name — the union is written inline at each field that
@@ -1004,14 +1118,14 @@ elsewhere.
 `run_bigquery_sql`'s `conversation_id`, just inverted (`.claude/rules/tools.md`).**
 `generate_chart` is MCP-hosted with a fully generic, shareable contract: it
 takes `data` directly, and has no idea a "tool call" or a conversation even
-exists — `GenerateChartArgs` lives in `app/mcp_server/chart_tool.py`, next to
-the ten spec classes it validates against. The model never sees `data` — it
+exists — `GenerateChartArgs` lives in `app/shared_chart.py`, next to
+the spec classes it validates against. The model never sees `data` — it
 sees `source_tool_call_id` instead, so it never re-transcribes rows through
 the context window (token cost, and a paraphrased number would break the
 verification contract). **`GenerateChartToolCallArgs` is never touched by the
 MCP server at all** — it exists purely for this project's own bind-time
 substitution trick (below), so it lives in `app/orchestrator/tools.py`
-alongside `SubmitAnswerArgs`, not in `chart_tool.py` (2026-09-27 reusability
+alongside `SubmitAnswerArgs`, not in `shared_chart.py` (2026-09-27 reusability
 discussion, same "MCP hosting means built for reuse beyond this project" rule
 as `.claude/rules/tools.md`'s hosting table). `dispatch_tool` is the only
 thing that ever sees both shapes, and it's what translates one into the other.
@@ -1066,16 +1180,15 @@ description at all — backwards, since this whole model exists to be read by
 the LLM deciding how to call the tool. That kind of explanation belongs in
 this doc's surrounding prose, never inside the schema text itself.
 
-**One accepted wrinkle from the split: `app/orchestrator/tools.py` imports
-`GenerateChartArgs` directly from `app.mcp_server.chart_tool`** (not the ten
-spec classes individually — `create_model` only needs the one field). Fine
-today since both are co-located in one process; if the MCP server ever moves
-to its own Cloud Run service (`.claude/rules/tools.md` flags this as a
-possible future move), this import breaks and `GenerateChartToolCallArgs`
-needs `spec`'s type re-exposed some other way. Not solving that now.
+**The wrinkle from the split is resolved (2026-10-24): the spec classes and
+`GenerateChartArgs` live in `app/shared_chart.py`, which both
+`app/orchestrator/tools.py` and `chart_tool.py` import** (the orchestrator only
+needs the one `spec` field, via `create_model`). The orchestrator no longer
+imports anything from `app.mcp_server`, so the MCP server can move to its own
+container with `shared_chart.py` copied into both images.
 
 ```python
-# app/mcp_server/chart_tool.py -- the REAL MCP tool's args. Never a
+# app/shared_chart.py -- the REAL MCP tool's args. Never a
 # tool_call_id, never conversation state. Usable by any caller with its own
 # data, this project's orchestrator included.
 class GenerateChartArgs(BaseModel):
@@ -1130,9 +1243,10 @@ def generate_chart(
         raise ToolError(
             f"Field(s) {missing} not in source data. Available: {list(df.columns)}")
     fig = args.spec.render(df)
-    return ChartResult(chart_url=render_and_upload(
+    chart_url, _ = render_and_upload(
         fig, bucket_name, storage_backend, expiration_hours,
-        access_token, service_account_email))
+        access_token, service_account_email)
+    return ChartResult(chart_url=chart_url)
 ```
 
 **Resolved (2026-09-27), not "confirm at build time" anymore.** Confirmed
@@ -1275,7 +1389,7 @@ import datetime
 
 def render_and_upload(fig: plt.Figure, bucket_name: str, storage_backend: str,
                        expiration_hours: float, access_token: str,
-                       service_account_email: str) -> str:
+                       service_account_email: str) -> tuple[str, bytes]:
     if storage_backend != "gcs":
         raise ToolError(
             f"Unsupported storage_backend '{storage_backend}'. Only 'gcs' is implemented.")
@@ -1286,14 +1400,18 @@ def render_and_upload(fig: plt.Figure, bucket_name: str, storage_backend: str,
     storage_client = storage.Client(credentials=Credentials(token=access_token))
     blob = storage_client.bucket(bucket_name).blob(f"charts/{uuid.uuid4()}.png")
     blob.upload_from_file(buf, content_type="image/png")
-    return blob.generate_signed_url(
+    url = blob.generate_signed_url(
         version="v4",
         expiration=datetime.timedelta(hours=expiration_hours),
         method="GET",
         service_account_email=service_account_email,
         access_token=access_token,
     )
+    return url, buf.getvalue()
 ```
+
+Returns the PNG bytes too: `generate_beeswarm` embeds them as the image it hands back
+to the model, and `generate_chart` discards them.
 
 **Resolved (2026-09-27), not "confirm at build time" anymore.** Read
 `generate_signed_url_v4`'s actual installed source rather than assuming:

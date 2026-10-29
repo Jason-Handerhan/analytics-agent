@@ -104,6 +104,12 @@ class AgentState(TypedDict):
     iteration_cap_hit: bool
     answer_submitted: bool  # True only when submit_answer was the sole tool
 
+    # Compaction -- set by the gateway before the graph runs, recorded by finalize
+    compacted: bool
+    compaction_failed: bool
+    compaction_prompt_tokens: int
+    compaction_completion_tokens: int
+
     # Building toward AgentResponse
     answer_markdown: str
     clarifying_question: str  # "" unless the turn ended on a clarifying question
@@ -111,3 +117,6 @@ class AgentState(TypedDict):
     sources: list[str]
     all_prose_numeric_claims: list[float]  # llm provided numeric claims in prose
     suggested_follow_ups: list[str]
+    title: str  # tags from submit_answer; "" / [] when the model left them out
+    topics: list[str]
+    entities: list[str]

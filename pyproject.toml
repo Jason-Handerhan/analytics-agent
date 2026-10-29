@@ -30,6 +30,7 @@ dependencies = [
     "pysbd>=0.3.4",
     "requests>=2.34.2",
     "seaborn>=0.13.2",
+    "shap>=0.54.1",
     "unstructured[md]>=0.27.5",
     "uvicorn[standard]>=0.52.4",
 ]
@@ -53,7 +54,6 @@ dev = [
     "plotly>=7.1.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "scikit-learn>=1.9.1",
 ]
 
 [tool.pytest.ini_options]

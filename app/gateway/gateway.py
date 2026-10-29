@@ -12,6 +12,9 @@ from google.cloud import firestore
 
 from app.config import (
     AVAILABLE_MODELS,
+    CHART_TOOLS,
+    COMPACTION_HISTORY_MAX_BYTES,
+    COMPACTION_HISTORY_TOKEN_THRESHOLD,
     EXPECTED_AUDIENCE,
     GATEWAY_TURN_TIMEOUT_SECONDS,
     GCP_PROJECT_ID,
@@ -48,8 +51,10 @@ from app.gateway.models import (
     DeleteConversationResponse,
     StatusResponse,
 )
+from app.orchestrator.compaction import CompactionResult, compact_history_pipeline, measure_history_size
+from app.orchestrator.conversation_memory.writer import write_summary_row
 from app.orchestrator.orchestrator import graph, init_orchestrator
-from app.orchestrator.shared_helpers import get_firestore_client, live_turn_doc
+from app.shared_helpers import get_firestore_client, live_turn_doc
 from app.orchestrator.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -151,8 +156,8 @@ SOURCE_NAMES = {
     "search_docs": "project documentation",
     "get_page_info": "dashboard page info",
     "get_measure_dax": "measure definitions",
-    "list_repo_files": "code repository",
-    "read_repo_file": "code repository",
+    "get_repo_contents": "code repository",
+    "get_conversation_findings": "memory",
 }
 
 STATUS_BY_NODE = {
@@ -173,7 +178,7 @@ def join_names(names: list[str]) -> str:
 def call_tool_status(tool_names: list[str]) -> str | None:
     """Status for one call_tool batch -- chart and combine take priority, then
     named sources up to STATUS_MAX_NAMED_SOURCES, then a count."""
-    if "generate_chart" in tool_names:
+    if any(name in CHART_TOOLS for name in tool_names):
         return "Prepared the chart"
     if "combine_results" in tool_names:
         return "Combined results"
@@ -325,8 +330,8 @@ async def consume_graph(initial_state: AgentState) -> AgentState:
 
 
 async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
-    """Runs one turn through the graph; falls back to a plain AgentResponse
-    on timeout or error."""
+    """Runs one turn: compaction when the history needs it, then the graph. Raises on timeout
+    or error; post_ask turns those into a plain AgentResponse."""
     await init_orchestrator()
 
     # Handle Live Turns doc first if this is an approval resume to ensure
@@ -348,10 +353,25 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             return AgentResponse(answer_markdown=REJECTED_MESSAGE,
                                   answer_html=render_answer_html(REJECTED_MESSAGE), sources=[])
 
-        # Approval Workflow: set status to thinking (mitigate "Needs your approval" status display)
+        # Approval Workflow: set status to thinking (mitigate "Approval Workflow" status display)
         await live_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
 
+    # Fetch History messages and compact if needed
     history_messages = await fetch_history_messages(body.conversation_id)
+
+    compaction = CompactionResult(stored_history=history_messages)
+    estimated_tokens, stored_bytes = measure_history_size(history_messages)
+    if body.approval_decision is None and (
+            estimated_tokens > COMPACTION_HISTORY_TOKEN_THRESHOLD
+            or stored_bytes > COMPACTION_HISTORY_MAX_BYTES):
+        await live_turn_doc(body.conversation_id).set(
+            {"status": "Compacting...", "thinking_log": []}, merge=True)
+        compaction = await compact_history_pipeline(body.conversation_id, user_id, history_messages)
+        if compaction.compacted:
+            await asyncio.gather(
+                write_history_messages(body.conversation_id, compaction.stored_history),
+                write_summary_row(compaction.summary_row))
+        history_messages = compaction.stored_history
 
     # Build initial state for approved resume
     if body.approval_decision == "approved":
@@ -388,22 +408,14 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             history_messages=build_history_messages(history_messages),
         )
 
-    #Run the Graph with a timeout, returning a generic error message on any exception
-    try:
-        final_state = await asyncio.wait_for(consume_graph(initial_state), timeout=GATEWAY_TURN_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        logger.warning("Turn %s timed out after %ss", body.conversation_id, GATEWAY_TURN_TIMEOUT_SECONDS)
-        timeout_message = "This question took too long to answer. Try narrowing it and asking again."
-        return AgentResponse(
-            answer_markdown=timeout_message,
-            answer_html=render_answer_html(timeout_message),
-            sources=[],
-        )
-    except Exception:
-        logger.exception("Turn %s failed unexpectedly", body.conversation_id)
-        return AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE,
-                              answer_html=render_answer_html(GENERIC_TURN_ERROR_MESSAGE), sources=[])
+    initial_state["compacted"] = compaction.compacted
+    initial_state["compaction_failed"] = compaction.failed
+    initial_state["compaction_prompt_tokens"] = compaction.prompt_tokens
+    initial_state["compaction_completion_tokens"] = compaction.completion_tokens
 
+    final_state = await consume_graph(initial_state)
+
+    #Write update history to firestore (Message history write does not occur for needs approval & cancel paths)
     if not final_state["needs_approval"] and not final_state["cancelled"]:
         await write_history_messages(
             body.conversation_id, build_updated_history(history_messages, final_state)
@@ -429,9 +441,31 @@ async def post_ask(
     validate_api_key(x_api_key)
     claims = await asyncio.to_thread(validate_entra_token, authorization)
     await assert_owns_conversation(body.conversation_id, claims)
+
+    # Raise exception if question too long
     if len(body.question) > MAX_QUESTION_CHARS:
         raise HTTPException(400, "Question too long -- please shorten it.")
-    response = await run_agent_turn(body, claims["oid"])
+
+    # One timeout for the whole turn; a generic AgentResponse is returned and live_turn_doc deleted on timeout or any exception
+    try:
+        async with asyncio.timeout(GATEWAY_TURN_TIMEOUT_SECONDS):
+            response = await run_agent_turn(body, claims["oid"])
+    except asyncio.TimeoutError:
+        logger.warning("Turn %s timed out after %ss", body.conversation_id, GATEWAY_TURN_TIMEOUT_SECONDS)
+        await live_turn_doc(body.conversation_id).delete()
+        timeout_message = "This question took too long to answer. Try narrowing it and asking again."
+        response = AgentResponse(
+            answer_markdown=timeout_message,
+            answer_html=render_answer_html(timeout_message),
+            sources=[],
+        )
+    except Exception:
+        logger.exception("Turn %s failed unexpectedly", body.conversation_id)
+        await live_turn_doc(body.conversation_id).delete()
+        response = AgentResponse(answer_markdown=GENERIC_TURN_ERROR_MESSAGE,
+                                 answer_html=render_answer_html(GENERIC_TURN_ERROR_MESSAGE), sources=[])
+
+    # Set chat history question to approved/rejected for pause resume, else question
     chat_history_question = (
         "Approved" if body.approval_decision == "approved"
         else "Rejected" if body.approval_decision == "rejected"

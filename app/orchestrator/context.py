@@ -20,18 +20,17 @@ from app.model_schema import MEASURE_REGISTRY, PARAMETERS, RELATIONSHIPS, TABLE_
 ORIENTATION_DIR = CONTEXT_DIR / "orientation"
 ORIENTATION_FILES = ["executive_summary.txt", "project_navigator.txt", "system_architecture.txt"]
 
-ORIENTATION_PREAMBLE = """This section is background on the Instacart reorder-recommendation ML project
-this dashboard evaluates, extracted from that project's own documentation --
-not live data. Numbers in it (Recall@5, profit-lift figures, etc.) are
-historical, point-in-time report figures; never cite them as an answer -- a
-user-facing number always needs its own live run_bigquery_sql/run_dax_query
-call this turn.
+ORIENTATION_PREAMBLE = """Background on the Instacart reorder-recommendation ML project this dashboard
+evaluates, from that project's own documentation -- not live data. Its numbers
+(Recall@5, profit lift, etc.) are historical report figures: never cite them
+as an answer; any number you give needs its own live
+run_bigquery_sql/run_dax_query call this turn.
 
-The Project Navigator is that documentation's table of contents. Each item
-names a topic search_docs can retrieve in more depth -- treat it as an index
-of what's available, not a substitute for looking something up. System
-Architecture is the one exception: it's included here in full below, not
-indexed separately, so search_docs won't return anything more on it.""".strip()
+The Project Navigator is that documentation's table of contents: each item is
+a topic search_docs can retrieve in more depth -- an index, not a substitute
+for looking something up. System Architecture is the exception -- it's
+included in full below and not indexed, so search_docs has nothing more on
+it.""".strip()
 
 
 def build_orientation_bundle() -> str:
@@ -140,7 +139,7 @@ Table and measure names come from the registries in this prompt, which are a com
 filter_context and active_page describe what the user is currently looking at and are authoritative -- incorporate them into a DAX query, and into the model and split filters on prediction_explanations, rather than answering against the model's default, unfiltered state. If a question depends on a selection that isn't present in filter_context, ask a clarifying question rather than guessing what's currently selected.
 
 CONVERSATION HISTORY
-Prior turns' tool calls are part of this conversation, exactly as they ran -- adapt a working query or approach for a related follow-up, but first check it actually fits this question's semantics; a structurally similar prior query can still answer something different. Every prior turn's tool results (except submit_answer's) are replaced with a removal notice in history ("Result removed..."). Any tool result (excluding submit_answer) without this message is from the current turn. A prior turn's submit_answer call's numbers are visible, but aren't a live source. Do not use them. Use your tools to re-run instead.
+Prior turns' tool calls are visible exactly as they ran -- adapt a working query for a related follow-up, but first check it fits this question's semantics; a structurally similar query can answer something different. Prior turns' tool results are replaced with a "Result removed..." notice, so any tool result without it is from this turn. Numbers in a prior submit_answer call stay visible but aren't a live source -- re-run with your tools instead.
 
 RESPONDING
 You must call submit_answer to respond -- never plain text. The user will not recieve your answer otherwise and the loop will continue."""

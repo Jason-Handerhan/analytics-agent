@@ -2,6 +2,7 @@
 paths:
   - 'app/mcp_server/**'
   - 'app/orchestrator/tools.py'
+  - 'app/shared_chart.py'
   - 'app/model_schema.py'
   - 'tests/test_tools.py'
   - 'tests/test_chart_tool.py'
@@ -11,8 +12,8 @@ paths:
 
 # Tools: inventory, contracts, data access boundary
 
-> **Deep dives:** `docs/chart-tool.md` before touching `chart_tool.py` — it
-> has the full spec hierarchy, all 10 chart types, and the styling contract.
+> **Deep dives:** `docs/chart-tool.md` before touching `shared_chart.py` or `chart_tool.py` — it
+> has the full spec hierarchy, all 11 chart types, and the styling contract.
 > `docs/combine-tool.md` before touching `combine_tool.py` or its stand-in.
 > `docs/data-pipeline.md` for how `agent_safe` and the vector index are built.
 > `docs/data-pipeline.md` for the access-boundary reasoning.
@@ -22,13 +23,13 @@ paths:
 **The defining rule: MCP hosting declares a tool safe and useful for someone
 outside this project to pick up and run as-is.** Anything that will only
 ever execute as `agent-sa`, for this project, doesn't belong on the server no
-matter how clean its contract looks. The five exceptions below are each an
-instance of this, not five independent rules.
+matter how clean its contract looks. The seven exceptions below are each an
+instance of this, not seven independent rules.
 
 | Tool | Hosted on the MCP server? |
 |---|---|
 | `run_dax_query` | Yes |
-| `list_repo_files`, `read_repo_file` | Yes |
+| `get_repo_contents` | Yes |
 | `generate_chart` | Yes |
 | `combine_results` | Yes (stand-in schema bound to the model; `docs/combine-tool.md`) |
 | `run_bigquery_sql` | **No** — a plain function in the orchestrator |
@@ -36,6 +37,8 @@ instance of this, not five independent rules.
 | `get_measure_dax` | **No** — a plain function in the orchestrator |
 | `search_docs` | **No** — a plain function in the orchestrator |
 | `get_page_info` | **No** — a plain function in the orchestrator |
+| `generate_beeswarm` | **No** — a plain function in the orchestrator |
+| `get_conversation_findings` | **No** — a plain function in the orchestrator |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -89,6 +92,26 @@ committed files — a different deployment would need this project's exact
 page names and content to make it work at all, not just connection info.
 Full design (including a real deviation from how this was originally
 sketched) in its own section below.
+
+**`generate_beeswarm` is a sixth exception, for the same reason.** It reads
+this project's own `prediction_explanations` table by name, with this
+project's model names and feature labels built in — nothing portable to host.
+**It is not a BigQuery tool as far as guardrails go**: no dry-run, approval
+cost tier, cumulative byte cap, row cap, or cancel watcher. Its query shape is
+fixed and the model's values (two enums, optional name lists) are parameters, so it sits with `search_docs` and
+`get_page_info`, not `run_bigquery_sql` (its bytes aren't added to
+`bytes_consumed`). Design in `docs/chart-tool.md`.
+
+**`get_conversation_findings` is a seventh exception: it reads this
+project's own `conversation_findings` ledger** — nothing portable to host.
+It's also a numeric source of a different kind: its result feeds the pool
+only through each turn's `verified_numbers` (`MEMORY_SOURCE_TOOLS`, not
+`NUMERIC_SOURCE_TOOLS`; `.claude/rules/orchestrator.md`). Reads run as
+`turn-writer-sa` with fixed SQL and an injected `conversation_id` —
+`agent-sa` has no grant there, so `run_bigquery_sql` can't read the ledger.
+Not a BigQuery tool as far as guardrails go (no dry-run, cost tier, or
+`bytes_consumed`); its limit is a token budget. Design in
+`docs/conversation-memory.md`.
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -162,7 +185,7 @@ mcp = FastMCP(MCP_SERVER_NAME)
 # the section below.
 from app.mcp_server import (          # noqa: F401,E402
     dax_tool,                         # run_dax_query
-    code_search,                      # list_repo_files, read_repo_file
+    code_search,                      # get_repo_contents
     chart_tool,                       # generate_chart
 )
 
@@ -170,9 +193,9 @@ if __name__ == "__main__":
     mcp.run(transport="streamable_http", port=PORT)
 ```
 
-**Group by shared machinery, not one file per tool.** `list_repo_files` and
-`read_repo_file` hit the same GitHub client. Splitting those apart
-duplicates setup for no gain.
+**Group by shared machinery, not one file per tool.** `code_search.py` holds
+`get_repo_contents` and its GitHub helpers; any later GitHub tool belongs
+beside it.
 
 **FastMCP builds each tool's schema from its type hints and docstring** — the
 docstring is what the model reads when choosing a tool, so write it for that
@@ -191,25 +214,30 @@ later changes the URL and adds auth headers — not this file.
 | `run_bigquery_sql` | Warehouse numbers | Only authority for raw/warehouse numbers |
 | `run_dax_query` | Semantic-model numbers | Only authority for measure-level numbers |
 | `get_measure_dax` | One measure's DAX body, by exact name | The *how* behind a measure; names come from the registry in static context |
-| `list_repo_files` | Paths + descriptions for the ML repo (Trees API, one call) | Entry point for any code question |
-| `read_repo_file` | One file's contents from the ML repo (Contents API) | Authoritative for implementation detail |
+| `get_repo_contents` | The ML repo: no `path` lists every described file, a folder path lists that folder, a file path returns its text | Entry point and authority for any code question |
 | `generate_chart` | Visualization | Renders already-fetched data; **never** a number source |
+| `generate_beeswarm` | SHAP beeswarm for one model and split, optionally narrowed to a department, aisle, or product — returns the image URL **and the image itself** | Shows the overall pattern across many predictions; **never** a number source |
 | `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
+| `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at
 all, see below. `submit_answer` isn't either — it's not a number *source*,
 it's how the model delivers the answer built from everything above; see its
 own section below.
 
-**Nine tools, one vector store** — deliberately not 1:1:
+**Ten tools, one vector store** — deliberately not 1:1:
 
-- **Code search is agentic (list + read), not vector search.** Embeddings
+- **Code search is agentic (list or read), not vector search.** Embeddings
   flatten the structural relationships — imports, call graphs — that code
-  questions depend on. The two GitHub tools are also domain-agnostic: a third
-  code domain needs no third tool. Full reasoning in `docs/code-search.md`.
+  questions depend on. `get_repo_contents` is also domain-agnostic: a third
+  code domain needs no new tool. Full reasoning in `docs/code-search.md`.
 - **`get_page_info` doesn't search at all.** Two pages, 4–5 sections each —
   small enough that ranking adds nothing over returning the whole page.
   No chunking, no embedding, no BigQuery. Details below.
+- **`generate_beeswarm` hands the picture back to the model**, unlike
+  `generate_chart`. The other chart tools plot data the agent already holds, so
+  it knows what they show; the beeswarm plots rows it never sees. Same
+  content-block shape as `get_page_info`.
 - **The semantic model isn't searched at all.** Table schema and the measure
   registry (names + descriptions) are in static context on every turn, so
   discovery is deterministic — the model cannot fail to find a measure that
@@ -233,15 +261,29 @@ a convention. Three layers, each a different job:
    behaviour.
 3. **Prompt guidance** — steering only, never enforcement.
 
-**Domain split — BigQuery and DAX must not overlap:**
+**Domain split — BigQuery and DAX don't overlap, with one exception:**
 - **DAX** answers what the dashboard displays: model-eval metrics, financial
-  impact — computed from *post-model* results.
+  impact, global feature importance — computed from *post-model* results.
 - **BigQuery** answers everything upstream: ML feature dataset,
   `base_analytical_table`, ad hoc warehouse questions (sparsity, order counts
   by department).
-- Pre-modeling tables are safe in `agent_safe` precisely because Power BI never
-  surfaces anything computed from them.
-- **Still to finalize:** exactly which results tables get excluded. Ask.
+- **The exception, decided 2026-10-23: `agent_safe.prediction_explanations`** —
+  row-level predictions with their SHAP explanations, for why one prediction
+  (or a product/aisle/department slice) scored as it did. It's a *sample* (up
+  to 150,000 rows per model and split), so population-wide feature importance
+  and every other post-model question stay in DAX, and population counts/rates
+  stay in the other `agent_safe` tables. Safe because the dashboard only
+  surfaces aggregates of those same sampled SHAP values; the table's
+  description states the units (log-odds for classifiers) so the two can't be
+  reported inconsistently (`docs/data-pipeline.md`).
+- **Routing is stated in `SYSTEM_INSTRUCTIONS` and `run_bigquery_sql`'s
+  docstring** — `run_dax_query`'s stays generic, since it's meant to be
+  portable. The dashboard's selected model and split (`filter_context`) carry
+  over to this table's `model`/`split` filters; absent, the agent asks a
+  clarifying question.
+- Every other `agent_safe` table is pre-modeling, safe precisely because Power
+  BI never surfaces anything computed from them.
+- Any further results table is still an **ask**.
 
 **Column descriptions live on the `agent_safe` objects, not source tables** — the
 service account can't read `INFORMATION_SCHEMA` on datasets it has no grant on,
@@ -381,13 +423,12 @@ class SubmitAnswerArgs(BaseModel):
                     "numbers belong in a table at all. A number from any other tool may be stated in "
                     "prose, except search_docs -- never state a search_docs number anywhere, in prose "
                     "or a table. Table cell values are checked automatically against this turn's "
-                    "run_bigquery_sql/run_dax_query results, at up to "
-                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers for readability -- "
-                    "thousands separators (977,542) and 1-2 decimal places by default, since "
-                    "verification matches each number at its own precision and rounding never "
-                    "causes a mismatch. Use more decimals only when the figure itself needs it, "
-                    "e.g. a Recall@5 score (0.6688, not 0.67). Include the chart_url from "
-                    "generate_chart here as an image -- the user sees no chart otherwise.")
+                    "run_bigquery_sql/run_dax_query results, up to "
+                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers readably -- "
+                    "thousands separators (977,542), 1-2 decimals by default (rounding never "
+                    "fails verification), more only when the figure needs it (Recall@5: "
+                    "0.6688, not 0.67). Include the chart_url from "
+                    "generate_chart or generate_beeswarm here as an image -- the user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
         # prose numbers only -- table cells are checked separately by
         # extract_table_values, not re-declared here
@@ -406,6 +447,28 @@ class SubmitAnswerArgs(BaseModel):
                     "the request is genuinely ambiguous and a wrong guess would mislead the user. Ask "
                     "one short question naming the specific choice. Otherwise answer -- do not ask "
                     "about anything a reasonable default covers.")
+    title: str = Field(
+        default="",
+        description="A short label for this turn, 3-8 words, no numbers -- e.g. 'reorder rate by "
+                    "department'.")
+    topics: list[str] = Field(
+        default=[],
+        description="Short noun phrases for what this turn is about, no numbers.")
+    entities: list[str] = Field(
+        default=[],
+        description="Specific names this turn is about, written as they appear in the data -- for "
+                    "example a department, aisle, product, model or measure, or any other named "
+                    "thing. Empty if none.")
+
+    @field_validator("topics", "entities")
+    def _clean_tags(cls, value: list[str]) -> list[str]:
+        """Strips, drops empties, dedupes in order, and caps the list at 6."""
+        cleaned: list[str] = []
+        for tag in value:
+            tag = tag.strip()
+            if tag and tag not in cleaned:
+                cleaned.append(tag)
+        return cleaned[:6]
 
     @field_validator("answer_markdown")
     def _unescape_newlines(cls, value: str) -> str:
@@ -478,6 +541,14 @@ unchanged, and `suggested_follow_ups` is cleared. No marker goes on
 `AgentResponse` -- the UI renders the text, and the user replies with a
 normal `POST /ask`. The field is in the schema either way, so it costs the
 model nothing on an ordinary answer, which just leaves it empty.
+
+**Tags (`title`, `topics`, `entities`).** Optional fields the answering model
+fills for the conversation ledger (`docs/conversation-memory.md`): they land in
+`AgentState`, then in `conversation_findings` through `finalize`, and never in
+`AgentResponse`. Strings only, so they can't reach the numeric pool. Kept on
+clarifying-question turns too. The list fields are normalized by a validator
+(strip, drop empties, dedupe, cap at 6); a description edit is the way to tune
+what the model writes, not more validation.
 
 **No forced tool choice, and that's a real constraint to design around, not
 an oversight.** `agent_node` can't set `tool_choice` to force `submit_answer`

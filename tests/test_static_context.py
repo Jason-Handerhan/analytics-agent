@@ -19,7 +19,7 @@ def test_static_context_contains_all_six_components(monkeypatch):
 
     markers = [
         "SYSTEM INSTRUCTIONS",
-        "This section is background",  # orientation bundle
+        "Background on the Instacart",  # orientation bundle
         "TABLE REGISTRY",
         "MEASURE REGISTRY",
         "RELATIONSHIPS",

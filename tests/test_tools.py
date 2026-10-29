@@ -7,11 +7,15 @@ import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+import numpy as np
+import pandas as pd
 import pytest
 from langchain_core.messages import AIMessage
+from matplotlib.colors import to_rgba
 
 import app.orchestrator.orchestrator as orchestrator_module
 import app.orchestrator.tools as tools_module
+from app.config import SHAP_FEATURE_DISPLAY_NAMES
 from app.orchestrator.tools import PAGE_INFO_DIR, PAGES, ToolError, get_measure_dax, get_page_info, run_bigquery_sql
 
 
@@ -20,6 +24,7 @@ def test_run_bigquery_sql_description_has_few_shot_examples():
     description, not the static context block (.claude/rules/orchestrator.md)."""
     assert "EXAMPLES" in run_bigquery_sql.description
     assert "reorder rate by department" in run_bigquery_sql.description
+    assert all(label in run_bigquery_sql.description for label in SHAP_FEATURE_DISPLAY_NAMES.values())
 
 
 # --- Fakes for run_bigquery_sql's cancellation race -- no real BigQuery/Firestore ---
@@ -171,3 +176,119 @@ async def test_gateway_timeout_cancellation_reaches_bigquery_job(monkeypatch):
         await asyncio.wait_for(orchestrator_module.graph.ainvoke(state), timeout=0.1)
 
     assert fake_client.cancelled_job_ids == ["fake-job-1"]
+
+
+# --- generate_beeswarm's renderer -- pure, no BigQuery/GCS -----------------------
+
+def _beeswarm_rows(fig) -> dict[int, dict]:
+    """Per feature row (0 = bottom): point count, gray-point count, median x."""
+    gray = to_rgba("#777777")
+    points: dict[int, dict] = {}
+    for collection in fig.axes[0].collections:
+        offsets = np.asarray(collection.get_offsets())
+        if len(offsets) == 0:
+            continue
+        facecolor = collection.get_facecolor()
+        is_gray = len(facecolor) == 1 and np.allclose(facecolor[0], gray)
+        for row, x in zip(np.round(offsets[:, 1]).astype(int), offsets[:, 0]):
+            entry = points.setdefault(row, {"x": [], "gray": 0})
+            entry["x"].append(x)
+            entry["gray"] += is_gray
+    return {row: {"points": len(e["x"]), "gray": e["gray"], "median_x": np.median(e["x"])}
+            for row, e in points.items()}
+
+
+def test_render_beeswarm():
+    """Each feature's row holds that feature's own points (label and data stay
+    aligned, ordered by importance), and only a null-filled feature's 999s plot gray."""
+    features = tools_module.BEESWARM_FEATURES
+    n = 200
+    rng = np.random.default_rng(0)
+    # Each feature's SHAP values sit around its own index, so a row's median x identifies it.
+    df = pd.DataFrame({
+        **{f"raw_{feature}": rng.random(n) for feature in features},
+        **{f"shap_{feature}": index + rng.normal(0, 0.05, n) for index, feature in enumerate(features)},
+    })
+    null_filled = tools_module.NULL_FILLED_FEATURES[0]
+    df.loc[:19, f"raw_{null_filled}"] = tools_module.NULL_FILL_VALUE              # 20 gray points
+    df.loc[:4, "raw_user_distinct_product_count"] = tools_module.NULL_FILL_VALUE  # a real value: stays colored
+    importance = np.arange(len(features), dtype=float)   # later features rank higher
+
+    fig = tools_module._render_beeswarm(df, importance, "LightGBM Classifier", "Test title")
+    labels = [t.get_text() for t in fig.axes[0].get_yticklabels()]   # bottom to top
+    rows = _beeswarm_rows(fig)
+    for index, feature in enumerate(features):
+        assert labels[index] == SHAP_FEATURE_DISPLAY_NAMES[feature]
+        assert rows[index]["points"] == n
+        assert rows[index]["median_x"] == pytest.approx(index, abs=0.05)
+        assert rows[index]["gray"] == (20 if feature == null_filled else 0)
+
+
+# --- get_conversation_findings helpers ---------------------------------------
+
+def _overview_rows(token_counts):
+    return [{"turn": i, "answered_at": f"2026-10-26T12:0{i}:00+00:00", "approx_tokens": tokens,
+             "sources": ["Query warehouse"], "title": f"title {i}", "topics": [f"topic {i}"],
+             "entities": [f"entity {i}"], "question": f"Question {i}"}
+            for i, tokens in enumerate(token_counts, start=1)]
+
+
+def test_build_conversation_overview():
+    """Totals, the newest turns that fit the budget, question truncation, and the empty conversation."""
+    rows = _overview_rows([100, 200, 300])
+    rows[0]["question"] = "x" * 400
+    overview = tools_module.build_conversation_overview(rows, token_budget=550)
+
+    assert overview["total_turns"] == 3 and overview["total_approx_tokens"] == 600
+    assert overview["max_recent_turns_within_budget"] == 2     # 300 + 200 fit; adding 100 would not
+    assert overview["first_answered_at"] == rows[0]["answered_at"]
+    assert (overview["turns"][1]["title"], overview["turns"][1]["topics"], overview["turns"][1]["entities"]) == (
+        "title 2", ["topic 2"], ["entity 2"])
+    assert len(overview["turns"][0]["question"]) == tools_module.OVERVIEW_QUESTION_MAX_CHARS
+    assert overview["turns"][0]["question"].endswith("...")
+
+    error = str(tools_module._over_budget_error(overview, 1, 3, 600))
+    assert "Turns 1-3" in error and '"max_recent_turns_within_budget": 2' in error
+
+    empty = tools_module.build_conversation_overview([], token_budget=550)
+    assert empty["total_turns"] == 0 and empty["max_recent_turns_within_budget"] == 0
+    assert empty["first_answered_at"] is None
+
+
+@pytest.mark.parametrize("start, end, last_n, expected", [
+    (None, None, None, (1, 5)),   # no arguments: the whole conversation
+    (None, None, 2, (4, 5)),
+    (None, None, 9, (1, 5)),     # last_n larger than the conversation: everything
+    (2, 3, None, (2, 3)),
+])
+def test_resolve_turn_range(start, end, last_n, expected):
+    assert tools_module.resolve_turn_range(5, start, end, last_n) == expected
+
+
+def test_resolve_turn_range_rejects_bad_ranges():
+    with pytest.raises(ToolError, match="5 verified turns"):
+        tools_module.resolve_turn_range(5, 1, 9, None)
+    with pytest.raises(ToolError, match="no verified turns"):
+        tools_module.resolve_turn_range(0, None, None, None)
+
+
+def test_get_conversation_findings_args_validator():
+    """Arguments that don't belong with the chosen view are rejected."""
+    Args = tools_module.GetConversationFindingsArgs
+    assert Args(view="overview").view == "overview"
+    assert Args(view="turns").last_n is None     # no range: every turn
+    assert Args(view="turns", last_n=3).last_n == 3
+    assert Args(view="turns", start_turn=2, end_turn=4, include_tool_calls=True).end_turn == 4
+
+    for bad in [
+        {"view": "overview", "last_n": 2},
+        {"view": "overview", "include_tool_calls": True},
+        {"view": "turns", "start_turn": 2},
+        {"view": "turns", "end_turn": 2},
+        {"view": "turns", "last_n": 2, "end_turn": 4},
+        {"view": "turns", "last_n": 0},
+        {"view": "turns", "start_turn": 0, "end_turn": 2},
+        {"view": "turns", "start_turn": 4, "end_turn": 2},
+    ]:
+        with pytest.raises(ValueError):
+            Args(**bad)

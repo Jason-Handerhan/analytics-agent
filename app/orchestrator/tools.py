@@ -1,8 +1,11 @@
-"""Non-MCP tools: run_bigquery_sql, submit_answer, get_measure_dax, get_page_info, search_docs (.claude/rules/tools.md)."""
+"""Non-MCP tools: run_bigquery_sql, submit_answer, get_measure_dax, get_page_info, search_docs, get_conversation_findings, generate_beeswarm (.claude/rules/tools.md)."""
 import asyncio
 import base64
 import concurrent.futures
+import io
+import json
 import logging
+import textwrap
 from datetime import date, time
 from decimal import Decimal
 from functools import lru_cache
@@ -13,10 +16,15 @@ import google.auth.impersonated_credentials
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 from langchain_core.tools import tool, InjectedToolArg, ToolException
+from matplotlib.figure import Figure
 import mistune
+import numpy as np
+import pandas as pd
 from pydantic import BaseModel, Field, create_model, field_validator, model_validator
+import shap
 
 from app.config import (
+    AGENT_SAFE_DATASET,
     BIGQUERY_ROW_CAP,
     BIGQUERY_TIMEOUT_SECONDS,
     EMBEDDING_MODEL,
@@ -24,16 +32,20 @@ from app.config import (
     MAX_ANSWER_TABLE_ROWS,
     MAX_BYTES_BILLED,
     MAX_CLAIM_PRECISION,
+    MEMORY_RECALL_TOKEN_BUDGET,
     PAGE_INFO_DIR,
+    PREDICTION_EXPLANATIONS_TABLE,
     SEARCH_DOCS_MAX_TOP_K,
     SEARCH_DOCS_TOP_K_DEFAULT,
+    SHAP_FEATURE_DISPLAY_NAMES,
     VECTOR_DB_DATASET,
     VECTOR_DB_TABLE,
     VECTOR_SEARCH_SA_EMAIL,
 )
-from app.mcp_server.chart_tool import GenerateChartArgs
+from app.shared_chart import GenerateChartArgs, render_and_upload
 from app.model_schema import MEASURE_DAX, MEASURE_NAMES
-from app.orchestrator.shared_helpers import is_cancelled
+from app.orchestrator.conversation_memory.reader import fetch_overview_rows, fetch_turns
+from app.shared_helpers import is_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +58,11 @@ class ToolError(ToolException):
 
 # --- run_bigquery_sql -----------------------------------------------------
 
-BIGQUERY_FEW_SHOT_EXAMPLES = '''EXAMPLES
+# UNPIVOT list for the waterfall example, labeled with the dashboard names.
+_SHAP_UNPIVOT_COLUMNS = ",\n    ".join(
+    f"shap_{feature} AS '{label}'" for feature, label in SHAP_FEATURE_DISPLAY_NAMES.items())
+
+BIGQUERY_FEW_SHOT_EXAMPLES = f'''EXAMPLES
 
 Q: "What's the reorder rate by department?"
 SELECT department, ROUND(AVG(reordered), 4) AS reorder_rate, COUNT(*) AS n
@@ -85,21 +101,7 @@ WITH steps AS (
     WHERE model = 'LightGBM Classifier' AND split = 'test' AND product_name = 'Banana'
   )
   UNPIVOT (contribution FOR driver IN (
-    shap_user_product_order_penetration_ratio AS 'Order Penetration Ratio',
-    shap_user_product_consecutive_order_skips AS 'Consecutive Order Skips',
-    shap_user_prod_avg_days_between_purchases AS 'Avg Days Between Purchases',
-    shap_user_product_last3order_streak AS 'Last 3 Order Streak',
-    shap_user_reorder_ratio AS 'User Reorder Ratio',
-    shap_user_product_avg_cart_position AS 'Avg Cart Position',
-    shap_user_product_nearing_reorder_ratio AS 'Nearing Reorder Ratio',
-    shap_label_user_product_days_since_last_purchased AS 'Days Since Last Purchased',
-    shap_user_product_cart_position_last_order AS 'Cart Position Last Order',
-    shap_user_product_cumulative_purchases AS 'Cumulative Purchases',
-    shap_user_product_reorder_concentration AS 'Reorder Concentration',
-    shap_user_deptartment_share AS 'Department Share',
-    shap_user_product_purchase_concentration AS 'Purchase Concentration',
-    shap_user_aisle_share AS 'Aisle Share',
-    shap_user_distinct_product_count AS 'Distinct Product Count'))
+    {_SHAP_UNPIVOT_COLUMNS}))
   GROUP BY driver
 )
 SELECT 'Base Value' AS driver, ANY_VALUE(base_value) AS amount, TRUE AS is_total, 0 AS sort_order FROM steps
@@ -270,13 +272,12 @@ class SubmitAnswerArgs(BaseModel):
                     "numbers belong in a table at all. A number from any other tool may be stated in "
                     "prose, except search_docs -- never state a search_docs number anywhere, in prose "
                     "or a table. Table cell values are checked automatically against this turn's "
-                    "run_bigquery_sql/run_dax_query results, at up to "
-                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers for readability -- "
-                    "thousands separators (977,542) and 1-2 decimal places by default, since "
-                    "verification matches each number at its own precision and rounding never "
-                    "causes a mismatch. Use more decimals only when the figure itself needs it, "
-                    "e.g. a Recall@5 score (0.6688, not 0.67). Include the chart_url from "
-                    "generate_chart here as an image -- the user sees no chart otherwise.")
+                    "run_bigquery_sql/run_dax_query results, up to "
+                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers readably -- "
+                    "thousands separators (977,542), 1-2 decimals by default (rounding never "
+                    "fails verification), more only when the figure needs it (Recall@5: "
+                    "0.6688, not 0.67). Include the chart_url from "
+                    "generate_chart or generate_beeswarm here as an image -- the user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
         description="Every number stated in prose as fact from a run_bigquery_sql or run_dax_query "
                     "result this turn -- the only two tools checked against. Never include a number "
@@ -293,6 +294,28 @@ class SubmitAnswerArgs(BaseModel):
                     "the request is genuinely ambiguous and a wrong guess would mislead the user. Ask "
                     "one short question naming the specific choice. Otherwise answer -- do not ask "
                     "about anything a reasonable default covers.")
+    title: str = Field(
+        default="",
+        description="A short label for this turn, 3-8 words, no numbers -- e.g. 'reorder rate by "
+                    "department'.")
+    topics: list[str] = Field(
+        default=[],
+        description="Short noun phrases for what this turn is about, no numbers.")
+    entities: list[str] = Field(
+        default=[],
+        description="Specific names this turn is about, written as they appear in the data -- for "
+                    "example a department, aisle, product, model or measure, or any other named "
+                    "thing. Empty if none.")
+
+    @field_validator("topics", "entities")
+    def _clean_tags(cls, value: list[str]) -> list[str]:
+        """Strips, drops empties, dedupes in order, and caps the list at 6."""
+        cleaned: list[str] = []
+        for tag in value:
+            tag = tag.strip()
+            if tag and tag not in cleaned:
+                cleaned.append(tag)
+        return cleaned[:6]
 
     @field_validator("answer_markdown")
     def _unescape_newlines(cls, value: str) -> str:
@@ -339,7 +362,9 @@ class SubmitAnswerArgs(BaseModel):
 
 @tool(args_schema=SubmitAnswerArgs)
 async def submit_answer(answer_markdown: str = "", all_prose_numeric_claims: list[float] | None = None,
-                         suggested_follow_ups: list[str] | None = None, clarifying_question: str = "") -> str:
+                         suggested_follow_ups: list[str] | None = None, clarifying_question: str = "",
+                         title: str = "", topics: list[str] | None = None,
+                         entities: list[str] | None = None) -> str:
     """Call this with your final answer once you have everything you need or
     with a clarifying question when the request is genuinely ambiguous.
     This is how you respond to the user -- a plain-text reply will not be
@@ -435,38 +460,27 @@ async def get_page_info(page_name: Literal[PAGES],
     "Current dashboard page" for what the user is currently viewing, or the
     other one if the question is clearly about it instead.
 
-    The screenshot is a static reference for layout only -- it is not a
-    live capture, may not match the dashboard's current filter/selection
-    state, and is never a source of numbers. Never mention the screenshot,
-    the reference layout, or a "default" state to the user -- it's for your
-    own understanding of page structure only. State only the current,
-    filter_context-grounded reality.
+    The screenshot is a static reference for layout only -- not a live
+    capture, never a source of numbers. Never mention the screenshot, the
+    reference layout, or a "default" state to the user -- it's for your own
+    understanding of page structure only. State only the current,
+    filter_context-grounded reality: where filter_context has the entry
+    named below, trust it over the screenshot.
 
-    On the Model Performance page: the "Recall@5 by Model" chart's title
-    and metric change with the Evaluation Metric Parameter slicer (Recall@5,
-    NDCG@5, Precision@5, F1@5) -- the screenshot shows one fixed selection.
-    If filter_context includes an "Evaluation Metric Parameter[Evaluation
-    Metric Parameter]" entry, trust that value over the screenshot and
-    describe the chart accordingly (e.g. "NDCG@5 by Model" if NDCG@5 is
-    selected).
+    Model Performance page:
+    - "Recall@5 by Model": title and metric follow the "Evaluation Metric
+      Parameter[Evaluation Metric Parameter]" entry (Recall@5, NDCG@5,
+      Precision@5, F1@5) -- e.g. "NDCG@5 by Model" if NDCG@5 is selected.
+    - "Feature Importance: Mean Absolute SHAP": the title stays fixed, but
+      the base model shown (XGBoost Ranker, XGBoost Classifier, LightGBM
+      Ranker, LightGBM Classifier) follows "base_models_dimension[model_name]",
+      and the plot type ("Bar Plot (Mean Absolute SHAP)" or "Beeswarm")
+      follows "Feature_Importance_Chart_Types[Chart_Types]" -- the
+      screenshot already reflects that one, so describe whichever plot type
+      is shown.
 
-    Also on the Model Performance page: the "Feature Importance: Mean
-    Absolute SHAP" chart shows feature importance for whichever base model
-    is currently selected via the Model Selection Slicer (XGBoost Ranker,
-    XGBoost Classifier, LightGBM Ranker, LightGBM Classifier) -- its title
-    stays fixed, but the values shown depend on the selection, and the
-    screenshot reflects only one. If filter_context includes a
-    "base_models_dimension[model_name]" entry, trust that value over the
-    screenshot when stating which model's feature importance is shown.
-
-    That same chart also switches its whole plot type -- a bar chart
-    ("Bar Plot (Mean Absolute SHAP)") or a beeswarm plot ("Beeswarm") --
-    via the Plot Selection Buttons. The screenshot shown here already
-    reflects filter_context's "Feature_Importance_Chart_Types[Chart_Types]"
-    entry when present, so describe whichever plot type is actually shown.
-
-    On the Financial Impact page: the sensitivity sliders (Conversion Rate,
-    Churn Rate, Conversion/AOV/Churn Lift per 10% Recall) and the waterfall
+    Financial Impact page: the sensitivity sliders (Conversion Rate, Churn
+    Rate, Conversion/AOV/Churn Lift per 10% Recall) and the waterfall
     chart's model selection come from filter_context, not the screenshot --
     ground any DAX for this page in those values.
     """
@@ -526,8 +540,7 @@ async def search_docs(query: str, top_k: int = SEARCH_DOCS_TOP_K_DEFAULT) -> lis
     here in your answer, even in passing -- doc chunks aren't authoritative
     for numbers; use run_bigquery_sql or run_dax_query for any numeric
     answer. Never include code snippets from this tool in your answer --
-    use get_repo_contents instead. top_k is clamped to 1..SEARCH_DOCS_MAX_TOP_K,
-    never rejected.
+    use get_repo_contents instead.
     """
     top_k = max(1, min(top_k, SEARCH_DOCS_MAX_TOP_K))
 
@@ -541,6 +554,330 @@ async def search_docs(query: str, top_k: int = SEARCH_DOCS_TOP_K_DEFAULT) -> lis
     return await asyncio.to_thread(_run)
 
 search_docs.handle_validation_error = lambda e: str(e)
+
+
+# --- get_conversation_findings -------------------------------------------------
+
+GET_CONVERSATION_FINDINGS_DESCRIPTION = f"""Recalls this conversation's earlier verified answers from a
+ledger that outlasts your message history. Use it to summarize or revisit earlier findings, or to
+quote a number from an earlier turn. Numbers sitting in your message history can't be cited in an
+answer; only numbers returned by view="turns" can.
+
+view="overview": takes no other arguments. Returns the number of verified turns, their sizes in
+tokens, how many of the newest turns fit in one call, and each turn's number, date, sources, title,
+topics, entities and question. Use it to choose which turns to recall. Numbers in the overview
+cannot pass verification and must not be cited in any answer.
+
+view="turns": returns full rows (question, answer, verified numbers, sources, title, topics,
+entities, filters) for turns start_turn..end_turn (1-based, inclusive; give both), or for the newest
+last_n turns. With no range it returns every turn. One call returns at most
+{MEMORY_RECALL_TOKEN_BUDGET:,} tokens; a request over that fails and returns the overview so you can
+narrow it. include_tool_calls adds the name and args of each
+turn's tool calls (no results) -- leave it off unless you need it."""
+
+OVERVIEW_QUESTION_MAX_CHARS = 150
+
+
+class GetConversationFindingsArgs(BaseModel):
+    view: Literal["overview", "turns"] = Field(
+        description="'overview' for a summary of the conversation's verified turns, 'turns' for their full rows.")
+    start_turn: int | None = Field(
+        default=None, description="First turn to return (1-based). Give with end_turn, only with view='turns'.")
+    end_turn: int | None = Field(
+        default=None, description="Last turn to return (inclusive). Give with start_turn, only with view='turns'.")
+    last_n: int | None = Field(
+        default=None, description="Return the newest N turns. Only with view='turns', never with start_turn/end_turn.")
+    include_tool_calls: bool = Field(
+        default=False, description="Add the name and args of each turn's tool calls. Only with view='turns'.")
+
+    @model_validator(mode="after")
+    def _check_argument_combination(self) -> "GetConversationFindingsArgs":
+        """Rejects arguments that don't belong with the chosen view."""
+        has_range = self.start_turn is not None or self.end_turn is not None
+        if self.view == "overview":
+            if has_range or self.last_n is not None or self.include_tool_calls:
+                raise ValueError("view='overview' takes no other arguments. Use view='turns' to select turns.")
+
+        if self.view == "turns":
+            if self.last_n is not None:
+                if has_range:
+                    raise ValueError("Use last_n on its own, or start_turn and end_turn -- not both.")
+                if self.last_n < 1:
+                    raise ValueError("last_n must be at least 1.")
+            elif has_range:
+                if self.start_turn is None or self.end_turn is None:
+                    raise ValueError("Give both start_turn and end_turn, or neither.")
+                if not 1 <= self.start_turn <= self.end_turn:
+                    raise ValueError("Turn numbers are 1-based, and start_turn must not be after end_turn.")
+        return self
+
+
+def build_conversation_overview(rows: list[dict], token_budget: int) -> dict:
+    """Summary of a conversation's verified turns: totals, how many of the newest
+    turns fit token_budget, and one entry per turn."""
+    recent_turns_that_fit = 0
+    tokens = 0
+    for row in reversed(rows):
+        tokens += row["approx_tokens"]
+        if tokens > token_budget:
+            break
+        recent_turns_that_fit += 1
+    return {
+        "total_turns": len(rows),
+        "total_approx_tokens": sum(row["approx_tokens"] for row in rows),
+        "token_budget": token_budget,
+        "max_recent_turns_within_budget": recent_turns_that_fit,
+        "first_answered_at": rows[0]["answered_at"] if rows else None,
+        "last_answered_at": rows[-1]["answered_at"] if rows else None,
+        "turns": [
+            {
+                "turn": row["turn"],
+                "answered_at": row["answered_at"],
+                "approx_tokens": row["approx_tokens"],
+                "sources": row["sources"],
+                "title": row["title"],
+                "topics": row["topics"],
+                "entities": row["entities"],
+                "question": (row["question"] if len(row["question"]) <= OVERVIEW_QUESTION_MAX_CHARS
+                             else row["question"][:OVERVIEW_QUESTION_MAX_CHARS - 3] + "..."),
+            }
+            for row in rows
+        ],
+    }
+
+
+def resolve_turn_range(
+    total_turns: int, start_turn: int | None, end_turn: int | None, last_n: int | None
+) -> tuple[int, int]:
+    """Inclusive (start, end) turn numbers, from arguments the args model has already validated:
+    last_n, both start_turn and end_turn, or none of them for the whole conversation."""
+    if total_turns == 0:
+        raise ToolError("This conversation has no verified turns yet.")
+    if last_n is not None:
+        return max(1, total_turns - last_n + 1), total_turns
+    if start_turn is None:
+        return 1, total_turns
+    if end_turn > total_turns:
+        raise ToolError(
+            f"This conversation has {total_turns} verified turns; start_turn and end_turn must be within 1-{total_turns}.")
+    return start_turn, end_turn
+
+
+def _over_budget_error(overview: dict, start: int, end: int, tokens: int) -> ToolError:
+    """Over-budget request, with the overview to narrow it from."""
+    return ToolError(
+        f"Turns {start}-{end} are about {tokens:,} tokens, over the {overview['token_budget']:,}-token "
+        f"limit for one call. Narrow the request using this overview:\n{json.dumps(overview)}")
+
+
+@tool(args_schema=GetConversationFindingsArgs, description=GET_CONVERSATION_FINDINGS_DESCRIPTION)
+async def get_conversation_findings(
+    view: Literal["overview", "turns"],
+    conversation_id: Annotated[str, InjectedToolArg],
+    start_turn: int | None = None,
+    end_turn: int | None = None,
+    last_n: int | None = None,
+    include_tool_calls: bool = False,
+) -> dict | list[dict]:
+    
+    overview_rows = await fetch_overview_rows(conversation_id)
+    overview = build_conversation_overview(overview_rows, MEMORY_RECALL_TOKEN_BUDGET)
+    if view == "overview":
+        return overview
+
+    start, end = resolve_turn_range(overview["total_turns"], start_turn, end_turn, last_n)
+    approx_tokens = sum(row["approx_tokens"] for row in overview_rows[start - 1:end])
+    if approx_tokens > MEMORY_RECALL_TOKEN_BUDGET:
+        raise _over_budget_error(overview, start, end, approx_tokens)
+
+    turns = await fetch_turns(conversation_id, start, end, include_tool_calls)
+    # approx_tokens doesn't count tool calls, so check the real size once they're in.
+    if include_tool_calls:
+        approx_tokens = len(json.dumps(turns)) // 4
+        if approx_tokens > MEMORY_RECALL_TOKEN_BUDGET:
+            raise _over_budget_error(overview, start, end, approx_tokens)
+    return turns
+
+get_conversation_findings.handle_tool_error = True
+get_conversation_findings.handle_validation_error = lambda e: str(e)
+
+
+# --- generate_beeswarm -----------------------------------------------------------
+
+BEESWARM_SAMPLE_ROWS = 30_000
+BEESWARM_MIN_ROWS = 300   # smallest slice worth plotting
+BEESWARM_FIGSIZE = (9.0, 7.5)
+NULL_FILL_VALUE = 999   # what the ML pipeline COALESCEs an undefined feature to
+NULL_FILLED_FEATURES = (
+    "label_user_product_days_since_last_purchased",
+    "user_prod_avg_days_between_purchases",
+    "user_product_nearing_reorder_ratio",
+)
+
+BEESWARM_FEATURES = list(SHAP_FEATURE_DISPLAY_NAMES)
+_BEESWARM_TABLE = f"`{GCP_PROJECT_ID}.{AGENT_SAFE_DATASET}.{PREDICTION_EXPLANATIONS_TABLE}`"
+
+# raw_<feature>, shap_<feature> for each feature
+_BEESWARM_COLUMNS = [column for feature in BEESWARM_FEATURES for column in (f"raw_{feature}", f"shap_{feature}")]
+
+# Packs a row into one CSV string, 5 significant digits; NULL becomes empty.
+_BEESWARM_PACKED_ROW = ", ".join(
+    f"IFNULL(FORMAT('%.5g', CAST({column} AS FLOAT64)), '')" for column in _BEESWARM_COLUMNS)
+
+# Hash-ordered sample. An empty filter list arrives as NULL, so COALESCE(ARRAY_LENGTH(..), 0) = 0 skips it.
+_BEESWARM_SAMPLE_SQL = f"""
+SELECT ARRAY_TO_STRING([{_BEESWARM_PACKED_ROW}], ',') AS row_csv
+FROM {_BEESWARM_TABLE}
+WHERE split = @split
+  AND model = @model
+  AND (COALESCE(ARRAY_LENGTH(@departments), 0) = 0 OR LOWER(department) IN UNNEST(@departments))
+  AND (COALESCE(ARRAY_LENGTH(@aisles), 0) = 0 OR LOWER(aisle) IN UNNEST(@aisles))
+  AND (COALESCE(ARRAY_LENGTH(@product_names), 0) = 0 OR LOWER(product_name) IN UNNEST(@product_names))
+ORDER BY FARM_FINGERPRINT(CONCAT(
+  CAST(user_id AS STRING), '-', CAST(anchor_order_number AS STRING), '-',
+  CAST(candidate_product_id AS STRING)))
+LIMIT @n
+"""
+
+# Mean |SHAP| per feature, row count, and which requested names exist (empty when that filter is off).
+_BEESWARM_IMPORTANCE_SQL = f"""
+SELECT
+  {", ".join(f"AVG(ABS(shap_{feature})) AS {feature}" for feature in BEESWARM_FEATURES)},
+  COUNT(*) AS n_rows,
+  ARRAY_AGG(DISTINCT IF(COALESCE(ARRAY_LENGTH(@departments), 0) = 0, NULL, LOWER(department)) IGNORE NULLS) AS matched_departments,
+  ARRAY_AGG(DISTINCT IF(COALESCE(ARRAY_LENGTH(@aisles), 0) = 0, NULL, LOWER(aisle)) IGNORE NULLS) AS matched_aisles,
+  ARRAY_AGG(DISTINCT IF(COALESCE(ARRAY_LENGTH(@product_names), 0) = 0, NULL, LOWER(product_name)) IGNORE NULLS) AS matched_product_names
+FROM {_BEESWARM_TABLE}
+WHERE split = @split
+  AND model = @model
+  AND (COALESCE(ARRAY_LENGTH(@departments), 0) = 0 OR LOWER(department) IN UNNEST(@departments))
+  AND (COALESCE(ARRAY_LENGTH(@aisles), 0) = 0 OR LOWER(aisle) IN UNNEST(@aisles))
+  AND (COALESCE(ARRAY_LENGTH(@product_names), 0) = 0 OR LOWER(product_name) IN UNNEST(@product_names))
+"""
+
+
+class GenerateBeeswarmArgs(BaseModel):
+    split: Literal["validation", "test"] = Field(description="Dataset split to plot.")
+    model: Literal["LightGBM Classifier", "XGBoost Classifier",
+                   "LightGBM Ranker", "XGBoost Ranker"] = Field(
+        description="Which model's SHAP values to plot.")
+    title: str = Field(description="Chart title. Name the slice if one is selected.")
+    departments: list[str] | None = Field(default=None, description="Only plot these departments.")
+    aisles: list[str] | None = Field(default=None, description="Only plot these aisles.")
+    product_names: list[str] | None = Field(default=None, description="Only plot these products.")
+
+
+def _lowercased(names: list[str] | None) -> list[str]:
+    return sorted({name.lower() for name in names or []})
+
+
+def _fetch_beeswarm_data(split: str, model: str, departments: list[str] | None,
+                         aisles: list[str] | None, product_names: list[str] | None) -> tuple[pd.DataFrame, np.ndarray]:
+    """(sampled rows, mean |SHAP| per feature in BEESWARM_FEATURES order), both for the requested slice."""
+    departments, aisles, product_names = _lowercased(departments), _lowercased(aisles), _lowercased(product_names)
+    query_parameters = [
+        bigquery.ScalarQueryParameter("split", "STRING", split),
+        bigquery.ScalarQueryParameter("model", "STRING", model),
+        bigquery.ArrayQueryParameter("departments", "STRING", departments),
+        bigquery.ArrayQueryParameter("aisles", "STRING", aisles),
+        bigquery.ArrayQueryParameter("product_names", "STRING", product_names),
+        bigquery.ScalarQueryParameter("n", "INT64", BEESWARM_SAMPLE_ROWS),
+    ]
+
+    def submit(sql: str):
+        return get_bq_client().query(sql, job_config=bigquery.QueryJobConfig(query_parameters=query_parameters))
+
+    try:
+        # Submit both queries first, so they run at the same time.
+        sample_job = submit(_BEESWARM_SAMPLE_SQL)
+        importance_job = submit(_BEESWARM_IMPORTANCE_SQL)
+
+        # The importance query aggregates the whole slice, so it returns exactly one row.
+        [importance_row] = importance_job.result()
+
+        # Reject a bad request before downloading the sample.
+        requested_and_matched = [
+            ("departments", departments, importance_row["matched_departments"]),
+            ("aisles", aisles, importance_row["matched_aisles"]),
+            ("product_names", product_names, importance_row["matched_product_names"]),
+        ]
+        for filter_name, requested, matched in requested_and_matched:
+            missing = sorted(set(requested) - set(matched or []))
+            if missing:
+                raise ToolError(
+                    f"No {filter_name.replace('_', ' ')} match {missing} for {model} on the {split} split. Names "
+                    "must match values in prediction_explanations (case doesn't matter) -- look them up with run_bigquery_sql.")
+        if importance_row["n_rows"] < BEESWARM_MIN_ROWS:
+            raise ToolError(
+                f"Only {importance_row['n_rows']} predictions match this model, split, and filters; a beeswarm "
+                f"needs at least {BEESWARM_MIN_ROWS}. Try a broader slice (an aisle's department, or no filter).")
+
+        sample_rows = sample_job.result()
+        df = pd.read_csv(io.StringIO("\n".join(row[0] for row in sample_rows)), header=None, names=_BEESWARM_COLUMNS)
+    except GoogleAPICallError as e:
+        raise ToolError(f"BigQuery error: {e}")
+    return df, np.array([importance_row[feature] for feature in BEESWARM_FEATURES])
+
+
+def _render_beeswarm(df: pd.DataFrame, importance: np.ndarray, model: str, title: str) -> Figure:
+    raw_values = df[[f"raw_{feature}" for feature in BEESWARM_FEATURES]].astype(float)
+    null_filled_columns = [f"raw_{feature}" for feature in NULL_FILLED_FEATURES]
+    raw_values[null_filled_columns] = raw_values[null_filled_columns].replace(NULL_FILL_VALUE, np.nan)
+    explanation = shap.Explanation(
+        values=df[[f"shap_{feature}" for feature in BEESWARM_FEATURES]].to_numpy(dtype=float),
+        data=raw_values.to_numpy(),
+        feature_names=list(SHAP_FEATURE_DISPLAY_NAMES.values()))
+
+    fig = Figure(figsize=BEESWARM_FIGSIZE)
+    ax = fig.subplots()
+    shap.plots.beeswarm(explanation, max_display=len(BEESWARM_FEATURES),
+                        order=np.argsort(-importance), ax=ax, plot_size=None, show=False)
+    
+    ax.set_title(textwrap.fill(title, 60), fontsize=15, fontweight="bold", pad=34)
+
+    ax.text(0.5, 1.03, f"n = {len(df):,} predictions · gray = no value for this feature", transform=ax.transAxes,
+            ha="center", va="bottom", fontsize=12, color="#555555")
+    
+    score_unit = "log-odds" if model.endswith("Classifier") else "raw score"
+    ax.set_xlabel(f"SHAP value ({score_unit})", fontsize=13)
+
+        
+    fig.tight_layout()
+    
+    return fig
+
+
+@tool(args_schema=GenerateBeeswarmArgs)
+async def generate_beeswarm(
+    split: str, model: str, title: str, departments: list[str] | None = None,
+    aisles: list[str] | None = None, product_names: list[str] | None = None, *,
+    bucket_name: Annotated[str, InjectedToolArg],
+    storage_backend: Annotated[str, InjectedToolArg],
+    expiration_hours: Annotated[float, InjectedToolArg],
+    access_token: Annotated[str, InjectedToolArg],
+    service_account_email: Annotated[str, InjectedToolArg],
+) -> list[dict]:
+    """Renders a SHAP beeswarm plot for one model and split, optionally limited to listed
+    departments, aisles, or products (exact names, any case); features are then ranked
+    within that slice. Returns the image URL, plus the image itself so you can describe
+    what it shows. Gray points mean the feature had no value for that prediction. The plot
+    isn't a number source -- don't state values read from it. To quote how many predictions
+    it shows, run SELECT LEAST(COUNT(*), {sample_rows}) over the same split, model, and
+    filters in prediction_explanations. Small slices, a single product especially, rest on
+    fewer predictions: note that their rankings are noisier."""
+    df, importance = await asyncio.to_thread(
+        _fetch_beeswarm_data, split, model, departments, aisles, product_names)
+    fig = await asyncio.to_thread(_render_beeswarm, df, importance, model, title)
+    url, png = await asyncio.to_thread(render_and_upload, fig, bucket_name, storage_backend,
+                                       expiration_hours, access_token, service_account_email)
+    return [
+        {"type": "text", "text": json.dumps({"chart_url": url})},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(png).decode()}"}},
+    ]
+
+generate_beeswarm.handle_tool_error = True
+generate_beeswarm.description = generate_beeswarm.description.format(sample_rows=BEESWARM_SAMPLE_ROWS)
+generate_beeswarm.handle_validation_error = lambda e: str(e)
 
 
 # --- generate_chart (model-facing stand-in) -----------------------------------
@@ -560,11 +897,8 @@ GenerateChartToolCallArgs = create_model(
 @tool("generate_chart", args_schema=GenerateChartToolCallArgs)
 async def chart_tool_call_standin(**kwargs) -> None:
     """Renders a chart from an earlier tool call's result and returns its
-    image URL. source_ref must be the reference id printed alongside the
-    run_bigquery_sql or run_dax_query result you want to chart (e.g.
-    'ref_1') -- copy it exactly as shown; never invent one. See the spec
-    type's own description for its exact shape and grain. Check whether
-    the spec type offers a sort option and use it whenever a sorted view
+    image URL. See the spec type's own description for its exact shape and
+    grain. Check whether the spec type offers a sort option and use it whenever a sorted view
     would present the data more clearly -- don't default to unsorted just
     because the query didn't order it.
     """

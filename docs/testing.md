@@ -172,10 +172,10 @@ output back through `build_history_messages` *is* the real end-to-end check:
 
 ```python
 # tests/test_entry_exit.py
-def test_build_updated_history_redacts_trims_and_round_trips():
-    """One realistic turn exercises all three behaviors together: selective
+def test_build_updated_history_redacts_and_round_trips():
+    """One realistic turn exercises both behaviors together: selective
     redaction (success-gated, not just name-gated — an error-status
-    ToolMessage is left untouched), FIFO trim to HISTORY_TURN_COUNT, and
+    ToolMessage is left untouched) and
     round-tripping the result back through build_history_messages. The
     sample data is deliberately varied (a successful run_bigquery_sql call,
     a successful other-tool call, a failed call, and submit_answer) so a bug
@@ -241,6 +241,39 @@ are thin composition of already-independently-tested pieces (auth covered
 generically; `assert_owns_conversation` has its own test), with no real
 logic of their own to exercise behind a mock. Proven live instead, in
 `notebooks/test_chat_history_endpoints.ipynb`.
+
+## 4d. Conversation memory (`conversation_findings`, `get_conversation_findings`)
+
+`docs/conversation-memory.md`. The row builder is one test; the recall tool's
+pure helpers live in `tests/test_tools.py`, and the pool rule extends
+`test_verify_response` in `tests/test_orchestrator.py`.
+
+```python
+# tests/test_conversation_memory.py
+def test_build_findings_row():
+    """Failed calls and submit_answer dropped from tool_calls, full args kept,
+    ref_id kept, approx_tokens formula, row keys == schema column names."""
+
+# tests/test_tools.py
+def test_build_conversation_overview():
+    """Totals, how many newest turns fit the budget, question truncation, the
+    empty conversation, and the over-budget error carrying the overview."""
+
+def test_resolve_turn_range():
+    """Parametrized: no arguments is everything, last_n clamps, a range passes
+    through; an end past the conversation, or an empty one, raises."""
+
+def test_get_conversation_findings_args_validator():
+    """Arguments that don't belong with the chosen view are rejected."""
+
+# tests/test_orchestrator.py -- inside test_verify_response
+# A recall's verified_numbers verify a claim; its turn index and approx_tokens
+# do not; an overview-shaped dict result adds nothing and doesn't crash.
+```
+
+`read`/`write` against BigQuery (`reader.py`, `write_findings_row`) and the
+tool's budget flow are Layer 2 — proven in `notebooks/phase3_graph.ipynb`:
+mocking the one dependency would mock the whole function.
 
 ## 5. Every tool works, called through the MCP server
 

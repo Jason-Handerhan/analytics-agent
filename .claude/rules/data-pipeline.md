@@ -53,6 +53,12 @@ its `.sqlx` files here.**
 dimension joins and precomputed results. If a candidate model needs no
 enrichment, it doesn't belong in `agent_safe` at all.
 
+**`prediction_explanations` is the one post-model table here** (2026-10-23):
+row-level SHAP explanations unioned from the ML repo's eight
+`ml_model_results.*_row_level_shap` tables (eight flat `sources_*.sqlx`
+declarations), joined to product/aisle/department names. Its units live in the
+table description only (`docs/data-pipeline.md`).
+
 Authorization is just `dataViewer` on `agent_safe`. Tables need a refresh
 trigger: execute the `agent_safe` tag when source data changes.
 

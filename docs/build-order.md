@@ -16,8 +16,35 @@ endpoint, `turns` table recreated clustered on `(user_id, conversation_id)`
 `completed_at` partitions with no pruning benefit, since neither read query
 filters by time), full picker UI (X icon + confirm popup) built and working
 (`docs/frontend.md`'s "Deleting a conversation" section,
-`.claude/rules/gateway.md`'s endpoint table). **Next up: Phase 6 item 2, the
-judge Cloud Run Job.**
+`.claude/rules/gateway.md`'s endpoint table). **Row-level SHAP explanations
+exposed to the agent, 2026-10-23** (also outside the numbered items):
+`agent_safe.prediction_explanations` — the ML repo's eight
+`ml_model_results.*_row_level_shap` tables unioned and joined to product/aisle/
+department names, the one post-model exception to the BigQuery/DAX split
+(`.claude/rules/tools.md`, `docs/data-pipeline.md` Part 1). Routing sits in
+`SYSTEM_INSTRUCTIONS` and `run_bigquery_sql`'s docstring, with one waterfall
+example in `BIGQUERY_FEW_SHOT_EXAMPLES`; the dashboard's model and split carry
+over via `filter_context` (absent → clarifying question). `waterfall` is the
+eleventh `generate_chart` type (`docs/chart-tool.md`). Live-verified in
+`notebooks/phase3_gateway_e2e.ipynb` — the waterfall question dropped from 1:20
+to 41.5s with the example. The `agent_safe` run (both new assertions included)
+and the Cloud Run redeploy both succeeded, 2026-10-23. **The SHAP beeswarm tool,
+2026-10-24** (same side track): `generate_beeswarm`, a local tool in
+`app/orchestrator/tools.py` that samples 30,000 `prediction_explanations` rows for
+one model and split, draws them with `shap`, and returns the image URL **and the
+image itself** to the agent (`docs/chart-tool.md`). Built with two refactors so the
+orchestrator stops importing from the MCP package: chart specs, `render_and_upload`
+and styling moved to `app/shared_chart.py`, and `shared_helpers.py` moved from
+`app/orchestrator/` to `app/shared_helpers.py`. Also in this pass: Claude runs at
+`effort="medium"` (the other providers were already `low`); the waterfall few-shot's
+labels now come from `SHAP_FEATURE_DISPLAY_NAMES` in `app/config.py`; and a token
+review trimmed the prompt by roughly 700 tokens (the orientation architecture diagram
+became a text summary, duplicated tool-description wording was cut). Live-verified in
+`notebooks/phase3_graph.ipynb` and `notebooks/phase3_gateway_e2e.ipynb`, then redeployed.
+The first redeploy failed at startup: with `shap` in the image the container used 520 MiB
+against Cloud Run's 512Mi default, so the service now runs with `--memory=2Gi` (`CLAUDE.md`).
+The first deployed beeswarm took over 60s to prepare; the download of BigQuery's per-cell JSON
+was the cost, and packing each row into one CSV string brought it to 13.2s through the real app. **Conversation memory, steps 1-2, 2026-10-27** (also outside the numbered items; `docs/conversation-memory.md`): history prompt caching works (Firestore returned map keys in varying order, so `build_history_messages` now sorts them), a cancelled turn is always discarded, and `finalize` writes a `conversation_findings` row per verified turn. The new `get_conversation_findings` tool (overview or turns views) lets the agent summarize and quote earlier answers; its numbers join the pool through `MEMORY_SOURCE_TOOLS`. Live-verified in `notebooks/phase3_graph.ipynb` (a 7-turn summary and a recall from 5 turns back, both verified), then ported; not yet redeployed. **Per-turn tags, 2026-10-28:** `title`, `topics` and `entities` are optional `submit_answer` fields, stored on `conversation_findings` and shown in the overview. Compaction was redesigned: a plain function in `app/orchestrator/compaction.py` that the gateway runs before the graph and persists immediately, summarizing from the ledger rows (with a `turn_range_summaries` table), keeping only the latest summary. **Compaction, 2026-10-29:** built and unit-checked with stand-ins, not yet live-tested or deployed -- `compact_history_pipeline` runs in the gateway before the graph (token or byte trigger, "Compacting..." status, saved immediately), writes `turn_range_summaries`, records four telemetry fields, and the turn-count FIFO is gone (compaction alone bounds the history). Thresholds are set low for testing. Search is designed, not built (`docs/conversation-memory.md`). **Next up: Phase 6 item 2, the judge Cloud Run Job** (or memory step 3, compaction — to be decided).
 
 **Phase 3 complete** (items 1-15, see the entries below) — **Phase 4
 complete, 2026-10-19: item 1 (visual grounding) built and live-verified,
@@ -43,7 +70,7 @@ Chat history's backend is built and live-verified, 2026-10-14: the
 (`write_chat_history`), and both read endpoints (`GET /conversations`,
 `GET /conversations/{id}/history`), all behind the `turn-writer-sa`
 impersonation shared with telemetry (`get_turn_writer_client` in
-`app/orchestrator/shared_helpers.py`) — confirmed via
+`app/shared_helpers.py`) — confirmed via
 `notebooks/test_chat_history_endpoints.ipynb`, including the
 `assert_owns_conversation` 404 case. Deployed to Cloud Run and the connector
 updated with the two new operations and tested live, 2026-10-14. **Frontend
@@ -108,7 +135,7 @@ reconciled with what's actually built; validated with the
 **Item 15 (cancellation) — both layers complete, live-verified, and
 Layer 1 tested, 2026-10-09.** Layer 1:
 `get_firestore_client`/`live_turn_doc`/a new `is_cancelled` moved to
-`app/orchestrator/shared_helpers.py` -- the first time orchestrator-layer
+`app/shared_helpers.py` -- the first time orchestrator-layer
 code reads Firestore directly, not just the gateway. All five routing
 functions (`route_entry`, `route_after_agent`, `route_after_call_tool`,
 `route_after_check_length`, `route_after_verify`) are `async def` now and
@@ -1271,8 +1298,9 @@ layer failed.
    `scripts/build_model_context.py`, reading the two whole-page HTML
    measures' DAX string literals directly (no live `EVALUATE` needed — the
    expression *is* the HTML) and converting to plain text via
-   `unstructured.partition_html`. Then `list_repo_files` / `read_repo_file`
-   with the `github-read-token` secret and the hand-written
+   `unstructured.partition_html`. Then `get_repo_contents` (planned as a
+   `list_repo_files`/`read_repo_file` pair, merged when built) with the
+   `github-read-token` secret and the hand-written
    `FILE_DESCRIPTIONS` map (`docs/code-search.md`). The code tools are
    genuinely least critical — build them last.
 10. **Firestore chat history** (`.claude/rules/gateway.md`) — the `sessions`
@@ -1360,7 +1388,7 @@ layer failed.
    verified directly via the real `/ask` route in the meantime, same
    pattern as Phase 0's `executeQueries` smoke test.
 15. **User cancellation** — `POST /ask/cancel/{conversation_id}` writing the
-   `cancel_requested` flag, read by `is_cancelled` (`app/orchestrator/shared_helpers.py`).
+   `cancel_requested` flag, read by `is_cancelled` (`app/shared_helpers.py`).
    **Both layers built and live-verified, 2026-10-09** (see the status block
    above for the full account, including the real bugs found live, the
    `InjectedToolArg` mechanism, and the "cancellation is real but not
@@ -1450,8 +1478,8 @@ layer failed.
 5. ~~The remaining `generate_chart` spec types beyond Phase 3's three~~ —
    **stale, confirmed 2026-10-10: all 10 documented chart types
    (`docs/chart-tool.md`) are already built**
-   (`app/mcp_server/chart_tool.py` has all 10 spec classes). Nothing left
-   here.
+   (`app/shared_chart.py` has all 10 spec classes). Nothing left
+   here. (An 11th, `waterfall`, was added later — see the status block.)
 
 ## Phase 5 — Skipped
 

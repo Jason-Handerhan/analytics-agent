@@ -34,6 +34,7 @@ from app.config import (
     PENDING_APPROVAL_THRESHOLD,
     AGENT_SA_EMAIL,
     BIGQUERY_PRICE_PER_TIB,
+    CHART_TOOLS,
     CHART_URL_EXPIRATION_HOURS,
     CONTEXT_DIR,
     DAX_ROW_CAP,
@@ -54,13 +55,15 @@ from app.config import (
     MCP_SERVER_HEADERS,
     MCP_SERVER_NAME,
     MCP_SERVER_URL,
+    MEMORY_SOURCE_TOOLS,
     NUMERIC_SOURCE_TOOLS,
     POWER_BI_DATASET_ID,
     POWER_BI_WORKSPACE_ID,
     get_secret,
 )
 from app.orchestrator.context import build_static_context, get_static_context
-from app.orchestrator.shared_helpers import is_cancelled, label_chartable_result
+from app.orchestrator.conversation_memory.writer import build_findings_row, write_findings_row
+from app.shared_helpers import is_cancelled, label_chartable_result
 from app.orchestrator.state import AgentState, ToolCallRecord, TurnError
 from app.orchestrator.tools import (
     CombineResultsToolCallArgs,
@@ -70,6 +73,8 @@ from app.orchestrator.tools import (
     chart_tool_call_standin,
     combine_results_call_standin,
     dry_run,
+    generate_beeswarm,
+    get_conversation_findings,
     get_measure_dax,
     get_page_info,
     run_bigquery_sql,
@@ -122,6 +127,8 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "get_measure_dax": get_measure_dax,
         "search_docs": search_docs,
         "get_page_info": get_page_info,
+        "get_conversation_findings": get_conversation_findings,
+        "generate_beeswarm": generate_beeswarm,
     }
     get_static_context()  # warms the @lru_cache at startup, not on the first real turn
 
@@ -373,29 +380,44 @@ def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> 
 
 
 async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
-                               filter_context: list[dict]) -> ToolMessage:
+                               filter_context: list[dict], conversation_id: str) -> ToolMessage:
     """Dispatches one non-BigQuery tool call, injecting hidden args first."""
+    
+    # Get page info
     if tc["name"] == "get_page_info":
         full_args = {**tc, "args": {**tc["args"], "filter_context": filter_context}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # Conversation findings recall
+    if tc["name"] == "get_conversation_findings":
+        full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # Structured Response
     if tc["name"] == "submit_answer":
         # Only reachable when not the sole call this round.
         return ToolMessage(
             content="Not recorded -- submit_answer must be your only tool call "
                     "this round. Call it alone, with nothing else.",
             name=tc["name"], tool_call_id=tc["id"], status="error")
+    
+    # Run Dax Query
     if tc["name"] == "run_dax_query":
         try:
             full_args = await inject_dax_args(tc)
         except ToolError as e:
             return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # GitHub Repo Code Search
     if tc["name"] == "get_repo_contents":
         try:
             full_args = inject_code_search_args(tc)
         except ToolError as e:
             return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # Generate Chart
     if tc["name"] == "generate_chart":
         try:
             args_w_data = resolve_chart_data(tc, prior_tool_calls)
@@ -403,6 +425,16 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
         except ToolError as e:
             return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # Generate Beeswarm
+    if tc["name"] == "generate_beeswarm":
+        try:
+            full_args = await inject_chart_args(tc)
+        except ToolError as e:
+            return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # Combine Results (join/union)
     if tc["name"] == "combine_results":
         try:
             full_args = resolve_combine_data(tc, prior_tool_calls)
@@ -487,6 +519,14 @@ def extract_numeric_values(data: list[dict] | str) -> list[float]:
     return values
 
 
+def extract_verified_numbers(result: list[dict] | dict) -> list[float]:
+    """The verified_numbers of each turn in a recall result -- nothing else in the result counts.
+    The overview view returns a dict, which has none."""
+    if not isinstance(result, list):
+        return []
+    return [n for turn in result for n in turn["verified_numbers"]]
+
+
 def _cell_text(node: dict) -> str:
     """Extracts text from a cell by recursively checking levels for the text node."""
     if node.get("type") == "text":
@@ -515,13 +555,16 @@ def extract_table_values(answer_markdown: str) -> list[float]:
 
 
 def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
-    """Every number from this turn's successful BigQuery/DAX query results --
-    the only tools that return genuine queried data, not incidental numbers
-    embedded in code, doc chunks, or metadata."""
+    """Every number the answer may cite: this turn's successful BigQuery/DAX results
+    (every numeric leaf), plus verified_numbers from a successful recall."""
     pool: set[float] = set()
     for tc in tool_calls:
-        if tc["success"] and tc["name"] in NUMERIC_SOURCE_TOOLS:
+        if not tc["success"]:
+            continue
+        if tc["name"] in NUMERIC_SOURCE_TOOLS:
             pool.update(extract_numeric_values(tc["result"]))
+        elif tc["name"] in MEMORY_SOURCE_TOOLS:
+            pool.update(extract_verified_numbers(tc["result"]))
     return pool
 
 
@@ -563,7 +606,9 @@ SOURCE_LABELS = {
     "get_page_info":    "PBI page info",
     "get_repo_contents": "Read code",
     "search_docs":      "Doc Search",
+    "get_conversation_findings": "Searched Memory",
     "generate_chart":   "Create chart",
+    "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
 }
 
@@ -602,13 +647,31 @@ def build_model(model: str, model_provider: str) -> BaseChatModel:
     agent_node binds the tools list the same way regardless of provider.
     Thinking/reasoning enabled for frontend display"""
     if model_provider == "anthropic":
-        return ChatAnthropic(model=model, thinking={"type": "adaptive", "display": "summarized"})
+        return ChatAnthropic(model=model, thinking={"type": "adaptive", "display": "summarized"}, effort="medium")
     if model_provider == "openai":
         return ChatOpenAI(model=model, use_responses_api=True,
                            reasoning={"effort": "low", "summary": "auto"})
     if model_provider == "gemini":
         return ChatGoogleGenerativeAI(model=model, reasoning_effort="low", include_thoughts=True)
     raise ValueError(f"No model factory branch for provider: {model_provider}")
+
+
+def mark_anthropic_history_cache(history: list[BaseMessage]) -> list[BaseMessage]:
+    """Returns history with cache breakpoints on the last message of the previous stored turn
+    and of the newest one, so a turn reads older history from cache and writes only the newest."""
+    if not history:
+        return history
+    marked = list(history)
+    newest_turn_start = max((i for i, msg in enumerate(marked) if msg.additional_kwargs.get("turn_start")), default=0)
+    previous_turn_end = newest_turn_start - 1 if newest_turn_start else None
+    for i in (previous_turn_end, len(marked) - 1):
+        if i is None or not marked[i].content:
+            continue
+        msg = marked[i]
+        blocks = [{"type": "text", "text": msg.content}] if isinstance(msg.content, str) else list(msg.content)
+        blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+        marked[i] = msg.model_copy(update={"content": blocks})
+    return marked
 
 
 # --- Node functions ------------------------------------------------------
@@ -619,7 +682,10 @@ async def agent_node(state: AgentState) -> dict:
     model = build_model(state["model"], state["model_provider"]).bind_tools(
         build_tools_list(state["model_provider"]), strict=True)
     system_message = SystemMessage(content=build_static_context(state["model_provider"], get_static_context()))
-    response = await model.ainvoke([system_message, *state["history_messages"], *state["messages"]])
+    history = state["history_messages"]
+    if state["model_provider"] == "anthropic":
+        history = mark_anthropic_history_cache(history)
+    response = await model.ainvoke([system_message, *history, *state["messages"]])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 
 
@@ -646,6 +712,9 @@ async def call_tool_node(state: AgentState) -> dict:
             "clarifying_question": args.clarifying_question,
             "all_prose_numeric_claims": args.all_prose_numeric_claims,
             "suggested_follow_ups": [] if is_question else args.suggested_follow_ups,
+            "title": args.title,
+            "topics": args.topics,
+            "entities": args.entities,
         }
     # Exceeds iteration cap Branch: Declines and builds error messages for every tool call in the batch.
     if state["iteration_count"] >= MAX_ITERATIONS:
@@ -692,7 +761,8 @@ async def call_tool_node(state: AgentState) -> dict:
 
     other_started_at = datetime.now(timezone.utc)
     other_messages = await asyncio.gather(*[
-        dispatch_other_call(tc, state["tool_calls"], state["filter_context"]) for tc in other_calls
+        dispatch_other_call(tc, state["tool_calls"], state["filter_context"], state["conversation_id"])
+        for tc in other_calls
     ])
     other_completed_at = datetime.now(timezone.utc)
 
@@ -746,7 +816,7 @@ async def call_tool_node(state: AgentState) -> dict:
     total_billed_bytes = sum(r["bytes_billed"] for r in bq_result.records if r["success"])
     chart_urls = [
         r["result"]["chart_url"] for r in other_result.records
-        if r["name"] == "generate_chart" and r["success"]
+        if r["name"] in CHART_TOOLS and r["success"]
     ]
     cancelled = await is_cancelled(state["conversation_id"])
 
@@ -822,17 +892,17 @@ async def verify_node(state: AgentState) -> dict:
 async def finalize_node(state: AgentState) -> dict:
     """Tallies tokens/sources, builds and writes the telemetry row. Each
     terminal state ships its own canned message if the turn has no real
-    answer_markdown yet; a cancelled turn keeps a real answer only if
-    verify_node already confirmed it this turn."""
+    answer_markdown yet; a cancelled turn always gets CANCELLED_MESSAGE, even
+    if verify_node already confirmed an answer."""
     cancelled = await is_cancelled(state["conversation_id"])
 
     #Set needs_approval to false if cancelled. Cancelled takes priority over approval workflow.
     needs_approval = False if cancelled else state["needs_approval"]
 
-    #Cancelled Branch: Return answer if there is already a verified answer -- cancel message otherwise
+    #Cancelled Branch: Cancel message
     if cancelled:
-        answer_markdown = state["answer_markdown"] if state["verified"] else CANCELLED_MESSAGE
-        
+        answer_markdown = CANCELLED_MESSAGE
+
     #Approval Branch: Build approval message for answer markdown
     elif needs_approval:
         answer_markdown = (
@@ -851,6 +921,7 @@ async def finalize_node(state: AgentState) -> dict:
 
     prompt_tokens, completion_tokens = sum_token_usage(state["messages"])
     sources = build_sources(state["tool_calls"])
+    completed_at = datetime.now(timezone.utc)
     row = build_telemetry_row(
         conversation_id=state["conversation_id"],
         user_id=state["user_id"],
@@ -859,7 +930,7 @@ async def finalize_node(state: AgentState) -> dict:
         question=state["question"],
         answer_markdown=answer_markdown,
         turn_started_at=state["turn_started_at"],
-        turn_completed_at=datetime.now(timezone.utc),
+        turn_completed_at=completed_at,
         filter_context=state["filter_context"],
         active_page=state["active_page"],
         tool_calls=state["tool_calls"],
@@ -886,8 +957,32 @@ async def finalize_node(state: AgentState) -> dict:
         suggested_follow_ups=state["suggested_follow_ups"],
         all_prose_numeric_claims=state["all_prose_numeric_claims"],
         clarifying_question=state["clarifying_question"],
+        compacted=state["compacted"],
+        compaction_failed=state["compaction_failed"],
+        compaction_prompt_tokens=state["compaction_prompt_tokens"],
+        compaction_completion_tokens=state["compaction_completion_tokens"],
     )
-    await write_telemetry_row(row)
+
+    writes = [write_telemetry_row(row)]
+    if state["verified"] and not cancelled:
+        verified_numbers = state["all_prose_numeric_claims"] + extract_table_values(answer_markdown)
+        findings_row = build_findings_row(
+            conversation_id=state["conversation_id"],
+            user_id=state["user_id"],
+            answered_at=completed_at,
+            question=state["question"],
+            answer_markdown=answer_markdown,
+            verified_numbers=verified_numbers,
+            filter_context=state["filter_context"],
+            active_page=state["active_page"],
+            sources=sources,
+            title=state["title"],
+            topics=state["topics"],
+            entities=state["entities"],
+            tool_calls=state["tool_calls"],
+        )
+        writes.append(write_findings_row(findings_row))
+    await asyncio.gather(*writes)
     return {
         "answer_markdown": answer_markdown,
         "prompt_tokens": prompt_tokens,

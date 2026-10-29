@@ -294,7 +294,7 @@ What each directory is for, and where its spec lives:
 | `context/docs/` | Project docs + abbreviated README — methodology corpus, **input to the vector index** | `docs/data-pipeline.md` |
 | `context/page_info/` | Power BI page-info HTML — read **whole** by `get_page_info`; not chunked or embedded | `.claude/rules/tools.md` |
 | `context/schema/` | `model_schema.json` — **committed, read at startup** into the table + measure registries (`docs/data-pipeline.md`). Also BigQuery schema snapshots, which are a development aid only | `.claude/rules/gateway.md` |
-| `context/orientation/` | Exec summary + navigator + architecture diagram — always-in-context bundle | `.claude/rules/gateway.md` |
+| `context/orientation/` | Exec summary + navigator + architecture summary — always-in-context bundle | `.claude/rules/gateway.md` |
 | `scripts/` | One-off/manual jobs: `build_model_context.py` (semantic-model registries), `build_vector_db.py` (docs chunking), schema dumps, judge Cloud Run Job, golden dataset runner | `docs/data-pipeline.md`, `docs/llm-judge.md`, `docs/golden-dataset.md` |
 | `definitions/` | Flat `sources_*.sqlx` declarations, `agent_safe/` tables (**tables only, never views**), `vector_db/` embedding models — **written and pushed here like any other code; deployed via a GitHub-linked Dataform repository, not by this repo directly** (`docs/data-pipeline.md`) | `docs/data-pipeline.md` |
 | `notebooks/` | Throwaway validation of isolated logic against real data | — |

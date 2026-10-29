@@ -12,7 +12,7 @@ from app.config import (
     GCP_PROJECT_ID,
 )
 from app.gateway.models import ConversationSummary, ConversationTurn
-from app.orchestrator.shared_helpers import get_turn_writer_client
+from app.shared_helpers import get_turn_writer_client
 
 GET_HISTORY_SQL = f"""
 SELECT turn_data

@@ -15,7 +15,7 @@ that.
 
 That approach breaks down for one case: a derivation spanning a BigQuery
 value and a DAX value. No single query can produce it — they're separate
-engines. `tools.md`'s domain split (BigQuery pre-modeling, DAX post-modeling)
+engines. `tools.md`'s domain split (BigQuery pre-modeling, DAX post-modeling, bar the `prediction_explanations` exception)
 already keeps this rare; this tool is the fallback for when it's actually
 needed, not the default path.
 

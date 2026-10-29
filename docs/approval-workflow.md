@@ -165,7 +165,7 @@ resume.** `build_pending_approval` redacts every successful non-`submit_answer`
 message). On resume, `rebuild_paused_messages` walks the stored messages and
 restores only the ones whose matching `ToolCallRecord` is a successful
 `NUMERIC_SOURCE_TOOLS` result — reconstructing the exact labeled content
-(`label_chartable_result`, `app/orchestrator/shared_helpers.py`) the model
+(`label_chartable_result`, `app/shared_helpers.py`) the model
 originally saw, same `ref_id` included, by reading `tool_calls` (which is
 *never* redacted, carried in full) rather than re-running anything. Numeric
 results survive **every** pause/resume cycle in a turn, all the way back to

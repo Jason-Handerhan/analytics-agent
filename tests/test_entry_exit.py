@@ -2,6 +2,7 @@
 (docs/testing.md). Every function here is pure (plain dicts/BaseMessage in,
 plain dicts/BaseMessage out), so nothing is mocked.
 """
+import json
 from datetime import datetime, timezone
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messages_from_dict, messages_to_dict
@@ -10,7 +11,6 @@ from app.config import (
     ANSWER_CODE_BLOCK_BG,
     ANSWER_INLINE_CODE_BG,
     ANSWER_TABLE_HEADER_BG,
-    HISTORY_TURN_COUNT,
 )
 from app.gateway.entry_exit import (
     GEMINI_THOUGHT_SIGNATURES_KEY,
@@ -32,11 +32,30 @@ from app.gateway.entry_exit import (
 from app.orchestrator.state import AgentState
 
 
+def test_build_history_messages_ignores_map_key_order():
+    """The same stored turn with its nested map keys in a different order (as Firestore
+    returns them) rebuilds to identical messages, tool-call args included."""
+    spec = {"title": "t", "chart_type": "heatmap", "x_field": "a", "y_field": "b"}
+    reordered_spec = {"y_field": "b", "x_field": "a", "chart_type": "heatmap", "title": "t"}
+
+    def stored(chart_spec):
+        call = {"name": "generate_chart", "args": {"spec": chart_spec, "source_ref": "ref_1"}, "id": "toolu_1"}
+        block = {"type": "tool_use", "id": "toolu_1", "name": "generate_chart", "input": call["args"]}
+        return {"messages": messages_to_dict([AIMessage(content=[block], tool_calls=[call])])}
+
+    original = build_history_messages([stored(spec)])
+    reordered = build_history_messages([stored(reordered_spec)])
+    assert list(original[0].tool_calls[0]["args"]["spec"]) == sorted(spec)
+    assert json.dumps(original[0].content) == json.dumps(reordered[0].content)
+    assert json.dumps(original[0].tool_calls) == json.dumps(reordered[0].tool_calls)
+
+
 def test_build_human_message():
     """Question plus optional dashboard-page/filter-state grounding."""
     plain = build_human_message("How many orders?", [], None)
     assert isinstance(plain, HumanMessage)
     assert plain.content == "How many orders?"
+    assert datetime.fromisoformat(plain.additional_kwargs["turn_start"]).tzinfo is not None   # the turn's start time
 
     with_page = build_human_message("q", [], "Financial Impact")
     assert "Current dashboard page: Financial Impact" in with_page.content
@@ -224,13 +243,11 @@ def _fake_turn(label: str) -> dict:
     }
 
 
-def test_build_updated_history_redacts_trims_and_round_trips():
-    """One realistic turn exercises all three behaviors together: selective
-    redaction (success-gated, not just name-gated), FIFO trim to
-    HISTORY_TURN_COUNT, and round-tripping the result back through
+def test_build_updated_history_redacts_and_round_trips():
+    """One realistic turn exercises selective redaction (success-gated, not
+    just name-gated) and round-tripping the result back through
     build_history_messages."""
-    # One more prior turn than the cap allows -- the oldest must be dropped.
-    history_messages = [_fake_turn(f"question {n}") for n in range(HISTORY_TURN_COUNT + 1)]
+    history_messages = [_fake_turn("question 0")]
 
     bq_result = ToolMessage(content='[{"count": 42}]', name="run_bigquery_sql",
                              tool_call_id="call_1", status="success")
@@ -253,17 +270,12 @@ def test_build_updated_history_redacts_trims_and_round_trips():
     ]}
 
     updated = build_updated_history(history_messages, state)
-
-    # FIFO trim: HISTORY_TURN_COUNT + 1 prior turns plus this one -- only
-    # the most recent HISTORY_TURN_COUNT survive.
-    assert len(updated) == HISTORY_TURN_COUNT
+    assert len(updated) == 2
 
     reconstructed = build_history_messages(updated)
 
-    # The oldest prior turn was really dropped, not just over-counted away.
     human_contents = [msg.content for msg in reconstructed if isinstance(msg, HumanMessage)]
-    assert "question 0" not in human_contents
-    assert "How many orders?" in human_contents
+    assert human_contents == ["question 0", "How many orders?"]
 
     # Selective redaction -- success-gated, not just name-gated.
     tool_messages = {msg.tool_call_id: msg for msg in reconstructed if isinstance(msg, ToolMessage)}

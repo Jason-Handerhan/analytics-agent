@@ -117,9 +117,10 @@ that area, rather than reconstructing the design from memory:
 |---|---|
 | `docs/testing.md` | Writing any test, or deciding if something is testable |
 | `docs/data-pipeline.md` | All three pipelines: `agent_safe`, the model-schema artifact, the docs vector index |
-| `docs/chart-tool.md` | Anything touching `generate_chart` or chart specs |
+| `docs/chart-tool.md` | Anything touching `generate_chart`, `generate_beeswarm`, or chart specs |
 | `docs/combine-tool.md` | Anything touching `combine_results` or its stack/join contract |
 | `docs/code-search.md` | The GitHub code tools — why agentic, not vector |
+| `docs/conversation-memory.md` | The findings ledger, `get_conversation_findings`, and the planned compaction (turn-range summaries) and search |
 | `docs/approval-workflow.md` | Cost tiers, the approval pause, `/ask/respond` |
 | `docs/auth.md` | Any identity boundary — the request-time chain, connector OAuth, service accounts |
 | `docs/ci-cd.md` | The GitHub Actions workflow, deploy gate, `github-deployer` |
@@ -139,7 +140,8 @@ than the task needs.
 
 ## Ask me — don't decide alone
 
-- Which results tables get excluded from `agent_safe`.
+- Which results tables get excluded from `agent_safe` (`prediction_explanations`
+  is in, decided 2026-10-23).
 - Real measure/table names from the live semantic model — documented DAX
   examples use placeholders.
 - Anything that changes the verification contract.
@@ -197,8 +199,13 @@ gcloud run deploy analytics-gateway \
   --source . \
   --service-account=agent-sa@YOUR_PROJECT.iam.gserviceaccount.com \
   --allow-unauthenticated \
+  --memory=2Gi \
   --region=YOUR_REGION
 ```
+
+**`--memory=2Gi` is required, not tuning.** The 512Mi default is exceeded at
+startup (520 MiB used with `shap` in the image, 2026-10-24) and the revision never
+serves. The flag persists across deploys, but keep it in any new deploy command.
 
 **No `--set-env-vars`, no `--set-secrets`.** Every non-secret config value
 (`GCP_PROJECT_ID`, `TENANT_ID`, `EXPECTED_AUDIENCE`, `GCS_CHART_BUCKET`,

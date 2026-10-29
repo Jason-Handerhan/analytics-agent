@@ -1,4 +1,4 @@
-"""Layer 1 tests for app/mcp_server/chart_tool.py -- pure rendering logic,
+"""Layer 1 tests for app/shared_chart.py -- pure rendering logic,
 no MCP server, no live data (docs/testing.md).
 
 Constructed the same way as notebooks/phase3_chart_specs.ipynb -- a raw
@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from matplotlib.colors import to_rgba
 
-from app.mcp_server.chart_tool import (
+from app.shared_chart import (
     ChartSpecBase,
     GenerateChartArgs,
     BarChartSpec, HorizontalBarChartSpec, GroupedBarChartSpec,

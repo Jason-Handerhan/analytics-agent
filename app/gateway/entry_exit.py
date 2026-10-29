@@ -29,24 +29,23 @@ from app.config import (
     ANSWER_TABLE_HEADER_BG,
     ANSWER_TABLE_HEADER_BORDER,
     ANSWER_TABLE_HEADER_TEXT,
-    HISTORY_TURN_COUNT,
     NUMERIC_SOURCE_TOOLS,
 )
 from app.gateway.models import AgentResponse
-from app.orchestrator.shared_helpers import label_chartable_result
+from app.shared_helpers import label_chartable_result
 from app.orchestrator.state import AgentState, PendingApproval, ToolCallRecord
 
 
 # --- Turn setup (gateway request -> graph input) ---------------------------
 
 def build_human_message(question: str, filter_context: list[dict], active_page: str | None) -> HumanMessage:
-    """The turn's initial HumanMessage -- question plus dashboard grounding."""
+    """The turn's initial HumanMessage -- question plus dashboard filter context."""
     content = question
     if active_page:
         content += f"\n\nCurrent dashboard page: {active_page}"
     if filter_context:
         content += f"\n\nCurrent filter state: {filter_context}"
-    return HumanMessage(content=content)
+    return HumanMessage(content=content, additional_kwargs={"turn_start": datetime.now(timezone.utc).isoformat()})
 
 
 def build_initial_state(
@@ -90,12 +89,19 @@ def build_initial_state(
         cost_cap_exceeded=False,
         iteration_cap_hit=False,
         answer_submitted=False,
+        compacted=False,
+        compaction_failed=False,
+        compaction_prompt_tokens=0,
+        compaction_completion_tokens=0,
         answer_markdown="",
         clarifying_question="",
         chart_urls=[],
         sources=[],
         all_prose_numeric_claims=[],
         suggested_follow_ups=[],
+        title="",
+        topics=[],
+        entities=[],
     )
 
 
@@ -193,19 +199,22 @@ def _restore_gemini_signatures(messages: list[dict]) -> list[dict]:
 
 
 def build_updated_history(history_messages: list[dict], state: AgentState) -> list[dict]:
-    """Returns the updated history_messages list -- FIFO-trimmed to
-    HISTORY_TURN_COUNT, with this turn's messages appended."""
+    """Returns the updated history_messages list with this turn's messages appended."""
     redacted = _strip_thinking_blocks(_redact_tool_results(state["messages"], STALE_RESULT_MESSAGE))
     new_entry = {"messages": _drop_gemini_signatures(messages_to_dict(redacted)),
                  "timestamp": datetime.now(timezone.utc)}
-    return (history_messages + [new_entry])[-HISTORY_TURN_COUNT:]
+    return history_messages + [new_entry]
 
 
 def build_history_messages(history_messages: list[dict]) -> list[BaseMessage]:
-    """Reconstructs prior turns' message sequence -- real tool structure, not prose."""
+    """Reconstructs prior turns' message sequence -- real tool structure, not prose.
+    Keys are sorted because Firestore returns map keys in varying order, which would
+    change the rendered prompt and miss the prompt cache."""
     result: list[BaseMessage] = []
     for turn in history_messages:
-        result.extend(messages_from_dict(turn["messages"]))
+        #Convert to json to sort with sort_keys=True, then convert back to dictionary
+        sorted_messages = json.loads(json.dumps(turn["messages"], sort_keys=True))
+        result.extend(messages_from_dict(sorted_messages))
     return result
 
 
@@ -213,8 +222,7 @@ def build_history_messages(history_messages: list[dict]) -> list[BaseMessage]:
 
 def build_pending_approval(state: AgentState) -> PendingApproval:
     """The handoff object POST /ask/respond resumes from -- carries only what's
-    needed to resume reasoning or bounds total turn consumption; everything
-    else resets by construction. Tool results are redacted the same way as
+    needed to resume reasoning. Tool results are redacted the same way as
     cross-turn history (rebuild_paused_messages below restores numeric ones
     from their ToolCallRecord on resume)."""
     return PendingApproval(
