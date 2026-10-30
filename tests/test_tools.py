@@ -234,12 +234,15 @@ def _overview_rows(token_counts):
 
 
 def test_build_conversation_overview():
-    """Totals, the newest turns that fit the budget, question truncation, and the empty conversation."""
+    """Totals, the newest turns that fit the budget, the summaries passed through, question
+    truncation, and the empty conversation."""
     rows = _overview_rows([100, 200, 300])
     rows[0]["question"] = "x" * 400
-    overview = tools_module.build_conversation_overview(rows, token_budget=550)
+    summaries = [{"first_turn": 1, "last_turn": 2, "title": "early work", "summary": "What was found."}]
+    overview = tools_module.build_conversation_overview(rows, summaries, token_budget=550)
 
-    assert overview["total_turns"] == 3 and overview["total_approx_tokens"] == 600
+    assert overview["summaries"] == summaries
+    assert overview["total_turns"] == 3 and overview["total_approx_tokens"] == 600   # summaries add nothing
     assert overview["max_recent_turns_within_budget"] == 2     # 300 + 200 fit; adding 100 would not
     assert overview["first_answered_at"] == rows[0]["answered_at"]
     assert (overview["turns"][1]["title"], overview["turns"][1]["topics"], overview["turns"][1]["entities"]) == (
@@ -250,8 +253,9 @@ def test_build_conversation_overview():
     error = str(tools_module._over_budget_error(overview, 1, 3, 600))
     assert "Turns 1-3" in error and '"max_recent_turns_within_budget": 2' in error
 
-    empty = tools_module.build_conversation_overview([], token_budget=550)
+    empty = tools_module.build_conversation_overview([], [], token_budget=550)
     assert empty["total_turns"] == 0 and empty["max_recent_turns_within_budget"] == 0
+    assert empty["summaries"] == []
     assert empty["first_answered_at"] is None
 
 

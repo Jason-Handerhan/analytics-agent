@@ -219,7 +219,7 @@ later changes the URL and adds auth headers — not this file.
 | `generate_chart` | Visualization | Renders already-fetched data; **never** a number source |
 | `generate_beeswarm` | SHAP beeswarm for one model and split, optionally narrowed to a department, aisle, or product — returns the image URL **and the image itself** | Shows the overall pattern across many predictions; **never** a number source |
 | `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
-| `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
+| `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions, compaction summaries) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
 | `search_conversation_findings` | Semantic (vector) search over earlier verified answers, in this conversation or all of the user's: `mode="search"` (closest turns) or `mode="tags"` (topics and entities in use) | Only a hit's `verified_numbers` are a number source; tags are never citable (`docs/conversation-memory.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at

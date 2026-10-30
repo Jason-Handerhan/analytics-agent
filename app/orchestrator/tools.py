@@ -47,6 +47,7 @@ from app.model_schema import MEASURE_DAX, MEASURE_NAMES
 from app.orchestrator.conversation_memory.embedding import embed_query
 from app.orchestrator.conversation_memory.reader import (
     fetch_overview_rows,
+    fetch_summaries,
     fetch_tag_counts,
     fetch_turns,
     fetch_vector_search_hits,
@@ -574,9 +575,10 @@ quote a number from an earlier turn. Numbers sitting in your message history can
 answer; only numbers returned by view="turns" can.
 
 view="overview": takes no other arguments. Returns the number of verified turns, their sizes in
-tokens, how many of the newest turns fit in one call, and each turn's number, date, sources, title,
-topics, entities and question. Use it to choose which turns to recall. Numbers in the overview
-cannot pass verification and must not be cited in any answer.
+tokens, how many of the newest turns fit in one call, a summary of each earlier stretch (turn range,
+title, topics, text), and each turn's number, date, sources, title, topics, entities and question.
+Use it to choose which turns to recall. Numbers in the overview, summaries included, cannot pass
+verification and must not be cited in any answer.
 
 view="turns": returns full rows (question, answer, verified numbers, sources, title, topics,
 entities, filters) for turns start_turn..end_turn (1-based, inclusive; give both), or for the newest
@@ -623,9 +625,9 @@ class GetConversationFindingsArgs(BaseModel):
         return self
 
 
-def build_conversation_overview(rows: list[dict], token_budget: int) -> dict:
+def build_conversation_overview(rows: list[dict], summaries: list[dict], token_budget: int) -> dict:
     """Summary of a conversation's verified turns: totals, how many of the newest
-    turns fit token_budget, and one entry per turn."""
+    turns fit token_budget, the compaction summaries, and one entry per turn."""
     recent_turns_that_fit = 0
     tokens = 0
     for row in reversed(rows):
@@ -640,6 +642,7 @@ def build_conversation_overview(rows: list[dict], token_budget: int) -> dict:
         "max_recent_turns_within_budget": recent_turns_that_fit,
         "first_answered_at": rows[0]["answered_at"] if rows else None,
         "last_answered_at": rows[-1]["answered_at"] if rows else None,
+        "summaries": summaries,
         "turns": [
             {
                 "turn": row["turn"],
@@ -691,8 +694,9 @@ async def get_conversation_findings(
     include_tool_calls: bool = False,
 ) -> dict | list[dict]:
     try:
-        overview_rows = await fetch_overview_rows(conversation_id)
-        overview = build_conversation_overview(overview_rows, MEMORY_RECALL_TOKEN_BUDGET)
+        overview_rows, summaries = await asyncio.gather(
+            fetch_overview_rows(conversation_id), fetch_summaries(conversation_id))
+        overview = build_conversation_overview(overview_rows, summaries, MEMORY_RECALL_TOKEN_BUDGET)
         if view == "overview":
             return overview
 

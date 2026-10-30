@@ -4,9 +4,9 @@
 recall tool `get_conversation_findings`, per-turn tags (`title`, `topics`,
 `entities`), compaction (`app/orchestrator/compaction.py`, the
 `turn_range_summaries` table, the gateway pre-step, the telemetry fields), embeddings
-at write time, and the search tool `search_conversation_findings`. **Designed, not
-built:** the recall tool's summary-aware versions (overview as a table of contents).
-Not yet redeployed. Update this line and `docs/build-order.md` as steps land.
+at write time, the search tool `search_conversation_findings`, and the summaries
+in the recall overview. Not yet redeployed. Update this line and
+`docs/build-order.md` as steps land.
 
 Goal: a long EDA conversation can be summarized, searched, and kept within a
 healthy prompt size. `sessions.history_messages` keeps turns with tool results
@@ -137,9 +137,15 @@ reach other conversations' findings.
 
 - **`view="overview"`**: totals (`total_turns`, `total_approx_tokens`),
   `token_budget`, `max_recent_turns_within_budget`, first/last `answered_at`,
-  and one entry per turn (`turn`, `answered_at`, `approx_tokens`, `sources`,
-  `title`, `topics`, `entities`, `question` truncated). No answer text; not
-  citable.
+  `summaries`, and one entry per turn (`turn`, `answered_at`, `approx_tokens`,
+  `sources`, `title`, `topics`, `entities`, `question` truncated). No answer text;
+  not citable. `summaries` has one entry per compaction (`first_turn`,
+  `last_turn`, `covers_from`, `covers_to`, `title`, `topics`, `summary` in full),
+  read from `turn_range_summaries` in turn order; it is empty before the first
+  compaction. The per-turn lines stay for every turn, compacted ones included, so
+  the agent picks a range from a summary's turn numbers and reads the raw turns
+  with `view="turns"`. Summary figures can't be cited and add nothing to the pool.
+  The over-budget error embeds the overview, so it carries the summaries too.
 - **`view="turns"`**: full rows (`turn`, `answered_at`, `question`,
   `answer_markdown`, `verified_numbers`, `sources`, `title`, `topics`,
   `entities`, `filter_context`, `active_page`). Select with `last_n`, or
@@ -229,18 +235,13 @@ compaction survives any outcome of the turn.
   state and written by `finalize`): `compacted`, `compaction_failed`,
   `compaction_prompt_tokens`, `compaction_completion_tokens`.
 
-## Next versions of the recall tool (after turn-range summaries)
+## Summaries stay out of `view="turns"`
 
-- **The overview becomes a table of contents**: one entry per summary (turn
-  range, `title`, `topics`, size) plus per-turn lines for uncompacted turns.
-- **A recall of a compacted range returns the covering summary by default**
-  (text only; its figures can't be cited); raw rows only on request.
-- **Turns still in the message history** return lean rows (`turn`, `question`,
-  `verified_numbers`, no `answer_markdown`) — their text is already in context,
-  but their numbers must still reach the pool. They are the turns after the
-  latest summary's `covers_to`.
-- **Fallback**: if a compacted range has no summary (the summary write failed),
-  raw rows stay available, so no turn becomes unreachable.
+`view="turns"` always returns full rows, never a summary, so no turn becomes
+unreachable and every citable number still comes from a raw row. Summaries only
+help the agent choose which turns to read (the overview above). Replacing a
+compacted range with its summary, or returning lean rows for turns still in the
+message history, were considered and dropped.
 
 ## Search tool — `search_conversation_findings` (built, live-verified 2026-10-29)
 
@@ -319,7 +320,7 @@ compaction survives any outcome of the turn.
    wiring (call, persist, status, remaining budget, safety cap); telemetry
    columns; live test and timing; consolidated tests and docs.
 5. **Built:** embedding at write time, then `search_conversation_findings` (search and tags modes, conversation and user scope).
-6. The recall tool's summary-aware versions: the overview as a table of contents, then `turns` returning a compacted range's summary.
+6. **Built:** the recall overview carries the compaction summaries.
 
 ## Unverified — check live
 

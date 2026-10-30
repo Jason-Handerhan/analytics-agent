@@ -261,8 +261,9 @@ def test_build_embedding_text():
 
 # tests/test_tools.py
 def test_build_conversation_overview():
-    """Totals, how many newest turns fit the budget, question truncation, the
-    empty conversation, and the over-budget error carrying the overview."""
+    """Totals, how many newest turns fit the budget, the summaries passed through
+    (and adding nothing to the totals), question truncation, the empty
+    conversation, and the over-budget error carrying the overview."""
 
 def test_resolve_turn_range():
     """Parametrized: no arguments is everything, last_n clamps, a range passes

@@ -9,6 +9,7 @@ from app.config import (
     CONVERSATION_FINDINGS_TABLE,
     DELETED_CONVERSATIONS_TABLE,
     GCP_PROJECT_ID,
+    TURN_RANGE_SUMMARIES_TABLE,
 )
 from app.shared_helpers import get_turn_writer_client
 
@@ -80,6 +81,26 @@ async def fetch_turns(
             ]
         else:
             del row["tool_calls"]
+    return rows
+
+
+SUMMARIES_SQL = f"""
+SELECT first_turn, last_turn, covers_from, covers_to, title, topics,
+       summary_markdown AS summary
+FROM `{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{TURN_RANGE_SUMMARIES_TABLE}`
+WHERE conversation_id = @conversation_id
+ORDER BY first_turn
+"""
+
+
+async def fetch_summaries(conversation_id: str) -> list[dict]:
+    """One row per compaction summary, in turn order."""
+    rows = await _run_query(SUMMARIES_SQL, [
+        bigquery.ScalarQueryParameter("conversation_id", "STRING", conversation_id),
+    ])
+    for row in rows:
+        row["covers_from"] = row["covers_from"].isoformat()
+        row["covers_to"] = row["covers_to"].isoformat()
     return rows
 
 
