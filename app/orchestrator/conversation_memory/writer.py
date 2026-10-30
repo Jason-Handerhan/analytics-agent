@@ -9,6 +9,11 @@ from app.config import (
     GCP_PROJECT_ID,
     TURN_RANGE_SUMMARIES_TABLE,
 )
+from app.orchestrator.conversation_memory.embedding import (
+    EMBEDDING_MODEL,
+    build_embedding_text,
+    embed_document,
+)
 from app.orchestrator.conversation_memory.schema import (
     CONVERSATION_FINDINGS_SCHEMA,
     TURN_RANGE_SUMMARIES_SCHEMA,
@@ -67,13 +72,20 @@ def build_findings_row(
         ],
         "embedding": [],
         "embedding_model": None,
+        "embedded_text": build_embedding_text(title, topics, entities, question, answer_markdown),
     }
 
 
 async def write_findings_row(row: dict) -> None:
-    """Writes a conversation_findings row. Logs a failure instead of raising --
-    a missing ledger row must not cost the user their answer."""
+    """Embeds the row's embedded_text, then writes it to conversation_findings. Logs a failure
+    instead of raising -- a missing ledger row, or a row without a vector, must not cost the user
+    their answer."""
     table_ref = f"{GCP_PROJECT_ID}.{CHAT_HISTORY_DATASET}.{CONVERSATION_FINDINGS_TABLE}"
+    try:
+        row = {**row, "embedding": await embed_document(row["embedded_text"]), "embedding_model": EMBEDDING_MODEL}
+    except Exception:
+        logger.exception("conversation_findings embedding failed for %s; writing the row without a vector",
+                         row["conversation_id"])
     try:
         errors = await asyncio.to_thread(
             get_turn_writer_client().insert_rows, table_ref, [row],

@@ -27,6 +27,7 @@ CONVERSATION_FINDINGS_SCHEMA = [
     ),
     bigquery.SchemaField("embedding", "FLOAT64", mode="REPEATED"),
     bigquery.SchemaField("embedding_model", "STRING"),
+    bigquery.SchemaField("embedded_text", "STRING"),  # the exact text that was embedded
 ]
 
 # turn_range_summaries -- one row per compaction, summarizing a range of verified turns

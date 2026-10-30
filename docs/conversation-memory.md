@@ -1,12 +1,12 @@
 # Conversation memory: findings ledger, compaction, recall, search
 
 **Status (2026-10-29): built and live-verified** — the findings ledger, the
-recall tool `get_conversation_findings`, and per-turn tags (`title`, `topics`,
-`entities`). **Built, not yet live-tested:** compaction — the pipeline in
-`app/orchestrator/compaction.py`, the `turn_range_summaries` table and writer, the
-gateway pre-step, the telemetry fields and the byte cap. **Designed, not built:** the
-recall tool's summary-aware versions and semantic search. Update this line and
-`docs/build-order.md` as steps land.
+recall tool `get_conversation_findings`, per-turn tags (`title`, `topics`,
+`entities`), compaction (`app/orchestrator/compaction.py`, the
+`turn_range_summaries` table, the gateway pre-step, the telemetry fields), embeddings
+at write time, and the search tool `search_conversation_findings`. **Designed, not
+built:** the recall tool's summary-aware versions (overview as a table of contents).
+Not yet redeployed. Update this line and `docs/build-order.md` as steps land.
 
 Goal: a long EDA conversation can be summarized, searched, and kept within a
 healthy prompt size. `sessions.history_messages` keeps turns with tool results
@@ -57,15 +57,17 @@ can't touch, so every number still traces to a live tool call.
   and history's tool results are redacted.
 - The overview view returns a dict, so `extract_verified_numbers` returns `[]`
   for it. Overview numbers (counts, token sizes) can't be cited. The extractor
-  handles the flat turns list only; search results extend it when that step
-  lands.
+  handles a flat list of turns or hits; a dict result (the overview, the tags view)
+  returns `[]`.
 - A turn-range summary is context only, not a numeric source. Its text never
   enters the pool, so a figure in it can't be cited; the label on the stored
   summary says so and points at `get_conversation_findings`, whose raw turns
   carry the verified numbers. The summary row has no `verified_numbers`, and the
   summarizer's output is not checked against the ledger.
-- Recall results are not in `NUMERIC_SOURCE_TOOLS`, so they stay out of the
-  chartable and combinable paths.
+- Recall and search results are not in `NUMERIC_SOURCE_TOOLS`, so they stay out of
+  the chartable and combinable paths.
+- `search_conversation_findings` is in `MEMORY_SOURCE_TOOLS`; with `scope="user"` it
+  can return numbers verified in other conversations, on the same terms.
 - Derived numbers (differences, rankings) are still rejected; a summary quotes
   findings, it doesn't compute.
 - Known limitation, as before: matching is set-based, so it can't catch a real
@@ -96,7 +98,7 @@ columns were); a removed nested field means drop and recreate.
 | `sources` | Repeated STRING, from `build_sources` |
 | `title`, `topics`, `entities` | Per-turn tags, written by the answering model (see below). `title` NULL and the lists empty for rows written before the tags existed |
 | `tool_calls` | Repeated STRUCT `{name, args, ref_id}`: successful calls only, no `submit_answer`, no results. `args` is the full args as a JSON string (the SQL stays in it); `ref_id` keeps a chart's `source_ref` link |
-| `embedding`, `embedding_model` | Nullable, empty until semantic search |
+| `embedding`, `embedding_model`, `embedded_text` | Built, live-verified 2026-10-29. `write_findings_row` embeds `embedded_text` (title, topics, entities, question and answer, chart links reduced to their label) with `gemini-embedding-001`, `RETRIEVAL_DOCUMENT`, default dimension. A failed embedding is logged and the row is written with an empty vector, so search skips it. Rows written before this have no vector |
 
 **`turn_range_summaries`** (schema, create script and writer built; filled by compaction) — non-overlapping chunks, one per
 compaction, so the ledger never holds summaries of summaries.
@@ -155,7 +157,7 @@ reach other conversations' findings.
   newest turns fit. The budget is in the tool description and the overview.
 - Badge "Searched Memory"; live status "Gathered results from memory".
 
-## Compaction (not built)
+## Compaction (built)
 
 A plain async function, `compact_history_pipeline(conversation_id, user_id,
 history_entries)` in `app/orchestrator/compaction.py`, called by the gateway in
@@ -240,40 +242,47 @@ compaction survives any outcome of the turn.
 - **Fallback**: if a compacted range has no summary (the summary write failed),
   raw rows stay available, so no turn becomes unreachable.
 
-## Semantic search (not built)
+## Search tool — `search_conversation_findings` (built, live-verified 2026-10-29)
 
-- **Embedding**: computed in Python at write time (Gemini embedding,
-  `RETRIEVAL_DOCUMENT`, default dimension) from `title`, `topics`, `entities`,
-  the question and the answer with chart image URLs stripped. The exact text
-  embedded is stored for debugging. It runs inside the same `gather` as the
-  other writes, so `finalize` waits for the slowest write, not the sum. A failed
-  embedding is logged and the turn continues.
-- **Search**: `search_conversation_findings(query, top_k, topics, entities)`
-  embeds the query (`RETRIEVAL_QUERY`, same model) and runs `COSINE_DISTANCE`
-  over the conversation's rows; no vector index at this size. It may instead be
-  a third `view="search"` on `get_conversation_findings` (tool count). Results
-  are a flat list of turn dicts with `verified_numbers` plus a distance, the
-  same shape as `view="turns"`, so `extract_verified_numbers` and
-  `MEMORY_SOURCE_TOOLS` need no change. The recall token budget applies.
-- **Tags are in the embedding; filtering by them is optional and the agent's
-  choice.** A hard filter on free-text tags fails silently when two tags mean
-  the same thing but don't match, so the filter is never applied by default.
-  - The agent sees the real tag vocabulary in the overview and in each hit's
-    tags, so a filter is not a guess.
-  - Filters are case-insensitive, substring, "any of the given tags", and
-    restrict only — they never boost.
-  - The response reports how many turns the filter excluded and how many the
-    conversation has, so the agent can judge its effect.
-  - Guidance lives in the tool description: default to no filter; try an
-    `entities` filter when the question names a specific product, department or
-    model and the unfiltered results don't mention it; drop or loosen it when a
-    filtered search returns little.
+- **Embedding**: `embedding.py` computes it in Python at write time, inside
+  `write_findings_row`, which is already in `finalize`'s `gather`. Rows written
+  before 2026-10-29, or whose embedding failed, have none and are skipped by
+  search. Reads must never select the `embedding` column.
+- **One local tool in `tools.py`**, flat args with a model validator (the
+  recall tool's pattern, not a union): `mode` (`search` | `tags`), `scope`
+  (`conversation` | `user`), `query`, `top_k` (default 5, max 10), `topics`,
+  `entities`, `include_tool_calls`. `conversation_id` and `user_id` are injected
+  by `dispatch_other_call` (`user_id` from the token, never the model).
+- **`mode="search"`** embeds the query (`RETRIEVAL_QUERY`) and runs
+  `COSINE_DISTANCE` over the rows that have an embedding. It returns a flat
+  list of hits: the `view="turns"` fields plus `conversation_id`, `answered_at`
+  and `distance`, with no turn numbers. No token-budget check: a hit is bounded
+  by `MAX_ANSWER_CHARS` and the count by `top_k`.
+- **`mode="tags"`** returns the most used topics and entities (300 of each,
+  lowercased) with counts, so the agent filters with real wording.
+- **`scope="user"`** searches all of the user's conversations, soft-deleted ones
+  excluded (a delete only writes a marker; the findings rows stay). Hits carry
+  their date and `filter_context`; the description tells the model to give the
+  date, since the data may have changed and old chart links may have expired.
+- **Tag filters** are case-insensitive substring matches, any of the given tags,
+  `topics` and `entities` combined with AND, and never applied by default: a
+  hard filter on free-text tags silently hides turns worded differently. The
+  tool description says to filter only when unfiltered hits miss a named
+  product, department or model.
+- **Pool**: the tool is in `MEMORY_SOURCE_TOOLS`; only a hit's
+  `verified_numbers` reach the pool (not `distance`), and the tags dict adds
+  nothing. Numbers from other conversations were verified when their turn ran.
+- **Errors**: an embedding failure and a BigQuery `GoogleAPICallError` become a
+  `ToolError`, so a memory failure doesn't end the turn.
+- **Binding**: bound outside Anthropic's strict mode with the recall tool
+  (`ANTHROPIC_NON_STRICT_TOOLS`); strict schemas share a size limit on the
+  compiled grammar and these two were the cheapest to give up
+  (`.claude/rules/orchestrator.md`).
 - **Fallback if testing shows misses on rare exact names**: add a lexical match
   on `entities` as an OR (similarity top-k plus exact matches) — it can only add
   hits. Build it only if the agent doesn't retry reliably.
-- **Later**: embed summaries too and search them as a coarse index before drilling
-  into a chunk's turns. Cross-conversation scope is a later extension:
-  `user_id` injected from the token, results dated.
+- **Later**: embed summaries too and search them as a coarse index before
+  drilling into a range's turns.
 
 ## Starting values (placeholders, tune)
 
@@ -309,8 +318,8 @@ compaction survives any outcome of the turn.
    summarizer call; the pipeline function; gateway
    wiring (call, persist, status, remaining budget, safety cap); telemetry
    columns; live test and timing; consolidated tests and docs.
-5. The recall tool's summary-aware versions.
-6. Embeddings and search.
+5. **Built:** embedding at write time, then `search_conversation_findings` (search and tags modes, conversation and user scope).
+6. The recall tool's summary-aware versions: the overview as a table of contents, then `turns` returning a compacted range's summary.
 
 ## Unverified — check live
 

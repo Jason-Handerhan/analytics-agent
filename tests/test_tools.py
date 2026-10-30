@@ -292,3 +292,25 @@ def test_get_conversation_findings_args_validator():
     ]:
         with pytest.raises(ValueError):
             Args(**bad)
+
+
+
+def test_search_conversation_findings_args_validator():
+    """Arguments that don't belong with the chosen mode are rejected."""
+    Args = tools_module.SearchConversationFindingsArgs
+    assert Args(mode="search", query="shap features").top_k == tools_module.SEARCH_TOP_K_DEFAULT
+    assert Args(mode="search", query="x", top_k=tools_module.SEARCH_TOP_K_MAX, scope="user").scope == "user"
+    assert Args(mode="tags", scope="user").mode == "tags"
+
+    for bad in [
+        {"mode": "search"},
+        {"mode": "search", "query": "   "},
+        {"mode": "search", "query": "x", "top_k": 0},
+        {"mode": "search", "query": "x", "top_k": tools_module.SEARCH_TOP_K_MAX + 1},
+        {"mode": "tags", "query": "x"},
+        {"mode": "tags", "topics": ["shap"]},
+        {"mode": "tags", "entities": ["banana"]},
+        {"mode": "tags", "include_tool_calls": True},
+    ]:
+        with pytest.raises(ValueError):
+            Args(**bad)

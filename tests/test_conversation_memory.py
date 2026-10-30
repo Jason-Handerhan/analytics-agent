@@ -1,8 +1,10 @@
 """Layer 1 tests for app/orchestrator/conversation_memory/ -- the row builder
-only; the insert is a thin BigQuery call (Layer 2)."""
+and the embedded text; the insert and the embedding call are thin external
+calls (Layer 2)."""
 import json
 from datetime import datetime, timezone
 
+from app.orchestrator.conversation_memory.embedding import build_embedding_text
 from app.orchestrator.conversation_memory.schema import CONVERSATION_FINDINGS_SCHEMA
 from app.orchestrator.conversation_memory.writer import build_findings_row
 
@@ -38,3 +40,23 @@ def test_build_findings_row():
     assert row["verified_numbers"] == [1.5, 2.0]
     assert (row["title"], row["topics"], row["entities"]) == ("reorder rate by department", ["reorder rate"], ["Dairy Eggs"])
     assert set(row) == {f.name for f in CONVERSATION_FINDINGS_SCHEMA}
+
+
+def test_build_embedding_text():
+    """Tags and the question and answer become labeled lines, empty tags are skipped, and a
+    chart link (signed image, plain link, or on a CDN host) shrinks to its label while any
+    other link stays."""
+    chart_path = "charts/3c8eed8e-afcd-46bd-8081-7dd8e8ea48f6.png"
+    signed_url = f"https://storage.googleapis.com/some-bucket/{chart_path}?X-Goog-Signature=abc123&X-Goog-Expires=604800"
+    cdn_url = f"https://cdn.example.com/{chart_path}?sig=1"
+    answer = (f"See ![Orders by day]({signed_url}) and [Orders again]({signed_url}) "
+              f"and ![On CDN]({cdn_url}) and [docs](https://example.com/x.png).")
+
+    text = build_embedding_text("Order counts", ["orders", "volume"], [], "How many orders?", answer)
+
+    assert text == (
+        "Title: Order counts\n"
+        "Topics: orders, volume\n"
+        "Question: How many orders?\n"
+        "Answer: See Orders by day and Orders again and On CDN and [docs](https://example.com/x.png).")
+    assert build_embedding_text("", [], [], "Q", "A") == "Question: Q\nAnswer: A"

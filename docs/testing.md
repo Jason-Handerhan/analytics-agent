@@ -242,17 +242,22 @@ generically; `assert_owns_conversation` has its own test), with no real
 logic of their own to exercise behind a mock. Proven live instead, in
 `notebooks/test_chat_history_endpoints.ipynb`.
 
-## 4d. Conversation memory (`conversation_findings`, `get_conversation_findings`)
+## 4d. Conversation memory (`conversation_findings`, `get_conversation_findings`, `search_conversation_findings`)
 
-`docs/conversation-memory.md`. The row builder is one test; the recall tool's
-pure helpers live in `tests/test_tools.py`, and the pool rule extends
-`test_verify_response` in `tests/test_orchestrator.py`.
+`docs/conversation-memory.md`. The row builder is one test; the recall and search
+tools' pure helpers and args validators live in `tests/test_tools.py`, and the pool
+rule extends `test_verify_response` in `tests/test_orchestrator.py`.
 
 ```python
 # tests/test_conversation_memory.py
 def test_build_findings_row():
     """Failed calls and submit_answer dropped from tool_calls, full args kept,
     ref_id kept, approx_tokens formula, row keys == schema column names."""
+
+def test_build_embedding_text():
+    """Tags and the question and answer become labeled lines, empty tags are
+    skipped, and a chart link (signed image, plain link, CDN host) shrinks to its
+    label while any other link stays."""
 
 # tests/test_tools.py
 def test_build_conversation_overview():
@@ -266,14 +271,36 @@ def test_resolve_turn_range():
 def test_get_conversation_findings_args_validator():
     """Arguments that don't belong with the chosen view are rejected."""
 
+def test_search_conversation_findings_args_validator():
+    """Arguments that don't belong with the chosen mode are rejected: a search
+    needs a query and a top_k within bounds, tags mode takes only scope."""
+
 # tests/test_orchestrator.py -- inside test_verify_response
 # A recall's verified_numbers verify a claim; its turn index and approx_tokens
-# do not; an overview-shaped dict result adds nothing and doesn't crash.
+# do not; an overview-shaped dict result adds nothing and doesn't crash. The same
+# for a search result: a hit's verified_numbers verify a claim, its distance does
+# not, and the tags result adds nothing.
 ```
 
-`read`/`write` against BigQuery (`reader.py`, `write_findings_row`) and the
-tool's budget flow are Layer 2 — proven in `notebooks/phase3_graph.ipynb`:
-mocking the one dependency would mock the whole function.
+Compaction is one pipeline test plus a failure case, patching only the ledger
+read and the summarizer:
+
+```python
+# tests/test_compaction.py
+@pytest.mark.parametrize("has_previous_summary", [False, True])
+async def test_compact_history_pipeline_replaces_old_turns_with_summary(...):
+    """The newest COMPACTION_KEEP_TURNS turns stay verbatim, older ones become one
+    summary first. Ledger window = previous summary's covers_to (open without one)
+    to the oldest kept turn's start; turn numbers continue from its last_turn."""
+
+async def test_compact_history_pipeline_failure_leaves_history_unchanged(...):
+    """A summarizer error returns the original history, flagged failed."""
+```
+
+`read`/`write` against BigQuery (`reader.py`, `write_findings_row`), the embedding
+calls, the search SQL, and the tools' bodies are Layer 2 — proven in `notebooks/phase3_graph.ipynb` and
+`notebooks/phase3_conversation_search.ipynb`: mocking the one dependency would mock the
+whole function.
 
 ## 5. Every tool works, called through the MCP server
 

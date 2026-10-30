@@ -170,6 +170,17 @@ def test_verify_response():
     verified, message = verify_response(overview_only)
     assert verified is False and "42.0" in message
 
+    # Search: only each hit's verified_numbers feed the pool, not its distance; the tags view adds nothing
+    search_call = {"name": "search_conversation_findings", "success": True,
+                   "result": [{"distance": 0.21, "verified_numbers": [0.7731], "question": "Q"}]}
+    searched = {**good, "answer_markdown": "Some answer.", "all_prose_numeric_claims": [0.7731],
+                "tool_calls": [search_call]}
+    assert verify_response(searched) == (True, None)
+    assert verify_response({**searched, "all_prose_numeric_claims": [0.21]})[0] is False
+    tags_call = {"name": "search_conversation_findings", "success": True,
+                 "result": {"topics": [{"tag": "shap", "count": 4}], "entities": []}}
+    assert verify_response({**searched, "all_prose_numeric_claims": [4.0], "tool_calls": [tags_call]})[0] is False
+
     # Claim with no matching pool value
     bad = {
         "answer_markdown": "Some answer.",
@@ -415,6 +426,25 @@ def test_build_tool_call_records_and_messages():
         messages[3],
         messages[4],
     ]
+
+
+def test_build_tool_call_records_and_messages_empty_query_result():
+    """A query with zero rows arrives as an empty list (BigQuery) or as zero content
+    blocks (DAX) and must record as an empty successful result, not crash."""
+    now = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    calls = [
+        {"id": "tc1", "name": "run_bigquery_sql", "args": {"query": "SELECT 1 WHERE FALSE"}},
+        {"id": "tc2", "name": "run_dax_query", "args": {"dax": "EVALUATE FILTER(T, FALSE())"}},
+    ]
+    messages = [
+        ToolMessage(content=[], name="run_bigquery_sql", tool_call_id="tc1", status="success"),
+        ToolMessage(content=[], name="run_dax_query", tool_call_id="tc2", status="success"),
+    ]
+
+    result = build_tool_call_records_and_messages(ToolBatch(calls, messages, now, now, "tool_error"), 1)
+
+    assert [(r["success"], r["result"], r["ref_id"]) for r in result.records] == [
+        (True, [], "ref_1"), (True, [], "ref_2")]
 
 
 @pytest.mark.asyncio

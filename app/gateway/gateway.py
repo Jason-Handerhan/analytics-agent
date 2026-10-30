@@ -158,6 +158,7 @@ SOURCE_NAMES = {
     "get_measure_dax": "measure definitions",
     "get_repo_contents": "code repository",
     "get_conversation_findings": "memory",
+    "search_conversation_findings": "memory",
 }
 
 STATUS_BY_NODE = {

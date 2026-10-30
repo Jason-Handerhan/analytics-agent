@@ -104,8 +104,9 @@ STATUS_MAX_NAMED_SOURCES = 3    # call_tool status names up to this many sources
 # Tools whose numbers verify_node checks against -- queries, plus combine_results
 NUMERIC_SOURCE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
-# Tools whose results carry verified_numbers from earlier turns -- only that field feeds the pool
-MEMORY_SOURCE_TOOLS = {"get_conversation_findings"}
+# Tools whose results carry verified_numbers from earlier turns -- only their verified numbers
+#  field feeds the pool
+MEMORY_SOURCE_TOOLS = {"get_conversation_findings", "search_conversation_findings"}
 
 # Tools whose results carry a chart_url
 CHART_TOOLS = {"generate_chart", "generate_beeswarm"}

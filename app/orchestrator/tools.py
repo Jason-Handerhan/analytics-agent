@@ -44,7 +44,13 @@ from app.config import (
 )
 from app.shared_chart import GenerateChartArgs, render_and_upload
 from app.model_schema import MEASURE_DAX, MEASURE_NAMES
-from app.orchestrator.conversation_memory.reader import fetch_overview_rows, fetch_turns
+from app.orchestrator.conversation_memory.embedding import embed_query
+from app.orchestrator.conversation_memory.reader import (
+    fetch_overview_rows,
+    fetch_tag_counts,
+    fetch_turns,
+    fetch_vector_search_hits,
+)
 from app.shared_helpers import is_cancelled
 
 logger = logging.getLogger(__name__)
@@ -551,8 +557,12 @@ async def search_docs(query: str, top_k: int = SEARCH_DOCS_TOP_K_DEFAULT) -> lis
         ])
         rows = get_vector_search_client().query(SEARCH_DOCS_SQL, job_config=job_config).result()
         return [dict(row) for row in rows]
-    return await asyncio.to_thread(_run)
+    try:
+        return await asyncio.to_thread(_run)
+    except GoogleAPICallError as e:
+        raise ToolError(f"Could not search the project docs ({e}). Retry once, or answer without it.") from e
 
+search_docs.handle_tool_error = True
 search_docs.handle_validation_error = lambda e: str(e)
 
 
@@ -572,8 +582,7 @@ view="turns": returns full rows (question, answer, verified numbers, sources, ti
 entities, filters) for turns start_turn..end_turn (1-based, inclusive; give both), or for the newest
 last_n turns. With no range it returns every turn. One call returns at most
 {MEMORY_RECALL_TOKEN_BUDGET:,} tokens; a request over that fails and returns the overview so you can
-narrow it. include_tool_calls adds the name and args of each
-turn's tool calls (no results) -- leave it off unless you need it."""
+narrow it."""
 
 OVERVIEW_QUESTION_MAX_CHARS = 150
 
@@ -588,7 +597,9 @@ class GetConversationFindingsArgs(BaseModel):
     last_n: int | None = Field(
         default=None, description="Return the newest N turns. Only with view='turns', never with start_turn/end_turn.")
     include_tool_calls: bool = Field(
-        default=False, description="Add the name and args of each turn's tool calls. Only with view='turns'.")
+        default=False,
+        description="Add the name and args of each turn's tool calls (no results). Leave False unless you "
+                    "need them. Only with view='turns'.")
 
     @model_validator(mode="after")
     def _check_argument_combination(self) -> "GetConversationFindingsArgs":
@@ -679,27 +690,118 @@ async def get_conversation_findings(
     last_n: int | None = None,
     include_tool_calls: bool = False,
 ) -> dict | list[dict]:
-    
-    overview_rows = await fetch_overview_rows(conversation_id)
-    overview = build_conversation_overview(overview_rows, MEMORY_RECALL_TOKEN_BUDGET)
-    if view == "overview":
-        return overview
+    try:
+        overview_rows = await fetch_overview_rows(conversation_id)
+        overview = build_conversation_overview(overview_rows, MEMORY_RECALL_TOKEN_BUDGET)
+        if view == "overview":
+            return overview
 
-    start, end = resolve_turn_range(overview["total_turns"], start_turn, end_turn, last_n)
-    approx_tokens = sum(row["approx_tokens"] for row in overview_rows[start - 1:end])
-    if approx_tokens > MEMORY_RECALL_TOKEN_BUDGET:
-        raise _over_budget_error(overview, start, end, approx_tokens)
-
-    turns = await fetch_turns(conversation_id, start, end, include_tool_calls)
-    # approx_tokens doesn't count tool calls, so check the real size once they're in.
-    if include_tool_calls:
-        approx_tokens = len(json.dumps(turns)) // 4
+        start, end = resolve_turn_range(overview["total_turns"], start_turn, end_turn, last_n)
+        approx_tokens = sum(row["approx_tokens"] for row in overview_rows[start - 1:end])
         if approx_tokens > MEMORY_RECALL_TOKEN_BUDGET:
             raise _over_budget_error(overview, start, end, approx_tokens)
-    return turns
+
+        turns = await fetch_turns(conversation_id, start, end, include_tool_calls)
+        # approx_tokens doesn't count tool calls, so check the real size once they're in.
+        if include_tool_calls:
+            approx_tokens = len(json.dumps(turns)) // 4
+            if approx_tokens > MEMORY_RECALL_TOKEN_BUDGET:
+                raise _over_budget_error(overview, start, end, approx_tokens)
+        return turns
+    except GoogleAPICallError as e:
+        raise ToolError(f"Could not read the conversation ledger ({e}). Retry once, or answer without it.") from e
 
 get_conversation_findings.handle_tool_error = True
 get_conversation_findings.handle_validation_error = lambda e: str(e)
+
+
+# --- search_conversation_findings -------------------------------------------------
+
+SEARCH_TOP_K_DEFAULT = 5
+SEARCH_TOP_K_MAX = 10
+TAG_LIST_LIMIT = 300   # most used topics and entities returned per kind
+
+SEARCH_CONVERSATION_FINDINGS_DESCRIPTION = """Semantic (vector) search over earlier verified answers, for when you \
+don't know which turn covered something. It matches on meaning, not exact wording, so describe what you're \
+after. To read turns by position, use get_conversation_findings. Only numbers returned here can be cited in an \
+answer, not numbers in your message history.
+
+mode="search" returns the closest turns with their question, answer, verified numbers, date and a distance \
+(smaller is closer). Hits from other conversations can be old: give their date, since the data may have \
+changed and chart links may have expired.
+
+mode="tags" lists the topics and entities in use, with counts.
+
+Filters hide turns whose tags are worded differently, so add one only when unfiltered hits miss a specific \
+product, department or model, etc., and take the wording from mode="tags"."""
+
+
+class SearchConversationFindingsArgs(BaseModel):
+    mode: Literal["search", "tags"] = Field(
+        description="'search' runs a semantic (vector) search for the query. "
+                    "'tags' lists the topics and entities available for filtering.")
+    scope: Literal["conversation", "user"] = Field(
+        default="conversation",
+        description="'conversation' searches only the current conversation. "
+                    "'user' searches all of this user's conversations, past ones included.")
+    query: str = Field(
+        default="", description="What to look for, in plain language. Required with mode='search'.")
+    top_k: int = Field(
+        default=SEARCH_TOP_K_DEFAULT,
+        description=f"How many turns to return, up to {SEARCH_TOP_K_MAX}. Only with mode='search'.")
+    topics: list[str] = Field(
+        default=[], description="Keep only turns with a matching topic (any of these). Only with mode='search'.")
+    entities: list[str] = Field(
+        default=[], description="Keep only turns with a matching entity (any of these). Only with mode='search'.")
+    include_tool_calls: bool = Field(
+        default=False,
+        description="Add each hit's tool call names and args (no results). Leave False unless you need "
+                    "them. Only with mode='search'.")
+
+    @model_validator(mode="after")
+    def _check_argument_combination(self) -> "SearchConversationFindingsArgs":
+        """Rejects arguments that don't belong with the chosen mode."""
+        if self.mode == "tags":
+            if self.query or self.topics or self.entities or self.include_tool_calls:
+                raise ValueError("mode='tags' takes only scope. Use mode='search' to search.")
+        else:
+            if not self.query.strip():
+                raise ValueError("mode='search' needs a query.")
+            if not 1 <= self.top_k <= SEARCH_TOP_K_MAX:
+                raise ValueError(f"top_k must be between 1 and {SEARCH_TOP_K_MAX}.")
+        return self
+
+
+@tool(args_schema=SearchConversationFindingsArgs, description=SEARCH_CONVERSATION_FINDINGS_DESCRIPTION)
+async def search_conversation_findings(
+    mode: Literal["search", "tags"],
+    conversation_id: Annotated[str, InjectedToolArg],
+    user_id: Annotated[str, InjectedToolArg],
+    scope: Literal["conversation", "user"] = "conversation",
+    query: str = "",
+    top_k: int = SEARCH_TOP_K_DEFAULT,
+    topics: list[str] = [],
+    entities: list[str] = [],
+    include_tool_calls: bool = False,
+) -> dict | list[dict]:
+    searched_conversation_id = conversation_id if scope == "conversation" else None
+    try:
+        if mode == "tags":
+            return await fetch_tag_counts(user_id, searched_conversation_id, TAG_LIST_LIMIT)
+
+        try:
+            query_vector = await embed_query(query)
+        except Exception as e:
+            raise ToolError(f"Could not embed the search query ({e}). Retry, or use get_conversation_findings "
+                            "to read turns by position.") from e
+        return await fetch_vector_search_hits(
+            user_id, searched_conversation_id, query_vector, top_k,
+            topics, entities, include_tool_calls)
+    except GoogleAPICallError as e:
+        raise ToolError(f"Could not read the conversation ledger ({e}). Retry once, or answer without it.") from e
+
+search_conversation_findings.handle_tool_error = True
+search_conversation_findings.handle_validation_error = lambda e: str(e)
 
 
 # --- generate_beeswarm -----------------------------------------------------------

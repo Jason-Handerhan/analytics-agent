@@ -39,6 +39,7 @@ instance of this, not seven independent rules.
 | `get_page_info` | **No** — a plain function in the orchestrator |
 | `generate_beeswarm` | **No** — a plain function in the orchestrator |
 | `get_conversation_findings` | **No** — a plain function in the orchestrator |
+| `search_conversation_findings` | **No** — a plain function in the orchestrator |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -102,13 +103,13 @@ fixed and the model's values (two enums, optional name lists) are parameters, so
 `get_page_info`, not `run_bigquery_sql` (its bytes aren't added to
 `bytes_consumed`). Design in `docs/chart-tool.md`.
 
-**`get_conversation_findings` is a seventh exception: it reads this
-project's own `conversation_findings` ledger** — nothing portable to host.
+**`get_conversation_findings` and `search_conversation_findings` are the seventh
+exception: they read this project's own `conversation_findings` ledger** — nothing portable to host.
 It's also a numeric source of a different kind: its result feeds the pool
 only through each turn's `verified_numbers` (`MEMORY_SOURCE_TOOLS`, not
 `NUMERIC_SOURCE_TOOLS`; `.claude/rules/orchestrator.md`). Reads run as
-`turn-writer-sa` with fixed SQL and an injected `conversation_id` —
-`agent-sa` has no grant there, so `run_bigquery_sql` can't read the ledger.
+`turn-writer-sa` with fixed SQL and injected `conversation_id` (and, for search,
+`user_id`) — `agent-sa` has no grant there, so `run_bigquery_sql` can't read the ledger.
 Not a BigQuery tool as far as guardrails go (no dry-run, cost tier, or
 `bytes_consumed`); its limit is a token budget. Design in
 `docs/conversation-memory.md`.
@@ -219,13 +220,14 @@ later changes the URL and adds auth headers — not this file.
 | `generate_beeswarm` | SHAP beeswarm for one model and split, optionally narrowed to a department, aisle, or product — returns the image URL **and the image itself** | Shows the overall pattern across many predictions; **never** a number source |
 | `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
 | `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
+| `search_conversation_findings` | Semantic (vector) search over earlier verified answers, in this conversation or all of the user's: `mode="search"` (closest turns) or `mode="tags"` (topics and entities in use) | Only a hit's `verified_numbers` are a number source; tags are never citable (`docs/conversation-memory.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at
 all, see below. `submit_answer` isn't either — it's not a number *source*,
 it's how the model delivers the answer built from everything above; see its
 own section below.
 
-**Ten tools, one vector store** — deliberately not 1:1:
+**Twelve tools, one vector store** — deliberately not 1:1:
 
 - **Code search is agentic (list or read), not vector search.** Embeddings
   flatten the structural relationships — imports, call graphs — that code
@@ -292,7 +294,7 @@ so descriptions there would be invisible to `bigquery_schema`.
 ## Both query tools — the shared return contract
 
 **Both query tools return `list[dict]` — one dict per row, coerced at the
-source.** Normalizing here means every downstream consumer (the model,
+source; zero rows is an empty list (`[]`), which `_unwrap_content` handles for both.** Normalizing here means every downstream consumer (the model,
 `verify_response`, `generate_chart`, telemetry) sees one shape regardless
 of which tool produced it. Two coercions are needed, and they differ by
 source:
@@ -818,8 +820,15 @@ the model can't emit a structurally invalid call at all
 can't validate that a SQL query is *correct*, just that the call's shape is
 valid.
 
-**`strict=True` is enabled globally, with one tool bound outside it —
-confirmed live (2026-10-02).** `generate_chart`'s discriminated union and
+**`strict=True` is enabled globally, with three tools bound outside it on Claude —
+confirmed live (2026-10-02, 2026-10-29).** The memory tools
+(`get_conversation_findings`, `search_conversation_findings`) join `generate_chart`:
+every strict schema counts toward a size limit on the compiled grammar (a 400,
+"compiled grammar is too large"), the memory schemas are flat and still validated at
+dispatch, and a bad call costs one retry. They are pre-converted the same way, in
+`ANTHROPIC_NON_STRICT_TOOLS`; OpenAI and Gemini bind them strict with no issue. The
+rule for what else can move out: query tools and `submit_answer` stay strict, memory
+and state tools don't need to be. About `generate_chart`: `generate_chart`'s discriminated union and
 numeric bounds aren't representable under it on Claude (`docs/chart-tool.md`,
 `.claude/rules/orchestrator.md`'s "Constrained decoding" section), so it's
 pre-converted to a raw Anthropic tool dict (no `strict` kwarg) that

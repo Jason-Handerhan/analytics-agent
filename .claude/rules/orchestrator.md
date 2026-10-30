@@ -10,6 +10,7 @@ paths:
   - 'tests/test_e2e.py'
   - 'tests/test_static_context.py'
   - 'tests/test_conversation_memory.py'
+  - 'tests/test_compaction.py'
 ---
 
 # Orchestrator: verification contract + guardrails
@@ -449,9 +450,10 @@ own Layer-1 test — see `docs/testing.md`):
   (`Table[Column]`) — irrelevant here since this returns values, not keys.
 - `extract_verified_numbers(result) -> list[float]` — **called by
   `build_numeric_pool` for `MEMORY_SOURCE_TOOLS`** (`get_conversation_findings`,
-  `docs/conversation-memory.md`). Returns only each turn's `verified_numbers`,
-  so nothing else in a recall result (`turn`, `approx_tokens`, decoded `args`)
-  can reach the pool; a dict result (the overview view) returns `[]`.
+  `search_conversation_findings`; `docs/conversation-memory.md`). Returns only each
+  turn's or hit's `verified_numbers`, so nothing else in the result (`turn`,
+  `approx_tokens`, `distance`, decoded `args`) can reach the pool; a dict result (the
+  overview or tags view) returns `[]`.
 - `extract_table_values(answer_markdown) -> list[float]` — **called by
   `verify_response`.** Shares `_markdown_ast` (mistune's GFM table parser, an
   AST walk) with `check_table_rows` above — not duplicated, per the
@@ -816,7 +818,8 @@ a cheap deterministic filter in front of it.
 under `strict=True` and produces well-formed calls on OpenAI and Gemini
 exactly as it already did on Anthropic — no reshaping needed.
 
-**Enabled globally, 2026-10-02 — one tool bound outside it, now
+**Enabled globally, 2026-10-02 — three tools bound outside it on Claude
+(`generate_chart`, plus the two memory tools since 2026-10-29), now
 provider-conditional.** Claude's `strict=True` rejects `oneOf`/
 `discriminator` and `ge=`/`le=` outright, both of which `generate_chart`'s
 schema needs (`docs/chart-tool.md`); confirmed `ge=`/`le=` also broke
@@ -825,10 +828,15 @@ schema needs (`docs/chart-tool.md`); confirmed `ge=`/`le=` also broke
 `generate_chart`'s stand-in via `convert_to_anthropic_tool()` (no `strict`
 kwarg) **only when the turn's `model_provider == "anthropic"`** — confirmed
 live that OpenAI/Gemini bind the plain schema directly under `strict=True`
-with no workaround at all, so `generate_chart_tool` is the one piece of
+with no workaround at all, so `generate_chart_tool` and the memory tools in
+`ANTHROPIC_NON_STRICT_TOOLS` are the pieces of
 `build_tools_list(model_provider)`'s assembly (below — rebuilt fresh every
 turn, not a module-level list, now that provider is per-request) that
-branches by provider; every other tool binds identically regardless.
+branch by provider; every other tool binds identically regardless. The
+memory tools (`get_conversation_findings`, `search_conversation_findings`)
+move out of strict on Claude only because every strict schema shares one
+size limit on the compiled grammar (a 400, "compiled grammar is too large");
+they stay validated at dispatch.
 `agent_node` binds with `bind_tools(build_tools_list(state["model_provider"]),
 strict=True)` unconditionally either way. This
 also resolved a real live failure: `submit_answer` previously got no
@@ -888,6 +896,7 @@ SOURCE_LABELS = {
     "get_repo_contents": "Read code",
     "search_docs":      "Doc Search",
     "get_conversation_findings": "Searched Memory",
+    "search_conversation_findings": "Searched Memory",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -1460,7 +1469,14 @@ def build_tools_list(model_provider: str) -> list[BaseTool]:
                            if model_provider == "anthropic" else chart_tool_call_standin)
     stand_in_tool_names = ["generate_chart", "combine_results"]
     stand_in_tools = [generate_chart_tool, combine_results_call_standin]
-    non_stand_in_tools = [t for name, t in ALL_TOOLS.items() if name not in stand_in_tool_names]
+
+    non_stand_in_tools = []
+    for name, tool in ALL_TOOLS.items():
+        if name in stand_in_tool_names:
+            continue
+        if model_provider == "anthropic" and name in ANTHROPIC_NON_STRICT_TOOLS:
+            tool = convert_to_anthropic_tool(tool)     # {"get_conversation_findings", "search_conversation_findings"}
+        non_stand_in_tools.append(tool)
     return non_stand_in_tools + stand_in_tools
 
 

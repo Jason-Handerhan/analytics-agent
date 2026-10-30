@@ -78,6 +78,7 @@ from app.orchestrator.tools import (
     get_measure_dax,
     get_page_info,
     run_bigquery_sql,
+    search_conversation_findings,
     search_docs,
     submit_answer,
 )
@@ -89,6 +90,10 @@ FILE_DESCRIPTIONS: dict[str, str] = {}
 
 # Tools whose result gets a ref_id, resolvable by generate_chart/combine_results.
 CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
+
+# Memory tools are bound outside Anthropic's strict mode: their flat schemas are still validated at
+# dispatch, and every strict schema counts toward a size limit on the compiled grammar.
+ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings"}
 
 # finalize_node's canned messages -- one per terminal state with no real answer yet.
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
@@ -128,6 +133,7 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "search_docs": search_docs,
         "get_page_info": get_page_info,
         "get_conversation_findings": get_conversation_findings,
+        "search_conversation_findings": search_conversation_findings,
         "generate_beeswarm": generate_beeswarm,
     }
     get_static_context()  # warms the @lru_cache at startup, not on the first real turn
@@ -295,8 +301,11 @@ def resolve_combine_data(combine_tc: dict, prior_tool_calls: list["ToolCallRecor
 def _unwrap_content(content: str | list) -> str:
     """LangChain tools' content is a plain JSON string; MCP tools' content
     (via langchain_mcp_adapters) is a list of content blocks -- unwrap to
-    the plain text either way."""
-    return content[0]["text"] if isinstance(content, list) else content
+    the plain text either way. A query with zero rows arrives as an empty
+    list from both, which unwraps to "[]"."""
+    if isinstance(content, list):
+        return content[0]["text"] if content else "[]"
+    return content
 
 
 def build_tool_call_record(
@@ -380,7 +389,7 @@ def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> 
 
 
 async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
-                               filter_context: list[dict], conversation_id: str) -> ToolMessage:
+                               filter_context: list[dict], conversation_id: str, user_id: str) -> ToolMessage:
     """Dispatches one non-BigQuery tool call, injecting hidden args first."""
     
     # Get page info
@@ -391,6 +400,11 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
     # Conversation findings recall
     if tc["name"] == "get_conversation_findings":
         full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # Conversation findings search
+    if tc["name"] == "search_conversation_findings":
+        full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id, "user_id": user_id}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
     # Structured Response
@@ -607,6 +621,7 @@ SOURCE_LABELS = {
     "get_repo_contents": "Read code",
     "search_docs":      "Doc Search",
     "get_conversation_findings": "Searched Memory",
+    "search_conversation_findings": "Searched Memory",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -638,7 +653,14 @@ def build_tools_list(model_provider: str) -> list[BaseTool]:
                            if model_provider == "anthropic" else chart_tool_call_standin)
     stand_in_tool_names = ["generate_chart", "combine_results"]
     stand_in_tools = [generate_chart_tool, combine_results_call_standin]
-    non_stand_in_tools = [t for name, t in ALL_TOOLS.items() if name not in stand_in_tool_names]
+
+    non_stand_in_tools = []
+    for name, tool in ALL_TOOLS.items():
+        if name in stand_in_tool_names:
+            continue
+        if model_provider == "anthropic" and name in ANTHROPIC_NON_STRICT_TOOLS:
+            tool = convert_to_anthropic_tool(tool)
+        non_stand_in_tools.append(tool)
     return non_stand_in_tools + stand_in_tools
 
 
@@ -761,7 +783,7 @@ async def call_tool_node(state: AgentState) -> dict:
 
     other_started_at = datetime.now(timezone.utc)
     other_messages = await asyncio.gather(*[
-        dispatch_other_call(tc, state["tool_calls"], state["filter_context"], state["conversation_id"])
+        dispatch_other_call(tc, state["tool_calls"], state["filter_context"], state["conversation_id"], state["user_id"])
         for tc in other_calls
     ])
     other_completed_at = datetime.now(timezone.utc)
