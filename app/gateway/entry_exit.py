@@ -33,7 +33,7 @@ from app.config import (
 )
 from app.gateway.models import AgentResponse
 from app.shared_helpers import label_chartable_result
-from app.orchestrator.state import AgentState, PendingApproval, ToolCallRecord
+from app.orchestrator.state import AgentState, PendingApproval, TaskPlan, ToolCallRecord
 
 
 # --- Turn setup (gateway request -> graph input) ---------------------------
@@ -51,7 +51,8 @@ def build_human_message(question: str, filter_context: list[dict], active_page: 
 def build_initial_state(
     question: str, conversation_id: str, user_id: str, model: str, model_provider: str,
     filter_context: list[dict], active_page: str | None, image_base64: str | None,
-    history_messages: list[BaseMessage],
+    history_messages: list[BaseMessage], notes: list[dict], task_plan: TaskPlan,
+    turn_started_at: datetime,
 ) -> AgentState:
     """Initializes every AgentState field for a fresh turn."""
     return AgentState(
@@ -60,11 +61,13 @@ def build_initial_state(
         user_id=user_id,
         model=model,
         model_provider=model_provider,
-        turn_started_at=datetime.now(timezone.utc),
+        turn_started_at=turn_started_at,
         filter_context=filter_context,
         active_page=active_page,
         image_base64=image_base64,
         history_messages=history_messages,
+        notes=notes,
+        task_plan=task_plan,
         messages=[build_human_message(question, filter_context, active_page)],
         tool_calls=[],
         iteration_count=0,

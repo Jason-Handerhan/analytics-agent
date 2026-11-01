@@ -19,6 +19,9 @@ from app.config import SHAP_FEATURE_DISPLAY_NAMES
 from app.orchestrator.tools import PAGE_INFO_DIR, PAGES, ToolError, get_measure_dax, get_page_info, run_bigquery_sql
 
 
+# --- run_bigquery_sql: description and the cancellation race ---------------------------------
+
+
 def test_run_bigquery_sql_description_has_few_shot_examples():
     """BigQuery's few-shot examples are appended to the tool's own
     description, not the static context block (.claude/rules/orchestrator.md)."""
@@ -27,8 +30,7 @@ def test_run_bigquery_sql_description_has_few_shot_examples():
     assert all(label in run_bigquery_sql.description for label in SHAP_FEATURE_DISPLAY_NAMES.values())
 
 
-# --- Fakes for run_bigquery_sql's cancellation race -- no real BigQuery/Firestore ---
-
+# Test doubles for the cancellation race: no real BigQuery or Firestore.
 class FakeRows(list):
     total_rows = 0
 
@@ -59,59 +61,6 @@ class FakeBQClient:
     def cancel_job(self, job_id):
         self.cancelled_job_ids.append(job_id)
 
-
-@pytest.mark.asyncio
-async def test_get_measure_dax(monkeypatch):
-    """A standalone measure returns just itself; one referencing others
-    pulls them in via one-hop expansion."""
-    monkeypatch.setattr(tools_module, "MEASURE_DAX", {
-        "Solo Measure": "SUM(table[column])",
-        "Combo Measure": "[Solo Measure] + [Other Measure]",
-        "Other Measure": "COUNT(table[id])",
-        "Unrelated Measure": "AVERAGE(table[value])",
-    })
-
-    # A measure with no reference to another measure -- returns just itself
-    result = await get_measure_dax.coroutine(measure_names=["Solo Measure"])
-    assert result == {"Solo Measure": "SUM(table[column])"}
-
-    # A measure referencing two other measures -- both get pulled in, one hop
-    result = await get_measure_dax.coroutine(measure_names=["Combo Measure"])
-    assert result == {
-        "Combo Measure": "[Solo Measure] + [Other Measure]",
-        "Solo Measure": "SUM(table[column])",
-        "Other Measure": "COUNT(table[id])",
-    }
-
-
-@pytest.mark.asyncio
-async def test_get_page_info():
-    """PAGES matches the real committed files, and every page returns its
-    own file's text plus a base64-encoded screenshot of the same page, with
-    no filter_context affecting anything except Model Performance's chart
-    plot type."""
-    assert PAGES == tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
-
-    for page_name in PAGES:
-        expected_text = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
-        expected_image = base64.b64encode((PAGE_INFO_DIR / f"{page_name}.png").read_bytes()).decode()
-        result = await get_page_info.coroutine(page_name=page_name, filter_context=[])
-        assert result == [
-            {"type": "text", "text": f"Page: {page_name}\n\n{expected_text}"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{expected_image}"}},
-        ]
-
-    # Beeswarm selected -- Model Performance's image switches.
-    beeswarm_context = [{"Value": {"filter_column": "Feature_Importance_Chart_Types[Chart_Types]",
-                                    "value": "Beeswarm"}}]
-    expected_beeswarm_image = base64.b64encode(
-        (PAGE_INFO_DIR / "Model Performance Beeswarm.png").read_bytes()).decode()
-    result = await get_page_info.coroutine(page_name="Model Performance", filter_context=beeswarm_context)
-    assert result[1] == {"type": "image_url",
-                         "image_url": {"url": f"data:image/png;base64,{expected_beeswarm_image}"}}
-
-
-# run_bigquery_sql -- the cancellation race
 
 @pytest.mark.asyncio
 async def test_run_bigquery_sql_cancel_wins_race(monkeypatch):
@@ -178,7 +127,63 @@ async def test_gateway_timeout_cancellation_reaches_bigquery_job(monkeypatch):
     assert fake_client.cancelled_job_ids == ["fake-job-1"]
 
 
-# --- generate_beeswarm's renderer -- pure, no BigQuery/GCS -----------------------
+# --- Lookup tools: get_measure_dax, get_page_info --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_measure_dax(monkeypatch):
+    """A standalone measure returns just itself; one referencing others
+    pulls them in via one-hop expansion."""
+    monkeypatch.setattr(tools_module, "MEASURE_DAX", {
+        "Solo Measure": "SUM(table[column])",
+        "Combo Measure": "[Solo Measure] + [Other Measure]",
+        "Other Measure": "COUNT(table[id])",
+        "Unrelated Measure": "AVERAGE(table[value])",
+    })
+
+    # A measure with no reference to another measure -- returns just itself
+    result = await get_measure_dax.coroutine(measure_names=["Solo Measure"])
+    assert result == {"Solo Measure": "SUM(table[column])"}
+
+    # A measure referencing two other measures -- both get pulled in, one hop
+    result = await get_measure_dax.coroutine(measure_names=["Combo Measure"])
+    assert result == {
+        "Combo Measure": "[Solo Measure] + [Other Measure]",
+        "Solo Measure": "SUM(table[column])",
+        "Other Measure": "COUNT(table[id])",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_page_info():
+    """PAGES matches the real committed files, and every page returns its
+    own file's text plus a base64-encoded screenshot of the same page, with
+    no filter_context affecting anything except Model Performance's chart
+    plot type."""
+    assert PAGES == tuple(sorted(p.stem for p in PAGE_INFO_DIR.glob("*.txt")))
+
+    for page_name in PAGES:
+        expected_text = (PAGE_INFO_DIR / f"{page_name}.txt").read_text()
+        expected_image = base64.b64encode((PAGE_INFO_DIR / f"{page_name}.png").read_bytes()).decode()
+        result = await get_page_info.coroutine(page_name=page_name, filter_context=[])
+        assert result == [
+            {"type": "text", "text": f"Page: {page_name}\n\n{expected_text}"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{expected_image}"}},
+        ]
+
+    # Beeswarm selected -- Model Performance's image switches.
+    beeswarm_context = [{"Value": {"filter_column": "Feature_Importance_Chart_Types[Chart_Types]",
+                                    "value": "Beeswarm"}}]
+    expected_beeswarm_image = base64.b64encode(
+        (PAGE_INFO_DIR / "Model Performance Beeswarm.png").read_bytes()).decode()
+    result = await get_page_info.coroutine(page_name="Model Performance", filter_context=beeswarm_context)
+    assert result[1] == {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{expected_beeswarm_image}"}}
+
+
+# --- generate_beeswarm: the renderer ---------------------------------------------------------
+# Pure, no BigQuery or GCS.
+
 
 def _beeswarm_rows(fig) -> dict[int, dict]:
     """Per feature row (0 = bottom): point count, gray-point count, median x."""
@@ -224,7 +229,8 @@ def test_render_beeswarm():
         assert rows[index]["gray"] == (20 if feature == null_filled else 0)
 
 
-# --- get_conversation_findings helpers ---------------------------------------
+# --- Memory tools: recall and search ---------------------------------------------------------
+
 
 def _overview_rows(token_counts):
     return [{"turn": i, "answered_at": f"2026-10-26T12:0{i}:00+00:00", "approx_tokens": tokens,
@@ -298,7 +304,6 @@ def test_get_conversation_findings_args_validator():
             Args(**bad)
 
 
-
 def test_search_conversation_findings_args_validator():
     """Arguments that don't belong with the chosen mode are rejected."""
     Args = tools_module.SearchConversationFindingsArgs
@@ -315,6 +320,34 @@ def test_search_conversation_findings_args_validator():
         {"mode": "tags", "topics": ["shap"]},
         {"mode": "tags", "entities": ["banana"]},
         {"mode": "tags", "include_tool_calls": True},
+    ]:
+        with pytest.raises(ValueError):
+            Args(**bad)
+
+
+# --- Task plan: manage_tasks -----------------------------------------------------------------
+
+
+def test_manage_tasks_args_validator():
+    """Blank, overlong and surplus tasks, a second task in progress, and an oversized scope are
+    rejected; an omitted scope, an empty list and padded text are valid."""
+    Args = tools_module.ManageTasksArgs
+
+    def task(text="Do a thing", status="todo"):
+        return {"text": text, "status": status}
+
+    assert Args(tasks=[task(), task(status="in_progress")], scope="Model: X").scope == "Model: X"
+    assert Args(tasks=[task()]).scope is None          # omitted: keep the saved scope
+    assert Args(tasks=[]).tasks == []                  # an empty list clears the plan
+    assert Args(tasks=[task("  padded  ")], scope="  s  ").tasks[0].text == "padded"
+
+    for bad in [
+        {"tasks": [task(text="   ")]},
+        {"tasks": [task(text="x" * (tools_module.TASK_MAX_CHARS + 1))]},
+        {"tasks": [task() for _ in range(tools_module.TASKS_MAX_COUNT + 1)]},
+        {"tasks": [task(status="in_progress"), task(status="in_progress")]},
+        {"tasks": [task()], "scope": "s" * (tools_module.TASK_SCOPE_MAX_CHARS + 1)},
+        {"tasks": [task(status="finished")]},
     ]:
         with pytest.raises(ValueError):
             Args(**bad)

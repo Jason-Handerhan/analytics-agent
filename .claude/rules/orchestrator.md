@@ -158,6 +158,9 @@ class AgentState(TypedDict):
     # at LLM-call time only, same as the static system prompt:
     # model.ainvoke([system_message, *state["history_messages"], *state["messages"]]).
     history_messages: list[BaseMessage]
+    notes: list[dict]            # standing notes, read with the history (tool not built yet)
+    task_plan: TaskPlan          # {"scope", "tasks"}, read with the history; attached to the
+                                 # turn's first message at request time, never in `messages`
 
     # Seeded at invocation with just the question, then accumulated during
     # the loop. Plain BaseMessage, not a wrapper — passes straight to
@@ -818,8 +821,9 @@ a cheap deterministic filter in front of it.
 under `strict=True` and produces well-formed calls on OpenAI and Gemini
 exactly as it already did on Anthropic — no reshaping needed.
 
-**Enabled globally, 2026-10-02 — three tools bound outside it on Claude
-(`generate_chart`, plus the two memory tools since 2026-10-29), now
+**Enabled globally, 2026-10-02 — four tools bound outside it on Claude
+(`generate_chart`, plus the memory and state tools `get_conversation_findings`,
+`search_conversation_findings` and `manage_tasks`), now
 provider-conditional.** Claude's `strict=True` rejects `oneOf`/
 `discriminator` and `ge=`/`le=` outright, both of which `generate_chart`'s
 schema needs (`docs/chart-tool.md`); confirmed `ge=`/`le=` also broke
@@ -833,8 +837,8 @@ with no workaround at all, so `generate_chart_tool` and the memory tools in
 `build_tools_list(model_provider)`'s assembly (below — rebuilt fresh every
 turn, not a module-level list, now that provider is per-request) that
 branch by provider; every other tool binds identically regardless. The
-memory tools (`get_conversation_findings`, `search_conversation_findings`)
-move out of strict on Claude only because every strict schema shares one
+memory and state tools (`get_conversation_findings`, `search_conversation_findings`,
+`manage_tasks`) move out of strict on Claude only because every strict schema shares one
 size limit on the compiled grammar (a 400, "compiled grammar is too large");
 they stay validated at dispatch.
 `agent_node` binds with `bind_tools(build_tools_list(state["model_provider"]),
@@ -891,12 +895,13 @@ from itertools import groupby
 SOURCE_LABELS = {
     "run_bigquery_sql": "Query warehouse",
     "run_dax_query":    "Query dashboard",
-    "get_measure_dax":  "Measure Lookup",
+    "get_measure_dax":  "Measure lookup",
     "get_page_info":    "PBI page info",
     "get_repo_contents": "Read code",
-    "search_docs":      "Doc Search",
-    "get_conversation_findings": "Searched Memory",
-    "search_conversation_findings": "Searched Memory",
+    "search_docs":      "Doc search",
+    "get_conversation_findings": "Searched memory",
+    "search_conversation_findings": "Searched memory",
+    "manage_tasks": "Managed task plan",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -942,7 +947,7 @@ source the answer rests on. Every attempt is still in `agent_telemetry`.
 | DAX row cap (`TOPN` + count check) | Rows returned | Different mechanism than BigQuery |
 | Answer-length check | Chars in `answer_markdown`, and rows in any single table | Separate from verification |
 | Question-length cap | Chars in the incoming `question` | Gateway request validation, not a turn guard |
-| `max_iterations` (10 tool calls) | Loop count | Conditional edge |
+| `max_iterations` (50 tool calls, a backstop) | Loop count | Conditional edge |
 | Per-tool timeout (40s) | One slow call | Recoverable — agent retries narrower. Sized to leave room under the ~90s gateway budget for retries + synthesis; a long query isn't inherently a wrong one |
 | Gateway timeout (~90s) | Whole turn | Enforced in `app/gateway/` |
 
@@ -1094,12 +1099,12 @@ touching `call_tool_node`'s cost logic.
    a canned response and a minimal telemetry row, written directly by the
    gateway (`docs/approval-workflow.md`).
 
-**10 is a calibration starting point, not a tuned value.** Exhaustion degrades
-to a partial answer (below), so a high cap costs nothing — it just reveals how
-many iterations real questions need. `iteration_count` is logged per turn for
-exactly this (`.claude/rules/telemetry.md`): set the real cap above the 95th
-percentile of *successful* turns, not the average — the DAX-heavy tail is what
-a low cap truncates.
+**The cap (50) is a backstop, not the working limit.** The turn timeout ends a
+turn long before 50 rounds, and a request too large for one turn is handled by
+the task plan (`manage_tasks`, `docs/conversation-memory.md`) and the soft time
+guard, which are more graceful than hitting this cap. It only bounds a runaway
+loop if the timeout is ever lifted. `iteration_count` is still logged per turn
+(`.claude/rules/telemetry.md`).
 
 ### Hitting `max_iterations` — partial answer, not a blanket refusal
 
@@ -1509,7 +1514,13 @@ async def agent_node(state: AgentState) -> dict:
     history = state["history_messages"]
     if state["model_provider"] == "anthropic":
         history = mark_anthropic_history_cache(history)
-    response = await model.ainvoke([system_message, *history, *state["messages"]])
+    messages = state["messages"]
+    if state["task_plan"].get("tasks"):
+        messages = attach_task_plan(messages, state["task_plan"])
+    seconds_left = GATEWAY_TURN_TIMEOUT_SECONDS - (now - state["turn_started_at"]).total_seconds()
+    if seconds_left <= TURN_WARNING_SECONDS_REMAINING:
+        messages = [*messages, HumanMessage(content=time_check)]    # the text is in orchestrator.py
+    response = await model.ainvoke([system_message, *history, *messages])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 ```
 
@@ -1523,6 +1534,11 @@ history. Confirmed live. It needs byte-stable history: `build_history_messages`
 sorts map keys (`.claude/rules/gateway.md`), and a history that has
 that grows without bound defeats it (the first entry changes every turn),
 which compaction prevents. OpenAI and Gemini cache automatically.
+
+**What `agent_node` adds to the request, never to state.** The task plan goes ahead of the turn's first
+message and, in the last `TURN_WARNING_SECONDS_REMAINING` seconds of the turn budget, a time check goes at
+the end. Both are built on copies at request time, so neither is in `state["messages"]`, neither is saved
+to history, and both sit after the cache breakpoints (`docs/conversation-memory.md`).
 
 **`state["model"]`/`state["model_provider"]` drive every branch above —
 per-turn now, not a fixed `app/config.py` pair read once at startup.**

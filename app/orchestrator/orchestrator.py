@@ -39,6 +39,7 @@ from app.config import (
     CONTEXT_DIR,
     DAX_ROW_CAP,
     DAX_TIMEOUT_SECONDS,
+    GATEWAY_TURN_TIMEOUT_SECONDS,
     GCP_PROJECT_ID,
     GCS_CHART_BUCKET,
     GITHUB_REPO_BRANCH,
@@ -59,12 +60,13 @@ from app.config import (
     NUMERIC_SOURCE_TOOLS,
     POWER_BI_DATASET_ID,
     POWER_BI_WORKSPACE_ID,
+    TURN_WARNING_SECONDS_REMAINING,
     get_secret,
 )
 from app.orchestrator.context import build_static_context, get_static_context
 from app.orchestrator.conversation_memory.writer import build_findings_row, write_findings_row
 from app.shared_helpers import is_cancelled, label_chartable_result
-from app.orchestrator.state import AgentState, ToolCallRecord, TurnError
+from app.orchestrator.state import AgentState, TaskPlan, ToolCallRecord, TurnError
 from app.orchestrator.tools import (
     CombineResultsToolCallArgs,
     GenerateChartToolCallArgs,
@@ -77,6 +79,7 @@ from app.orchestrator.tools import (
     get_conversation_findings,
     get_measure_dax,
     get_page_info,
+    manage_tasks,
     run_bigquery_sql,
     search_conversation_findings,
     search_docs,
@@ -93,7 +96,7 @@ CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
 # Memory tools are bound outside Anthropic's strict mode: their flat schemas are still validated at
 # dispatch, and every strict schema counts toward a size limit on the compiled grammar.
-ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings"}
+ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "manage_tasks"}
 
 # finalize_node's canned messages -- one per terminal state with no real answer yet.
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
@@ -134,6 +137,7 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "get_page_info": get_page_info,
         "get_conversation_findings": get_conversation_findings,
         "search_conversation_findings": search_conversation_findings,
+        "manage_tasks": manage_tasks,
         "generate_beeswarm": generate_beeswarm,
     }
     get_static_context()  # warms the @lru_cache at startup, not on the first real turn
@@ -397,8 +401,8 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
         full_args = {**tc, "args": {**tc["args"], "filter_context": filter_context}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
-    # Conversation findings recall
-    if tc["name"] == "get_conversation_findings":
+    # Memory tools that only need the conversation id
+    if tc["name"] in ("get_conversation_findings", "manage_tasks"):
         full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
@@ -616,12 +620,13 @@ def claim_matches_pool(claim: float, pool: set[float]) -> bool:
 SOURCE_LABELS = {
     "run_bigquery_sql": "Query warehouse",
     "run_dax_query":    "Query dashboard",
-    "get_measure_dax":  "Measure Lookup",
+    "get_measure_dax":  "Measure lookup",
     "get_page_info":    "PBI page info",
     "get_repo_contents": "Read code",
-    "search_docs":      "Doc Search",
-    "get_conversation_findings": "Searched Memory",
-    "search_conversation_findings": "Searched Memory",
+    "search_docs":      "Doc search",
+    "get_conversation_findings": "Searched memory",
+    "search_conversation_findings": "Searched memory",
+    "manage_tasks": "Managed task plan",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -679,21 +684,61 @@ def build_model(model: str, model_provider: str) -> BaseChatModel:
 
 
 def mark_anthropic_history_cache(history: list[BaseMessage]) -> list[BaseMessage]:
-    """Returns history with cache breakpoints on the last message of the previous stored turn
-    and of the newest one, so a turn reads older history from cache and writes only the newest."""
+    """Returns history with cache breakpoints on the last message of the most recent 2 turns
+    in history. The result: Each API request only writes the newest turn in history to the cache and reads
+    everything prior from the cache. The returned list is new and the marked messages are deep copies.
+    Thus, state["history_messages"] is unchanged."""
     if not history:
         return history
-    marked = list(history)
-    newest_turn_start = max((i for i, msg in enumerate(marked) if msg.additional_kwargs.get("turn_start")), default=0)
-    previous_turn_end = newest_turn_start - 1 if newest_turn_start else None
-    for i in (previous_turn_end, len(marked) - 1):
-        if i is None or not marked[i].content:
+    marked_history = list(history)
+
+    # Each turn's first message carries the turn_start marker; find where the newest turn starts
+    turn_starts = [i for i, message in enumerate(marked_history) if message.additional_kwargs.get("turn_start")]
+    newest_turn_start = turn_starts[-1] if turn_starts else 0
+
+    # Breakpoint 1: the end of the history (the newest turn's last message)
+    end_of_history = len(marked_history) - 1
+    breakpoints = [end_of_history]
+    # Breakpoint 2: the last message of the previous turn, if there is one
+    if newest_turn_start > 0:
+        breakpoints.append(newest_turn_start - 1)
+
+    for index in breakpoints:
+        if not marked_history[index].content:    # nothing to attach a marker to
             continue
-        msg = marked[i]
-        blocks = [{"type": "text", "text": msg.content}] if isinstance(msg.content, str) else list(msg.content)
-        blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
-        marked[i] = msg.model_copy(update={"content": blocks})
-    return marked
+        # Edit a deep copy, so the message that state holds is not changed
+        message = marked_history[index].model_copy(deep=True)
+        # Put the content in block form and set cache_control on the last block
+        blocks = [{"type": "text", "text": message.content}] if isinstance(message.content, str) else message.content
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        message.content = blocks
+        marked_history[index] = message
+    return marked_history
+
+
+def render_task_plan(task_plan: TaskPlan) -> str:
+    """The saved task plan as text for the model."""
+    tasks = task_plan["tasks"]
+    lines = ["Saved task plan for this conversation as of the start of this turn. If you update it with "
+             "manage_tasks this turn, your latest call is the current version. Earlier manage_tasks calls "
+             "in the history are outdated."]
+    if task_plan.get("scope"):
+        lines.append(f"Scope for every task: {task_plan['scope']}")
+    for number, task in enumerate(tasks, start=1):
+        lines.append(f"{number}. [{task['status'].replace('_', ' ')}] {task['text']}")
+    if all(task["status"] == "done" for task in tasks):
+        lines.append("All tasks are done; clear the plan when the user has no further steps.")
+    return "\n".join(lines)
+
+
+def attach_task_plan(messages: list[BaseMessage], task_plan: TaskPlan) -> list[BaseMessage]:
+    """Returns messages with the task plan ahead of the turn's first message, on a copy so state
+    (and so the saved history) never contains it."""
+    plan_text = render_task_plan(task_plan)
+    first = messages[0]
+    content = (f"{plan_text}\n\n{first.content}" if isinstance(first.content, str)
+               else [{"type": "text", "text": plan_text}, *first.content])
+    return [first.model_copy(update={"content": content}), *messages[1:]]
 
 
 # --- Node functions ------------------------------------------------------
@@ -701,13 +746,32 @@ def mark_anthropic_history_cache(history: list[BaseMessage]) -> list[BaseMessage
 async def agent_node(state: AgentState) -> dict:
     """Calls the LLM with tools bound. Emits tool calls -- the final answer
     only ever arrives via submit_answer, never plain text (gauranteed by verify node)"""
+    
     model = build_model(state["model"], state["model_provider"]).bind_tools(
         build_tools_list(state["model_provider"]), strict=True)
+    
     system_message = SystemMessage(content=build_static_context(state["model_provider"], get_static_context()))
+    
     history = state["history_messages"]
     if state["model_provider"] == "anthropic":
         history = mark_anthropic_history_cache(history)
-    response = await model.ainvoke([system_message, *history, *state["messages"]])
+
+    messages = state["messages"]
+    if state["task_plan"].get("tasks"):
+        messages = attach_task_plan(messages, state["task_plan"])
+
+    seconds_left = GATEWAY_TURN_TIMEOUT_SECONDS - (datetime.now(timezone.utc) - state["turn_started_at"]).total_seconds()
+    if seconds_left <= TURN_WARNING_SECONDS_REMAINING:
+        time_check = (
+            f"Time check: about {round(seconds_left)} seconds remain in this turn. If you can finish with one more "
+            "round of tool calls (not a beeswarm) followed by submit_answer, do that; that takes about 25 seconds. "
+            "Otherwise don't start new work: save the remaining steps with manage_tasks, then call submit_answer "
+            "with what you have, saying plainly that it is partial and what is left. Query results from this turn "
+            "are not kept, so the next turn will need to run its queries again. Answer only by calling "
+            "submit_answer; a plain-text reply is not delivered.")
+        messages = [*messages, HumanMessage(content=time_check)]
+        
+    response = await model.ainvoke([system_message, *history, *messages])
     return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
 
 

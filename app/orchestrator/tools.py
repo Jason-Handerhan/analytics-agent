@@ -52,7 +52,7 @@ from app.orchestrator.conversation_memory.reader import (
     fetch_turns,
     fetch_vector_search_hits,
 )
-from app.shared_helpers import is_cancelled
+from app.shared_helpers import is_cancelled, session_doc
 
 logger = logging.getLogger(__name__)
 
@@ -806,6 +806,116 @@ async def search_conversation_findings(
 
 search_conversation_findings.handle_tool_error = True
 search_conversation_findings.handle_validation_error = lambda e: str(e)
+
+
+# --- manage_tasks -----------------------------------------------------------------
+
+TASKS_MAX_COUNT = 30
+TASK_MAX_CHARS = 500    # 30 tasks at 500 characters is at most about 3,750 tokens injected per turn
+TASK_SCOPE_MAX_CHARS = 800
+
+MANAGE_TASKS_DESCRIPTION = """Saves the plan for a request that is too large to finish in one turn, or that \
+the user asks you to plan, so it survives across turns. If you expect a request to need more than about \
+eight queries, charts and lookups in total, don't try to answer it all: save a plan, show it to the user \
+as a numbered list (not a table), and work through it with them. If you find partway through a turn that \
+the work is bigger than you expected, stop, save the plan, and give the user what you have so far. Each \
+call replaces the whole task list, so send every task with its current status, and update statuses in the \
+same turn as the work, before you submit your answer. The saved plan is shown to you at the start of each \
+turn. When everything is done, or the user drops the plan, clear the whole plan, scope included, by \
+sending an empty task list.
+
+Don't record findings in tasks. A task list is context, not a verified source: any number in an answer \
+must come from this turn's queries or from get_conversation_findings, so a figure copied from a task \
+would fail verification.
+
+Sizing tasks is what matters most. Each task is one deliverable the user would recognize (for example a \
+chart with its takeaway), completed in a single turn, which has about two minutes and a few tool calls. \
+A task includes everything it needs: the queries, the charts built from them, and a short explanation. \
+Never split a pipeline across tasks (one task to pull data, another to chart it): results from earlier \
+turns are not available, so the second task would have to pull the data again. Work one task per turn by \
+default; when the next tasks are small and share the same data, do them together in one turn and mark \
+each done. A task that needs more than a handful of queries and charts is too big: split it into tasks \
+that are each self-contained, for example by question, by segment, or into groups of two or three \
+related charts."""
+
+
+class TaskItem(BaseModel):
+    text: str = Field(
+        description="What to do in this task, written so a later turn can carry it out from this text and "
+                    "the plan's scope alone. Say the question and the output you want, and include getting "
+                    "its own data. If it builds on an earlier finding, name the finding instead of assuming "
+                    "the data is still there. Leave out anything already in the scope. Name the work, not a "
+                    "result.\n"
+                    "Good: Reorder rate by department, as a bar chart sorted high to low, with a "
+                    "two-sentence takeaway.\n"
+                    "Not a task: Pull the department data. (A separate chart task would have to pull it "
+                    "again.)")
+    status: Literal["todo", "in_progress", "done"] = Field(
+        description="'todo', 'in_progress' (at most one task), or 'done' (its deliverable has been "
+                    "delivered to the user).")
+
+
+class ManageTasksArgs(BaseModel):
+    scope: str | None = Field(
+        default=None,
+        description="Context that applies to every task: the model and split, filters, definitions, and "
+                    "output conventions. Put it here once so tasks don't repeat it. Send it only when you "
+                    "set or change it; leave it out to keep the saved scope, or send an empty string to "
+                    "clear it.")
+    tasks: list[TaskItem] = Field(
+        description="The complete task list, in order. Replaces the saved list; send an empty list to "
+                    "clear the whole plan.")
+
+    @field_validator("scope")
+    def _check_scope(cls, scope: str | None) -> str | None:
+        """Strips the scope and rejects one over the cap."""
+        if scope is None:
+            return None
+        scope = scope.strip()
+        if len(scope) > TASK_SCOPE_MAX_CHARS:
+            raise ValueError(f"The scope is {len(scope)} characters; keep it under {TASK_SCOPE_MAX_CHARS}.")
+        return scope
+
+    @field_validator("tasks")
+    def _check_tasks(cls, tasks: list[TaskItem]) -> list[TaskItem]:
+        """Rejects a list over the caps, a blank or overlong task, or more than one in progress."""
+        if len(tasks) > TASKS_MAX_COUNT:
+            raise ValueError(f"A task list holds at most {TASKS_MAX_COUNT} tasks; merge or drop some.")
+        for number, task in enumerate(tasks, start=1):
+            task.text = task.text.strip()
+            if not task.text:
+                raise ValueError(f"Task {number} is blank.")
+            if len(task.text) > TASK_MAX_CHARS:
+                raise ValueError(
+                    f"Task {number} is {len(task.text)} characters; keep each under {TASK_MAX_CHARS}.")
+        if sum(task.status == "in_progress" for task in tasks) > 1:
+            raise ValueError("More than one task is in progress; mark only the one you are working on.")
+        return tasks
+
+
+@tool(args_schema=ManageTasksArgs, description=MANAGE_TASKS_DESCRIPTION)
+async def manage_tasks(
+    tasks: list[TaskItem],
+    conversation_id: Annotated[str, InjectedToolArg],
+    scope: str | None = None,
+) -> str:
+    if tasks:
+        update = {"task_plan.tasks": [task.model_dump() for task in tasks]}
+        if scope is not None:
+            update["task_plan.scope"] = scope
+    else:
+        update = {"task_plan": {}}
+    try:
+        await session_doc(conversation_id).update(update)
+    except GoogleAPICallError as e:
+        raise ToolError(f"Could not save the task plan ({e}). Retry once, or tell the user.") from e
+    if not tasks:
+        return "Cleared the task plan."
+    done = sum(task.status == "done" for task in tasks)
+    return f"Saved the task plan ({done} of {len(tasks)} done)."
+
+manage_tasks.handle_tool_error = True
+manage_tasks.handle_validation_error = lambda e: str(e)
 
 
 # --- generate_beeswarm -----------------------------------------------------------

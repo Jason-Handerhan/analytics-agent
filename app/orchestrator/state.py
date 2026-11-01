@@ -6,7 +6,7 @@ either of those modules can be imported without pulling in the other's
 dependencies.
 """
 from datetime import datetime
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -43,6 +43,17 @@ class PendingApproval(TypedDict):
     paused_at: datetime
 
 
+class Task(TypedDict):
+    text: str
+    status: Literal["todo", "in_progress", "done"]
+
+
+class TaskPlan(TypedDict, total=False):
+    """The conversation's saved plan; empty once cleared. scope is absent until one is set."""
+    scope: str
+    tasks: list[Task]
+
+
 class TurnError(TypedDict):
     stage: str
     error_type: str
@@ -68,6 +79,8 @@ class AgentState(TypedDict):
     active_page: str | None
     image_base64: str | None
     history_messages: list[BaseMessage]  # conversation history
+    notes: list[dict]   # standing notes for this conversation, read from the sessions document
+    task_plan: TaskPlan   # this conversation's task plan, read from the sessions document
 
     # Accumulated during the tool loop
     messages: Annotated[list[BaseMessage], add_messages]

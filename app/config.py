@@ -121,11 +121,12 @@ BIGQUERY_TIMEOUT_SECONDS = 40
 BIGQUERY_ROW_CAP = 1000  # cap on rows fetched -- LIMIT doesn't reduce bytes scanned
 DAX_ROW_CAP = BIGQUERY_ROW_CAP  # same constraint as BigQuery's cap, not platform-specific
 DAX_TIMEOUT_SECONDS = BIGQUERY_TIMEOUT_SECONDS  # same turn-budget reasoning as BigQuery's timeout
-MAX_ITERATIONS = 10  # max tool-call rounds per turn before falling back to a partial answer
+MAX_ITERATIONS = 50  # backstop on tool-call rounds per turn; the turn timeout ends a turn long before this
 
 # Gateway request/turn guardrails
 MAX_QUESTION_CHARS = 2000  # generous for a real question, not a paste -- rejected before a turn starts
 GATEWAY_TURN_TIMEOUT_SECONDS = 115  # whole-turn budget before returning a fallback AgentResponse
+TURN_WARNING_SECONDS_REMAINING = 35  # the agent gets a time check once this much of the budget is left
 
 # MCP server (app/main.py, app/orchestrator/orchestrator.py) -- co-located with the gateway for now
 MCP_HOST = "127.0.0.1"

@@ -38,6 +38,11 @@ def live_turn_doc(conversation_id: str):
     return get_firestore_client().collection("live_turns").document(conversation_id)
 
 
+def session_doc(conversation_id: str):
+    """The sessions document for a conversation."""
+    return get_firestore_client().collection("sessions").document(conversation_id)
+
+
 async def is_cancelled(conversation_id: str) -> bool:
     """Reads live_turns.cancel_requested for a turn in flight."""
     snap = await live_turn_doc(conversation_id).get()

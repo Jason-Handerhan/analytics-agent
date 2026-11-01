@@ -40,6 +40,7 @@ instance of this, not seven independent rules.
 | `generate_beeswarm` | **No** — a plain function in the orchestrator |
 | `get_conversation_findings` | **No** — a plain function in the orchestrator |
 | `search_conversation_findings` | **No** — a plain function in the orchestrator |
+| `manage_tasks` | **No** — a plain function in the orchestrator |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -113,6 +114,9 @@ only through each turn's `verified_numbers` (`MEMORY_SOURCE_TOOLS`, not
 Not a BigQuery tool as far as guardrails go (no dry-run, cost tier, or
 `bytes_consumed`); its limit is a token budget. Design in
 `docs/conversation-memory.md`.
+
+**`manage_tasks` is part of that exception: it writes this project's `sessions` document** (the
+`task_plan` field, `conversation_id` injected) — nothing portable to host. It is never a numeric source.
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -220,6 +224,7 @@ later changes the URL and adds auth headers — not this file.
 | `generate_beeswarm` | SHAP beeswarm for one model and split, optionally narrowed to a department, aisle, or product — returns the image URL **and the image itself** | Shows the overall pattern across many predictions; **never** a number source |
 | `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
 | `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions, compaction summaries) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
+| `manage_tasks` | The conversation's task plan: replaces the whole list, an empty list clears it | Never a number source: a task holds work, not results (`docs/conversation-memory.md`) |
 | `search_conversation_findings` | Semantic (vector) search over earlier verified answers, in this conversation or all of the user's: `mode="search"` (closest turns) or `mode="tags"` (topics and entities in use) | Only a hit's `verified_numbers` are a number source; tags are never citable (`docs/conversation-memory.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at
@@ -227,7 +232,7 @@ all, see below. `submit_answer` isn't either — it's not a number *source*,
 it's how the model delivers the answer built from everything above; see its
 own section below.
 
-**Twelve tools, one vector store** — deliberately not 1:1:
+**Thirteen tools, one vector store** — deliberately not 1:1:
 
 - **Code search is agentic (list or read), not vector search.** Embeddings
   flatten the structural relationships — imports, call graphs — that code
@@ -560,9 +565,8 @@ the model legitimately needs `run_bigquery_sql` instead. It's one more
 never calling it.
 
 **Excluded from `build_sources`'s badges** — not something the answer draws
-information *from*. **Included in `agent_telemetry.tool_calls`** like any
-other call, giving every submission a full audit trail regardless of
-verification outcome.
+information *from*. **Not recorded in `agent_telemetry.tool_calls`** either: no
+`ToolCallRecord` is built for it, and its answer fields are columns of their own.
 
 ## `run_dax_query`
 
@@ -820,9 +824,9 @@ the model can't emit a structurally invalid call at all
 can't validate that a SQL query is *correct*, just that the call's shape is
 valid.
 
-**`strict=True` is enabled globally, with three tools bound outside it on Claude —
-confirmed live (2026-10-02, 2026-10-29).** The memory tools
-(`get_conversation_findings`, `search_conversation_findings`) join `generate_chart`:
+**`strict=True` is enabled globally, with four tools bound outside it on Claude —
+confirmed live (2026-10-02, 2026-10-29).** The memory and state tools
+(`get_conversation_findings`, `search_conversation_findings`, `manage_tasks`) join `generate_chart`:
 every strict schema counts toward a size limit on the compiled grammar (a 400,
 "compiled grammar is too large"), the memory schemas are flat and still validated at
 dispatch, and a bad call costs one retry. They are pre-converted the same way, in

@@ -313,6 +313,8 @@ sessions/{conversation_id}            # spans the whole conversation
       "timestamp": ...
     }
   ],
+  "notes": [...],                          # standing notes (tool not built yet), read with the history
+  "task_plan": {...},                      # {"scope", "tasks"} from manage_tasks, read with the history
   "last_activity_at": <timestamp>          # updated every turn; TTL target
 }
 ```
@@ -429,8 +431,9 @@ agent just answers as if every turn were the first. Read from
 the prompt; append the completed turn after.
 
 **Split into two functions, deliberately — Firestore I/O stays out of
-`app/gateway/entry_exit.py`.** `fetch_history_messages` (`app/gateway/gateway.py`)
-does the actual read; `build_history_messages` (`app/gateway/entry_exit.py`)
+`app/gateway/entry_exit.py`.** `fetch_session_memory` (`app/gateway/gateway.py`)
+does the actual read, returning the history, notes and task plan together from one read of
+the `sessions` document; `build_history_messages` (`app/gateway/entry_exit.py`)
 is a pure reconstruction over whatever list it's handed, no client, no
 `conversation_id`. Same split as `write_history_messages`/`build_updated_history`
 on the way out, and the same reason `app/orchestrator/state.py` stays free of
@@ -440,9 +443,11 @@ imported, and in `entry_exit.py`'s case unit-tested
 
 ```python
 # app/gateway/gateway.py -- Firestore I/O
-async def fetch_history_messages(conversation_id: str) -> list[dict]:
-    snap = await get_firestore_client().collection("sessions").document(conversation_id).get()
-    return snap.to_dict().get("history_messages", []) if snap.exists else []
+async def fetch_session_memory(conversation_id: str) -> SessionMemory:
+    snap = await session_doc(conversation_id).get()
+    stored = snap.to_dict() if snap.exists else {}
+    return SessionMemory(history_messages=stored.get("history_messages", []),
+                         notes=stored.get("notes", []), task_plan=stored.get("task_plan", {}))
 
 # app/gateway/entry_exit.py -- pure reconstruction, no I/O
 def build_history_messages(history_messages: list[dict]) -> list[BaseMessage]:
@@ -672,7 +677,7 @@ the initial state. `consume_graph`'s first write replaces the status with
   show only entries it hasn't seen. Adaptive thinking means some rounds have none.
 - **`call_tool`:** `call_tool_status(names)`, from the tools the batch dispatched.
   `submit_answer` is ignored. A chart in the batch (`generate_chart` or `generate_beeswarm` -- `CHART_TOOLS`, `app/config.py`) gives `"Prepared the chart"`, a combine
-  gives `"Combined results"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
+  gives `"Combined results"`, and a batch with only `manage_tasks` gives `"Managed the task plan"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
   `app/config.py`) distinct sources, such as `"Gathered results from BigQuery, project
   documentation, and semantic model"`, or `"Gathered results from {n} sources"` above that.
   Source names come from `SOURCE_NAMES`. **If every call in the batch errored**, this is
@@ -745,7 +750,7 @@ there in the meantime is inert.
 `asyncio.timeout(GATEWAY_TURN_TIMEOUT_SECONDS)`.** The graph gets whatever compaction
 left. `run_agent_turn` raises on timeout or error; on either, `post_ask` deletes
 the `live_turns` document (so a timeout during compaction leaves no stale status)
-and returns a plain `AgentResponse`, not an HTTP error.
+and returns a plain `AgentResponse`, not an HTTP error. The message offers a plan first ("Ask me to break it into a plan, or try narrowing it"). The clock (`turn_started_at`) starts at the top of `run_agent_turn`, so the agent's soft time check (`.claude/rules/orchestrator.md`) is measured from the same instant.
 
 **`GET /ask/status/{conversation_id}`** validates the key and token, checks ownership
 with `assert_owns_conversation`, and returns `{status, thinking_log}` from

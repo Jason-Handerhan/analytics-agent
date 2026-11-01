@@ -112,9 +112,9 @@ drift apart. Re-run `create_table.py` after any schema change (BigQuery can't
 | `conversation_id`, `user_id`, `question` | Yes | Phase 1 |
 | `model`, `model_provider` | Yes | Phase 6 (model swappability) -- **per-request since 2026-10-20, not a fixed pair on every row.** `AskRequest.model` (default `app/config.py`'s `MODEL`) and its derived `model_provider` flow through `AgentState`/`PendingApproval` to `build_telemetry_row`, so two rows for the same conversation can legitimately show different models if the caller switched between turns |
 | `filter_context`, `active_page` | No — null | Phase 3 (captured through the connector) |
-| `tool_calls` (nested record: `ToolCallRecord` fields + derived `query_text`) | No — empty | Phase 3, one tool at a time as each lands |
+| `tool_calls` (nested record: `ToolCallRecord` fields + derived `query_text`) | No — empty | Phase 3, one tool at a time as each lands. `submit_answer` is never recorded; its answer fields are columns of their own |
 | `answer_markdown` | Yes — the canned echo answer | Phase 1 |
-| `turn_started_at`, `turn_completed_at` | Yes | Phase 1 |
+| `turn_started_at`, `turn_completed_at` | Yes | Phase 1. `turn_started_at` is taken at the top of `run_agent_turn` (since 2026-10-31), so it includes init, the history read and compaction; before that it excluded them |
 | `verified` | No — `False` | Phase 3 — **not** on `AgentResponse` by design, but logged here: it's the only way to confirm in production that every non-declined answer actually passed verification |
 | `verification_retry_count`, `length_retry_count` | No — 0 | Phase 3 — **two separate columns, same names as `AgentState`.** A single summed `retry_count` would hide which guardrail fired, which is the whole reason to log them |
 | `needs_approval` | No — `False` | Phase 3 (approval routing, not the dry-run/cap that ships with the tool) |

@@ -4,6 +4,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from typing import TypedDict
 
 import jwt
 from jwt import PyJWKClient
@@ -54,8 +55,8 @@ from app.gateway.models import (
 from app.orchestrator.compaction import CompactionResult, compact_history_pipeline, measure_history_size
 from app.orchestrator.conversation_memory.writer import write_summary_row
 from app.orchestrator.orchestrator import graph, init_orchestrator
-from app.shared_helpers import get_firestore_client, live_turn_doc
-from app.orchestrator.state import AgentState
+from app.shared_helpers import get_firestore_client, live_turn_doc, session_doc
+from app.orchestrator.state import AgentState, TaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +117,6 @@ async def assert_owns_conversation(conversation_id: str, claims: dict) -> None:
 
 # --- Conversation state ---------------------------------------------------
 
-def session_doc(conversation_id: str):
-    """The sessions document for a conversation."""
-    return get_firestore_client().collection("sessions").document(conversation_id)
-
-
 async def create_conversation(user_id: str) -> str:
     """Creates a new sessions document; returns its conversation_id."""
     conversation_id = str(uuid.uuid4())
@@ -132,10 +128,22 @@ async def create_conversation(user_id: str) -> str:
     return conversation_id
 
 
-async def fetch_history_messages(conversation_id: str) -> list[dict]:
-    """Reads sessions.history_messages -- [] if the doc doesn't exist yet."""
+class SessionMemory(TypedDict):
+    """What a turn reads from the sessions document."""
+    history_messages: list[dict]
+    notes: list[dict]
+    task_plan: TaskPlan
+
+
+async def fetch_session_memory(conversation_id: str) -> SessionMemory:
+    """Reads the sessions document's history, notes and task plan -- empty if the doc doesn't exist yet."""
     snap = await session_doc(conversation_id).get()
-    return snap.to_dict().get("history_messages", []) if snap.exists else []
+    stored = snap.to_dict() if snap.exists else {}
+    return SessionMemory(
+        history_messages=stored.get("history_messages", []),
+        notes=stored.get("notes", []),
+        task_plan=stored.get("task_plan", {}),
+    )
 
 
 async def write_history_messages(conversation_id: str, history_messages: list[dict]) -> None:
@@ -185,7 +193,7 @@ def call_tool_status(tool_names: list[str]) -> str | None:
         return "Combined results"
     sources = sorted({SOURCE_NAMES[tn] for tn in tool_names if tn in SOURCE_NAMES}) #sorted set
     if not sources:
-        return None
+        return "Managed the task plan" if "manage_tasks" in tool_names else None
     if len(sources) > STATUS_MAX_NAMED_SOURCES:
         return f"Gathered results from {len(sources)} sources"
     return f"Gathered results from {join_names(sources)}"
@@ -333,6 +341,7 @@ async def consume_graph(initial_state: AgentState) -> AgentState:
 async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
     """Runs one turn: compaction when the history needs it, then the graph. Raises on timeout
     or error; post_ask turns those into a plain AgentResponse."""
+    turn_started_at = datetime.now(timezone.utc)
     await init_orchestrator()
 
     # Handle Live Turns doc first if this is an approval resume to ensure
@@ -357,8 +366,9 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
         # Approval Workflow: set status to thinking (mitigate "Approval Workflow" status display)
         await live_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
 
-    # Fetch History messages and compact if needed
-    history_messages = await fetch_history_messages(body.conversation_id)
+    # Fetch history, notes and tasks; compact the history if needed
+    memory = await fetch_session_memory(body.conversation_id)
+    history_messages = memory["history_messages"]
 
     compaction = CompactionResult(stored_history=history_messages)
     estimated_tokens, stored_bytes = measure_history_size(history_messages)
@@ -386,6 +396,9 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             active_page=pending["active_page"],
             image_base64=None,
             history_messages=build_history_messages(history_messages),
+            notes=memory["notes"],
+            task_plan=memory["task_plan"],
+            turn_started_at=turn_started_at,
         )
         initial_state["messages"] = rebuild_paused_messages(pending["messages"], pending["tool_calls"])
         initial_state["tool_calls"] = pending["tool_calls"]
@@ -407,6 +420,9 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             active_page=body.active_page,
             image_base64=body.image_base64,
             history_messages=build_history_messages(history_messages),
+            notes=memory["notes"],
+            task_plan=memory["task_plan"],
+            turn_started_at=turn_started_at,
         )
 
     initial_state["compacted"] = compaction.compacted
@@ -454,7 +470,8 @@ async def post_ask(
     except asyncio.TimeoutError:
         logger.warning("Turn %s timed out after %ss", body.conversation_id, GATEWAY_TURN_TIMEOUT_SECONDS)
         await live_turn_doc(body.conversation_id).delete()
-        timeout_message = "This question took too long to answer. Try narrowing it and asking again."
+        timeout_message = ("This question took too long to answer. Ask me to break it into a plan, "
+                           "or try narrowing it and asking again.")
         response = AgentResponse(
             answer_markdown=timeout_message,
             answer_html=render_answer_html(timeout_message),

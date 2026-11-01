@@ -263,6 +263,9 @@ def test_ask_request_validators_reject_bad_input(kwargs, match):
         AskRequest(**kwargs)
 
 
+# --- Live status: what consume_graph writes as a turn runs -----------------------------------
+# Scripted graph chunks, one per status branch, replayed through the real consume_graph.
+
 AGENT_CHUNK = {"type": "updates", "data": {"agent": {
     "messages": [AIMessage(content=[{"type": "thinking", "thinking": "Plan it."}])],
     "llm_calls": 1}}}
@@ -285,6 +288,10 @@ CALL_TOOL_OVER_CAP_CHUNK = {"type": "updates", "data": {"call_tool": {"messages"
     ToolMessage(content="[]", name="search_docs", tool_call_id="c5", status="success"),
     ToolMessage(content="[]", name="get_page_info", tool_call_id="c6", status="success"),
 ]}}}
+# manage_tasks alone has no source name -- its own status, not a blank one.
+CALL_TOOL_TASK_PLAN_CHUNK = {"type": "updates", "data": {"call_tool": {"messages": [
+    ToolMessage(content="Saved", name="manage_tasks", tool_call_id="c8", status="success"),
+]}}}
 CHECK_CHUNK = {"type": "updates", "data": {"check_length": {"length_retry_count": 0}}}
 # A rejected answer writes nothing -- the agent's "Thought" line stays up instead.
 VERIFY_REJECTED_CHUNK = {"type": "updates", "data": {"verify": {"verified": False}}}
@@ -296,18 +303,20 @@ FINAL_VALUES = {"type": "values", "data": {
 
 @pytest.mark.asyncio
 async def test_consume_graph_writes_status_and_cleans_up(monkeypatch):
-    """Three rounds through the tool loop, exercising call_tool_status's and
+    """Four rounds through the tool loop, exercising call_tool_status's and
     get_node_status's branches through the real consume_graph path: chart
     priority, a rejected answer writing nothing, an all-error batch's generic
-    retry status, a thinking-free agent round, an over-cap source count, then
-    a normal verified finalize. The document is deleted at the end."""
+    retry status, a thinking-free agent round, a task-plan-only batch, an
+    over-cap source count, then a normal verified finalize. The document is
+    deleted at the end."""
     _, live = _patch_docs(monkeypatch)
     monkeypatch.setattr(gateway, "graph", _ScriptedGraph([
         AGENT_CHUNK, CALL_TOOL_CHART_CHUNK, CHECK_CHUNK, VERIFY_REJECTED_CHUNK,
         AGENT_CHUNK_NO_THINKING, CALL_TOOL_ALL_ERROR_CHUNK,
+        AGENT_CHUNK_NO_THINKING, CALL_TOOL_TASK_PLAN_CHUNK,
         AGENT_CHUNK_NO_THINKING, CALL_TOOL_OVER_CAP_CHUNK, CHECK_CHUNK, VERIFY_CHUNK,
         FINALIZE_CHUNK, FINAL_VALUES]))
-    ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+    ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
     monkeypatch.setattr(gateway, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
 
     final_state = await gateway.consume_graph({"conversation_id": "conv-1"})
@@ -321,6 +330,8 @@ async def test_consume_graph_writes_status_and_cleans_up(monkeypatch):
         # VERIFY_REJECTED_CHUNK: no write -- the rejected answer writes nothing.
         ("update", {"status": "Thought (1.0s)"}),
         ("update", {"status": "Hit an issue, retrying... (1.0s)"}),
+        ("update", {"status": "Thought (1.0s)"}),
+        ("update", {"status": "Managed the task plan (1.0s)"}),
         ("update", {"status": "Thought (1.0s)"}),
         ("update", {"status": "Gathered results from 4 sources (1.0s)"}),
         ("update", {"status": "Verified results (1.0s)"}),

@@ -160,7 +160,7 @@ real dashboard to investigate, not something a fixture can stand in for.
 ## 4. Chat history — redaction, FIFO trim, and round-trip
 
 Pure functions over plain dicts/`BaseMessage` — no Firestore, no mocking.
-`fetch_history_messages`/`write_history_messages` (the actual Firestore I/O,
+`fetch_session_memory`/`write_history_messages` (the actual Firestore I/O,
 in `app/gateway/gateway.py`) are deliberately NOT unit-tested: mocking their
 one dependency (`get_firestore_client()`) would just assert the mock does what the mock
 was told to do, nothing real exercised. They're proven live instead, in
@@ -236,13 +236,13 @@ async def test_get_conversation_history_passes_params_and_decodes_rows():
 
 The two new endpoints themselves (`get_conversations`,
 `get_conversation_history_endpoint`) are deliberately not unit-tested, same
-reasoning as `fetch_history_messages`/`write_history_messages` above: both
+reasoning as `fetch_session_memory`/`write_history_messages` above: both
 are thin composition of already-independently-tested pieces (auth covered
 generically; `assert_owns_conversation` has its own test), with no real
 logic of their own to exercise behind a mock. Proven live instead, in
 `notebooks/test_chat_history_endpoints.ipynb`.
 
-## 4d. Conversation memory (`conversation_findings`, `get_conversation_findings`, `search_conversation_findings`)
+## 4d. Conversation memory (`conversation_findings`, `get_conversation_findings`, `search_conversation_findings`, `manage_tasks`)
 
 `docs/conversation-memory.md`. The row builder is one test; the recall and search
 tools' pure helpers and args validators live in `tests/test_tools.py`, and the pool
@@ -296,6 +296,27 @@ async def test_compact_history_pipeline_replaces_old_turns_with_summary(...):
 
 async def test_compact_history_pipeline_failure_leaves_history_unchanged(...):
     """A summarizer error returns the original history, flagged failed."""
+```
+
+The task plan and the time check are one test each, with the args validator:
+
+```python
+# tests/test_tools.py
+def test_manage_tasks_args_validator():
+    """Blank, overlong and surplus tasks, a second task in progress and an oversized scope are
+    rejected; an omitted scope, an empty list and padded text are valid."""
+
+# tests/test_orchestrator.py
+def test_attach_task_plan():
+    """The plan goes ahead of the turn's first message on a copy (numbered tasks, status words, scope,
+    all-done hint, block content); the message in state is untouched."""
+
+async def test_agent_node_adds_time_check_near_the_deadline(monkeypatch):
+    """Within TURN_WARNING_SECONDS_REMAINING of the budget the request ends with a time check built
+    at call time; earlier there is none; state is untouched."""
+
+# tests/test_gateway.py -- inside test_consume_graph_writes_status_and_cleans_up
+# A batch with only manage_tasks writes "Managed the task plan".
 ```
 
 `read`/`write` against BigQuery (`reader.py`, `write_findings_row`), the embedding

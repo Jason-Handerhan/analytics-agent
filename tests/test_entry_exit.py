@@ -32,22 +32,7 @@ from app.gateway.entry_exit import (
 from app.orchestrator.state import AgentState
 
 
-def test_build_history_messages_ignores_map_key_order():
-    """The same stored turn with its nested map keys in a different order (as Firestore
-    returns them) rebuilds to identical messages, tool-call args included."""
-    spec = {"title": "t", "chart_type": "heatmap", "x_field": "a", "y_field": "b"}
-    reordered_spec = {"y_field": "b", "x_field": "a", "chart_type": "heatmap", "title": "t"}
-
-    def stored(chart_spec):
-        call = {"name": "generate_chart", "args": {"spec": chart_spec, "source_ref": "ref_1"}, "id": "toolu_1"}
-        block = {"type": "tool_use", "id": "toolu_1", "name": "generate_chart", "input": call["args"]}
-        return {"messages": messages_to_dict([AIMessage(content=[block], tool_calls=[call])])}
-
-    original = build_history_messages([stored(spec)])
-    reordered = build_history_messages([stored(reordered_spec)])
-    assert list(original[0].tool_calls[0]["args"]["spec"]) == sorted(spec)
-    assert json.dumps(original[0].content) == json.dumps(reordered[0].content)
-    assert json.dumps(original[0].tool_calls) == json.dumps(reordered[0].tool_calls)
+# --- Building a turn: human message and initial state ----------------------------------------
 
 
 def test_build_human_message():
@@ -68,6 +53,7 @@ def test_build_human_message():
 
 def test_build_initial_state():
     """Every AgentState key present, with correct defaults and seeded messages."""
+    started_at = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
     state = build_initial_state(
         question="How many orders?",
         conversation_id="conv-1",
@@ -78,6 +64,9 @@ def test_build_initial_state():
         active_page="Financial Impact",
         image_base64=None,
         history_messages=[],
+        notes=[],
+        task_plan={},
+        turn_started_at=started_at,
     )
 
     # Every AgentState key present, nothing extra, nothing missing
@@ -88,7 +77,7 @@ def test_build_initial_state():
     assert state["user_id"] == "user-1"
     assert state["model"] == "claude-sonnet-5"
     assert state["model_provider"] == "anthropic"
-    assert isinstance(state["turn_started_at"], datetime)
+    assert state["turn_started_at"] == started_at
     assert state["history_messages"] == []
     assert len(state["messages"]) == 1
     assert isinstance(state["messages"][0], HumanMessage)
@@ -109,130 +98,25 @@ def test_build_initial_state():
     assert state["paused_at"] is None
 
 
-def test_build_agent_response():
-    """Projects final state into AgentResponse; empty vs. non-empty pending_queries;
-    answer_html renders the real custom styling for tables, code, and images."""
-    answer_markdown = (
-        "The answer.\n\n"
-        "| Metric | Value |\n"
-        "|---|---|\n"
-        "| Recall@5 | 0.68 |\n\n"
-        "```python\nprint('hi')\n```\n\n"
-        "Inline `code` here, and a chart: ![chart](https://example.com/chart.png)"
-    )
-    base_state = {
-        "answer_markdown": answer_markdown,
-        "sources": ["Query warehouse"],
-        "needs_approval": False,
-        "chart_urls": ["https://example.com/chart.png"],
-        "suggested_follow_ups": ["What about last quarter?"],
-        "iteration_cap_hit": False,
-        "pending_queries": [],
-        "estimated_cost": None,
-        "cost_cap_exceeded": False,
-        "largest_pending_query": None,
-    }
-    response = build_agent_response(base_state)
-    assert response.answer_markdown == answer_markdown
-    assert response.chart_urls == ["https://example.com/chart.png"]
-    assert response.suggested_follow_ups == ["What about last quarter?"]
-    assert response.pending_query is None
-
-    # answer_html rendering assertions
-    html = response.answer_html
-    assert "<table" in html and "max-width: 100%" in html
-    assert ANSWER_TABLE_HEADER_BG in html  # table header background, unique to the header cell style
-    assert '<pre style="display: inline-block' in html  # code block shrinks to content width
-    assert ANSWER_CODE_BLOCK_BG in html
-    assert '<code style="font-family:' in html and ANSWER_INLINE_CODE_BG in html
-    assert '<img src="https://example.com/chart.png"' in html and "max-width: 100%" in html
-
-    # Pending Query test (comes from largest pending query)
-    with_pending = {**base_state, "largest_pending_query": "SELECT 2", "pending_queries": [
-        {"id": "a", "query": "SELECT 1"}, {"id": "b", "query": "SELECT 2"},
-    ]}
-    assert build_agent_response(with_pending).pending_query == "SELECT 2"
+# --- History in and out ----------------------------------------------------------------------
 
 
-def test_strip_thinking_blocks():
-    """Drops a thinking block entirely, keeps a reasoning block (OpenAI's
-    tool-calling shape), strips a leftover extras key from any block that
-    remains, and leaves non-dict content and non-AIMessage messages alone."""
-    ai_msg = AIMessage(content=[
-        {"type": "thinking", "thinking": "working through it"},
-        {"type": "reasoning", "summary": [], "content": [], "encrypted_content": "abc"},
-        {"type": "text", "text": "The answer is 42", "extras": {"signature": "xyz"}},
-    ])
-    mixed_msg = AIMessage(content=["a loose string block", {"type": "text", "text": "ok"}])
-    tool_msg = ToolMessage(content="untouched", name="run_bigquery_sql",
-                           tool_call_id="tc1", status="success")
+def test_build_history_messages_ignores_map_key_order():
+    """The same stored turn with its nested map keys in a different order (as Firestore
+    returns them) rebuilds to identical messages, tool-call args included."""
+    spec = {"title": "t", "chart_type": "heatmap", "x_field": "a", "y_field": "b"}
+    reordered_spec = {"y_field": "b", "x_field": "a", "chart_type": "heatmap", "title": "t"}
 
-    stripped = _strip_thinking_blocks([ai_msg, mixed_msg, tool_msg])
+    def stored(chart_spec):
+        call = {"name": "generate_chart", "args": {"spec": chart_spec, "source_ref": "ref_1"}, "id": "toolu_1"}
+        block = {"type": "tool_use", "id": "toolu_1", "name": "generate_chart", "input": call["args"]}
+        return {"messages": messages_to_dict([AIMessage(content=[block], tool_calls=[call])])}
 
-    assert stripped[0].content == [
-        {"type": "reasoning", "summary": [], "content": [], "encrypted_content": "abc"},
-        {"type": "text", "text": "The answer is 42"},
-    ]
-    assert stripped[1].content == ["a loose string block", {"type": "text", "text": "ok"}]
-    assert stripped[2] is tool_msg
-
-
-def test_gemini_signature_drop_and_round_trip():
-    """_drop_gemini_signatures removes the Firestore-reserved key for
-    history; _rename_gemini_signatures_for_storage/_restore_gemini_signatures
-    round-trip it unchanged for PendingApproval's live resume."""
-    def make_message():
-        return AIMessage(content=[], additional_kwargs={
-            "function_call": {"name": "submit_answer", "arguments": "{}"},
-            GEMINI_THOUGHT_SIGNATURES_KEY: {"call_1": "sig-blob"},
-        })
-
-    dropped = _drop_gemini_signatures(messages_to_dict([make_message()]))
-    kwargs = dropped[0]["data"]["additional_kwargs"]
-    assert GEMINI_THOUGHT_SIGNATURES_KEY not in kwargs
-    assert kwargs["function_call"] == {"name": "submit_answer", "arguments": "{}"}
-
-    renamed = _rename_gemini_signatures_for_storage(messages_to_dict([make_message()]))
-    renamed_kwargs = renamed[0]["data"]["additional_kwargs"]
-    assert GEMINI_THOUGHT_SIGNATURES_KEY not in renamed_kwargs
-    assert renamed_kwargs[_GEMINI_SIGNATURES_STORAGE_KEY] == {"call_1": "sig-blob"}
-
-    restored = _restore_gemini_signatures(renamed)
-    restored_kwargs = restored[0]["data"]["additional_kwargs"]
-    assert restored_kwargs[GEMINI_THOUGHT_SIGNATURES_KEY] == {"call_1": "sig-blob"}
-    assert _GEMINI_SIGNATURES_STORAGE_KEY not in restored_kwargs
-
-
-# build_pending_approval's field contract is covered by
-# test_consume_graph_replaces_doc_with_pending_approval_on_pause (test_gateway.py) --
-# its only caller, already tested with a full equality check against every field.
-
-
-def test_build_pending_approval_redacts_with_pause_message():
-    """Uses PAUSE_REDACTED_MESSAGE, not STALE_RESULT_MESSAGE -- the shared
-    redaction logic itself is already covered by
-    test_build_updated_history_redacts_trims_and_round_trips."""
-    bq_result = ToolMessage(content='[{"count": 42}]', name="run_bigquery_sql",
-                             tool_call_id="call_1", status="success")
-    agent_call = AIMessage(content=[],
-                           additional_kwargs={GEMINI_THOUGHT_SIGNATURES_KEY: {"call_1": "sig-blob"}})
-    state = {
-        "conversation_id": "conv-1", "model": "claude-sonnet-5", "model_provider": "anthropic",
-        "question": "How many orders?",
-        "filter_context": [], "active_page": None,
-        "messages": [agent_call, bq_result],
-        "pending_queries": [], "deferred_dax": [], "tool_calls": [],
-        "iteration_count": 0, "bytes_consumed": 0, "estimated_cost": None,
-        "paused_at": datetime.now(timezone.utc),
-    }
-    pending = build_pending_approval(state)
-    reconstructed = messages_from_dict(pending["messages"])
-    assert reconstructed[1].content == PAUSE_REDACTED_MESSAGE
-
-    # Gemini's thought-signature key is stored under a Firestore-safe name,
-    # not dropped -- resuming the live tool call needs the real value back.
-    assert reconstructed[0].additional_kwargs[_GEMINI_SIGNATURES_STORAGE_KEY] == {"call_1": "sig-blob"}
-    assert GEMINI_THOUGHT_SIGNATURES_KEY not in reconstructed[0].additional_kwargs
+    original = build_history_messages([stored(spec)])
+    reordered = build_history_messages([stored(reordered_spec)])
+    assert list(original[0].tool_calls[0]["args"]["spec"]) == sorted(spec)
+    assert json.dumps(original[0].content) == json.dumps(reordered[0].content)
+    assert json.dumps(original[0].tool_calls) == json.dumps(reordered[0].tool_calls)
 
 
 def _fake_turn(label: str) -> dict:
@@ -291,6 +175,88 @@ def test_build_updated_history_redacts_and_round_trips():
     assert GEMINI_THOUGHT_SIGNATURES_KEY not in reconstructed_ai.additional_kwargs
 
 
+def test_strip_thinking_blocks():
+    """Drops a thinking block entirely, keeps a reasoning block (OpenAI's
+    tool-calling shape), strips a leftover extras key from any block that
+    remains, and leaves non-dict content and non-AIMessage messages alone."""
+    ai_msg = AIMessage(content=[
+        {"type": "thinking", "thinking": "working through it"},
+        {"type": "reasoning", "summary": [], "content": [], "encrypted_content": "abc"},
+        {"type": "text", "text": "The answer is 42", "extras": {"signature": "xyz"}},
+    ])
+    mixed_msg = AIMessage(content=["a loose string block", {"type": "text", "text": "ok"}])
+    tool_msg = ToolMessage(content="untouched", name="run_bigquery_sql",
+                           tool_call_id="tc1", status="success")
+
+    stripped = _strip_thinking_blocks([ai_msg, mixed_msg, tool_msg])
+
+    assert stripped[0].content == [
+        {"type": "reasoning", "summary": [], "content": [], "encrypted_content": "abc"},
+        {"type": "text", "text": "The answer is 42"},
+    ]
+    assert stripped[1].content == ["a loose string block", {"type": "text", "text": "ok"}]
+    assert stripped[2] is tool_msg
+
+
+def test_gemini_signature_drop_and_round_trip():
+    """_drop_gemini_signatures removes the Firestore-reserved key for
+    history; _rename_gemini_signatures_for_storage/_restore_gemini_signatures
+    round-trip it unchanged for PendingApproval's live resume."""
+    def make_message():
+        return AIMessage(content=[], additional_kwargs={
+            "function_call": {"name": "submit_answer", "arguments": "{}"},
+            GEMINI_THOUGHT_SIGNATURES_KEY: {"call_1": "sig-blob"},
+        })
+
+    dropped = _drop_gemini_signatures(messages_to_dict([make_message()]))
+    kwargs = dropped[0]["data"]["additional_kwargs"]
+    assert GEMINI_THOUGHT_SIGNATURES_KEY not in kwargs
+    assert kwargs["function_call"] == {"name": "submit_answer", "arguments": "{}"}
+
+    renamed = _rename_gemini_signatures_for_storage(messages_to_dict([make_message()]))
+    renamed_kwargs = renamed[0]["data"]["additional_kwargs"]
+    assert GEMINI_THOUGHT_SIGNATURES_KEY not in renamed_kwargs
+    assert renamed_kwargs[_GEMINI_SIGNATURES_STORAGE_KEY] == {"call_1": "sig-blob"}
+
+    restored = _restore_gemini_signatures(renamed)
+    restored_kwargs = restored[0]["data"]["additional_kwargs"]
+    assert restored_kwargs[GEMINI_THOUGHT_SIGNATURES_KEY] == {"call_1": "sig-blob"}
+    assert _GEMINI_SIGNATURES_STORAGE_KEY not in restored_kwargs
+
+
+# --- Approval pause and resume ---------------------------------------------------------------
+# build_pending_approval's field contract is covered by
+# test_consume_graph_replaces_doc_with_pending_approval_on_pause (test_gateway.py) --
+# its only caller, already tested with a full equality check against every field.
+
+
+def test_build_pending_approval_redacts_with_pause_message():
+    """Uses PAUSE_REDACTED_MESSAGE, not STALE_RESULT_MESSAGE -- the shared
+    redaction logic itself is already covered by
+    test_build_updated_history_redacts_trims_and_round_trips."""
+    bq_result = ToolMessage(content='[{"count": 42}]', name="run_bigquery_sql",
+                             tool_call_id="call_1", status="success")
+    agent_call = AIMessage(content=[],
+                           additional_kwargs={GEMINI_THOUGHT_SIGNATURES_KEY: {"call_1": "sig-blob"}})
+    state = {
+        "conversation_id": "conv-1", "model": "claude-sonnet-5", "model_provider": "anthropic",
+        "question": "How many orders?",
+        "filter_context": [], "active_page": None,
+        "messages": [agent_call, bq_result],
+        "pending_queries": [], "deferred_dax": [], "tool_calls": [],
+        "iteration_count": 0, "bytes_consumed": 0, "estimated_cost": None,
+        "paused_at": datetime.now(timezone.utc),
+    }
+    pending = build_pending_approval(state)
+    reconstructed = messages_from_dict(pending["messages"])
+    assert reconstructed[1].content == PAUSE_REDACTED_MESSAGE
+
+    # Gemini's thought-signature key is stored under a Firestore-safe name,
+    # not dropped -- resuming the live tool call needs the real value back.
+    assert reconstructed[0].additional_kwargs[_GEMINI_SIGNATURES_STORAGE_KEY] == {"call_1": "sig-blob"}
+    assert GEMINI_THOUGHT_SIGNATURES_KEY not in reconstructed[0].additional_kwargs
+
+
 def test_rebuild_paused_messages():
     """A numeric success gets its labeled content restored from the
     ToolCallRecord (same ref_id); a numeric error, a non-numeric success,
@@ -337,3 +303,51 @@ def test_rebuild_paused_messages():
     assert rebuilt[3] == messages[3]
     assert rebuilt[4] == messages[4]
     assert rebuilt[5] == messages[5]
+
+
+# --- The response: build_agent_response ------------------------------------------------------
+
+
+def test_build_agent_response():
+    """Projects final state into AgentResponse; empty vs. non-empty pending_queries;
+    answer_html renders the real custom styling for tables, code, and images."""
+    answer_markdown = (
+        "The answer.\n\n"
+        "| Metric | Value |\n"
+        "|---|---|\n"
+        "| Recall@5 | 0.68 |\n\n"
+        "```python\nprint('hi')\n```\n\n"
+        "Inline `code` here, and a chart: ![chart](https://example.com/chart.png)"
+    )
+    base_state = {
+        "answer_markdown": answer_markdown,
+        "sources": ["Query warehouse"],
+        "needs_approval": False,
+        "chart_urls": ["https://example.com/chart.png"],
+        "suggested_follow_ups": ["What about last quarter?"],
+        "iteration_cap_hit": False,
+        "pending_queries": [],
+        "estimated_cost": None,
+        "cost_cap_exceeded": False,
+        "largest_pending_query": None,
+    }
+    response = build_agent_response(base_state)
+    assert response.answer_markdown == answer_markdown
+    assert response.chart_urls == ["https://example.com/chart.png"]
+    assert response.suggested_follow_ups == ["What about last quarter?"]
+    assert response.pending_query is None
+
+    # answer_html rendering assertions
+    html = response.answer_html
+    assert "<table" in html and "max-width: 100%" in html
+    assert ANSWER_TABLE_HEADER_BG in html  # table header background, unique to the header cell style
+    assert '<pre style="display: inline-block' in html  # code block shrinks to content width
+    assert ANSWER_CODE_BLOCK_BG in html
+    assert '<code style="font-family:' in html and ANSWER_INLINE_CODE_BG in html
+    assert '<img src="https://example.com/chart.png"' in html and "max-width: 100%" in html
+
+    # Pending Query test (comes from largest pending query)
+    with_pending = {**base_state, "largest_pending_query": "SELECT 2", "pending_queries": [
+        {"id": "a", "query": "SELECT 1"}, {"id": "b", "query": "SELECT 2"},
+    ]}
+    assert build_agent_response(with_pending).pending_query == "SELECT 2"

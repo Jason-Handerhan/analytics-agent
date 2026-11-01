@@ -120,7 +120,7 @@ that area, rather than reconstructing the design from memory:
 | `docs/chart-tool.md` | Anything touching `generate_chart`, `generate_beeswarm`, or chart specs |
 | `docs/combine-tool.md` | Anything touching `combine_results` or its stack/join contract |
 | `docs/code-search.md` | The GitHub code tools — why agentic, not vector |
-| `docs/conversation-memory.md` | The findings ledger, `get_conversation_findings`, `search_conversation_findings`, and compaction (turn-range summaries) |
+| `docs/conversation-memory.md` | The findings ledger, `get_conversation_findings`, `search_conversation_findings`, compaction (turn-range summaries), and the task plan (`manage_tasks`) |
 | `docs/approval-workflow.md` | Cost tiers, the approval pause, `/ask/respond` |
 | `docs/auth.md` | Any identity boundary — the request-time chain, connector OAuth, service accounts |
 | `docs/ci-cd.md` | The GitHub Actions workflow, deploy gate, `github-deployer` |

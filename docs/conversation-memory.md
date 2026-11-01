@@ -1,11 +1,11 @@
-# Conversation memory: findings ledger, compaction, recall, search
+# Conversation memory: findings ledger, compaction, recall, search, task plan
 
 **Status (2026-10-29): built and live-verified** — the findings ledger, the
 recall tool `get_conversation_findings`, per-turn tags (`title`, `topics`,
 `entities`), compaction (`app/orchestrator/compaction.py`, the
 `turn_range_summaries` table, the gateway pre-step, the telemetry fields), embeddings
-at write time, the search tool `search_conversation_findings`, and the summaries
-in the recall overview. Not yet redeployed. Update this line and
+at write time, the search tool `search_conversation_findings`, the summaries
+in the recall overview, and the task plan tool `manage_tasks`. Not yet redeployed. Update this line and
 `docs/build-order.md` as steps land.
 
 Goal: a long EDA conversation can be summarized, searched, and kept within a
@@ -161,7 +161,7 @@ reach other conversations' findings.
   fetched; with `include_tool_calls` the fetched size is re-checked. Over
   budget is an error that carries the overview, which includes how many of the
   newest turns fit. The budget is in the tool description and the overview.
-- Badge "Searched Memory"; live status "Gathered results from memory".
+- Badge "Searched memory"; live status "Gathered results from memory".
 
 ## Compaction (built)
 
@@ -285,6 +285,51 @@ message history, were considered and dropped.
 - **Later**: embed summaries too and search them as a coarse index before
   drilling into a range's turns.
 
+## Task plan — `manage_tasks` (built, live-verified 2026-10-31)
+
+A plan for a request too large for one turn. It survives compaction, which a plan stated in an
+earlier turn otherwise doesn't (only a lossy summary is left). Conversation scope only.
+
+- **Storage**: `sessions.task_plan` = `{"scope": str, "tasks": [{"text", "status"}]}` (`TaskPlan` in
+  `state.py`); `status` is `todo`, `in_progress` or `done`. `fetch_session_memory` reads it with the
+  history in one read, and the tool writes only that field (a nested-field `update`), so the history
+  is untouched.
+- **Tool**: one flat tool, non-strict on Claude. `tasks` replaces the whole list, and an empty list
+  clears the whole plan. `scope` (context every task shares) is optional: omitted keeps the saved one,
+  `""` clears it. Caps: 30 tasks, 500 characters each, scope 800; at most one `in_progress`.
+- **Injection**: `attach_task_plan` puts the rendered plan ahead of the turn's first message on a copy
+  at request time, so it is never in `state["messages"]` and never saved. It sits after the history
+  breakpoints, so a changed plan invalidates no cache. It is the plan as of the start of the turn, for
+  the whole turn: refreshing it mid-turn made the agent read "our current plan" in the user's question
+  as the plan it had just edited. The agent's own `manage_tasks` call carries the new list, and the
+  next turn reads it from Firestore.
+- **Sizing is the contract** (in the tool description): a task is one deliverable done in one turn and
+  fetches its own data, because earlier turns' results are redacted and `ref_id`s resolve only within a
+  turn; a pipeline is never split across tasks. Findings, not data, pass between tasks, through the
+  answer text and the ledger. Tasks never hold results (a figure copied from one would fail
+  verification), and the plan is shown to the user as a numbered list, not a table (table cells are
+  verified).
+- **Time check**: within `TURN_WARNING_SECONDS_REMAINING` (35 s) of `GATEWAY_TURN_TIMEOUT_SECONDS`
+  (115 s), `agent_node` appends a time check to the request, never stored: finish with one more round
+  of tool calls plus `submit_answer` if that fits, otherwise save the rest as tasks and submit what
+  exists. The turn's query results are lost either way. The hard timeout stays as the backstop, and its
+  message offers a plan. The clock (`turn_started_at`) starts at the top of `run_agent_turn`, the same
+  instant as the hard timeout.
+
+## Notes (designed, not built)
+
+Standing context for a conversation: preferences, definitions, goals. One tool, `manage_notes`, with
+save, update and delete by id; no read action, since every note is shown with its id.
+
+- Conversation scope only. A conversation-specific note saved at user scope would leak into unrelated
+  chats; a user scope can be added later.
+- The agent saves only what the user states, never inferences.
+- Stored as `sessions.notes`, read with the history. Capped by a token budget for the block (about
+  2,000 tokens) plus a per-note length cap; over the cap the save fails and lists the existing notes.
+- Shown in a second system block after the static one, never stored in history. Notes change rarely, so
+  a change re-caches the history once. Not a numeric source.
+- Bound non-strict on Claude, like the other memory and state tools.
+
 ## Starting values (placeholders, tune)
 
 | Constant | Start | Basis |
@@ -350,3 +395,9 @@ message history, were considered and dropped.
   once real tags have been looked at across several conversations.
 - `test_gateway_timeout_cancellation_reaches_bigquery_job` fails intermittently;
   drop or fix later.
+- Tool results in the ledger (an `include_tool_results` flag and cross-turn reference ids) are the
+  fallback if re-running queries across a task plan proves painful. It would make ledger data a
+  numeric source for charts and combines, a change to the verification contract.
+- A short `submit_answer` reminder on every request, to cut plain-text finishes that cost a retry:
+  54% of turns had a verification or length retry (telemetry, 2026-10-31), and telemetry records the
+  counts but not the cause.
