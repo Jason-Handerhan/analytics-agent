@@ -4,6 +4,8 @@ plain-dict state only, no LLM/BigQuery/MCP calls (docs/testing.md).
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
+import json
+
 import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -11,7 +13,10 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from app.config import (
+    AGENT_SA_EMAIL,
+    CHART_URL_EXPIRATION_HOURS,
     GATEWAY_TURN_TIMEOUT_SECONDS,
+    GCS_CHART_BUCKET,
     MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_LENGTH_RETRIES,
@@ -29,6 +34,7 @@ from app.orchestrator.orchestrator import (
     check_table_rows,
     extract_image_urls,
     extract_table_values,
+    expand_chart_refs,
     finalize_node,
     iteration_cap_update,
     resolve_chart_data,
@@ -341,6 +347,66 @@ def test_build_tool_call_records_and_messages_empty_query_result():
 
     assert [(r["success"], r["result"], r["ref_id"]) for r in result.records] == [
         (True, [], "ref_1"), (True, [], "ref_2")]
+
+
+def test_display_messages_shorten_chart_urls():
+    """A chart result (a list of text blocks) and a recall result (a JSON string) reach the model with
+    chart:<id> in place of the URL; the record keeps the URL, an image block is untouched, and a result
+    with no chart is unchanged."""
+    now = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    chart_id = "7ca2ce36-238c-48a1-a424-4cd6ad60794b"
+    url = f"https://storage.googleapis.com/bucket/charts/{chart_id}.png?X-Goog-Signature={'ab12' * 64}"
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    calls = [
+        {"id": "tc1", "name": "generate_beeswarm", "args": {}},
+        {"id": "tc2", "name": "get_conversation_findings", "args": {}},
+        {"id": "tc3", "name": "search_docs", "args": {}},
+    ]
+    messages = [
+        ToolMessage(content=[{"type": "text", "id": "lc_1", "text": json.dumps({"chart_url": url})}, image],
+                    name="generate_beeswarm", tool_call_id="tc1", status="success"),
+        ToolMessage(content=json.dumps([{"answer_markdown": f"![Chart]({url})", "verified_numbers": [1.5]}]),
+                    name="get_conversation_findings", tool_call_id="tc2", status="success"),
+        ToolMessage(content='[{"chunk": "No charts here, 42"}]', name="search_docs", tool_call_id="tc3",
+                    status="success"),
+    ]
+
+    result = build_tool_call_records_and_messages(ToolBatch(calls, messages, now, now, "tool_error"), 1)
+
+    chart, recall, docs = result.display_messages
+    assert chart.content[0] == {"type": "text", "id": "lc_1", "text": json.dumps({"chart_url": f"chart:{chart_id}"})}
+    assert chart.content[1] == image
+    assert f"![Chart](chart:{chart_id})" in recall.content and url not in recall.content
+    assert docs.content == messages[2].content
+    assert (chart.name, chart.tool_call_id, chart.status) == ("generate_beeswarm", "tc1", "success")
+    assert result.records[0]["result"] == {"chart_url": url}
+    assert messages[0].content[0]["text"] == json.dumps({"chart_url": url})     # the original is untouched
+
+
+@pytest.mark.asyncio
+async def test_expand_chart_refs(monkeypatch):
+    """Each unique chart:<id> is signed once with the configured bucket, expiry and service account and
+    replaced everywhere it appears; text with no reference comes back unchanged without minting a token."""
+    first, second = "7ca2ce36-238c-48a1-a424-4cd6ad60794b", "0b1f6d2e-5a4c-4e8f-9a3b-2c7d8e9f0a1b"
+    mint = AsyncMock(return_value="tok")
+    signed = []
+
+    def fake_sign(chart_id, bucket, hours, token, account):
+        signed.append((chart_id, bucket, hours, token, account))
+        return f"https://signed/{chart_id}"
+
+    monkeypatch.setattr(orchestrator, "get_gcp_access_token", mint)
+    monkeypatch.setattr(orchestrator, "sign_chart_url", fake_sign)
+
+    expanded = await expand_chart_refs(f"![A](chart:{first}) and ![B](chart:{second}) and ![A](chart:{first})")
+
+    assert expanded == (f"![A](https://signed/{first}) and ![B](https://signed/{second}) "
+                        f"and ![A](https://signed/{first})")
+    assert sorted(signed) == sorted((chart_id, GCS_CHART_BUCKET, CHART_URL_EXPIRATION_HOURS, "tok", AGENT_SA_EMAIL)
+                                    for chart_id in (first, second))
+    mint.reset_mock()
+    assert await expand_chart_refs("No charts here, just 42.") == "No charts here, just 42."
+    mint.assert_not_awaited()
 
 
 def test_resolve_chart_and_combine_data():
@@ -681,3 +747,11 @@ async def test_finalize_node_message_selection(monkeypatch):
 
     # Only the first, verified and uncancelled turn wrote a findings row.
     write_findings.assert_awaited_once()
+
+    # The rows keep the short chart reference; the answer returned gets the signed URL.
+    chart_id = "7ca2ce36-238c-48a1-a424-4cd6ad60794b"
+    monkeypatch.setattr(orchestrator, "get_gcp_access_token", AsyncMock(return_value="tok"))
+    monkeypatch.setattr(orchestrator, "sign_chart_url", lambda chart_id, *args: f"https://signed/{chart_id}")
+    with_chart = await finalize_node({**base, "answer_markdown": f"See ![x](chart:{chart_id})"})
+    assert with_chart["answer_markdown"] == f"See ![x](https://signed/{chart_id})"
+    assert orchestrator.write_telemetry_row.await_args.args[0]["answer_markdown"] == f"See ![x](chart:{chart_id})"

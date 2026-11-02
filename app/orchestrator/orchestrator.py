@@ -67,6 +67,7 @@ from app.orchestrator.context import build_static_context, get_static_context
 from app.orchestrator.conversation_memory.writer import build_findings_row, write_findings_row
 from app.shared_helpers import is_cancelled, label_chartable_result
 from app.orchestrator.state import AgentState, Note, TaskPlan, ToolCallRecord, TurnError
+from app.shared_chart import CHART_REF_RE, replace_chart_refs, shorten_chart_urls, sign_chart_url
 from app.orchestrator.tools import (
     CombineResultsToolCallArgs,
     GenerateChartToolCallArgs,
@@ -257,6 +258,20 @@ async def inject_chart_args(tc: dict) -> dict:
     }
 
 
+async def expand_chart_refs(text: str) -> str:
+    """Replaces each chart:<id> in text with a freshly signed URL, signing the charts in parallel.
+    Returns text untouched, and mints no token, when it has no chart references."""
+    chart_ids = list(dict.fromkeys(CHART_REF_RE.findall(text)))
+    if not chart_ids:
+        return text
+    access_token = await get_gcp_access_token()
+    urls = await asyncio.gather(*[
+        asyncio.to_thread(sign_chart_url, chart_id, GCS_CHART_BUCKET, CHART_URL_EXPIRATION_HOURS,
+                          access_token, AGENT_SA_EMAIL)
+        for chart_id in chart_ids])
+    return replace_chart_refs(text, dict(zip(chart_ids, urls)))
+
+
 def _lookup_source_ref(source_ref: str, prior_tool_calls: list["ToolCallRecord"]) -> "ToolCallRecord":
     """Finds the successful, chartable tool call source_ref points at, or
     raises an actionable error if it can't be found."""
@@ -368,6 +383,17 @@ class BatchResult:
     ref_counter: int
 
 
+def shorten_message_chart_urls(msg: ToolMessage) -> ToolMessage:
+    """A copy of msg with chart URLs in its text replaced by chart:<id>. The ToolCallRecord is built
+    from the original message, so it keeps the URL."""
+    if isinstance(msg.content, str):
+        content = shorten_chart_urls(msg.content)
+    else:
+        content = [{**block, "text": shorten_chart_urls(block["text"])} if block.get("type") == "text" else block
+                   for block in msg.content]
+    return msg.model_copy(update={"content": content})
+
+
 def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> BatchResult:
     """Builds each call's ToolCallRecord, its message for state["messages"],
     and a TurnError for any failure."""
@@ -388,7 +414,7 @@ def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> 
         else:
             record = build_tool_call_record(tc, msg, batch.started_at, batch.completed_at)
             records.append(record)
-            display_messages.append(msg)
+            display_messages.append(shorten_message_chart_urls(msg))
             if msg.status == "error":
                 errors.append(build_turn_error(
                     "call_tool", batch.error_type, record["error"], record["completed_at"], record["id"]))
@@ -1115,9 +1141,10 @@ async def finalize_node(state: AgentState) -> dict:
             tool_calls=state["tool_calls"],
         )
         writes.append(write_findings_row(findings_row))
-    await asyncio.gather(*writes)
+    # The rows above keep the short references; the answer returned gets signed URLs.
+    shown_markdown = (await asyncio.gather(*writes, expand_chart_refs(answer_markdown)))[-1]
     return {
-        "answer_markdown": answer_markdown,
+        "answer_markdown": shown_markdown,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "sources": sources,

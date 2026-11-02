@@ -278,8 +278,11 @@ class SubmitAnswerArgs(BaseModel):
                     "checked automatically; don't repeat them in all_prose_numeric_claims. Format "
                     "numbers readably -- thousands separators (977,542), 1-2 decimals by default "
                     "(rounding to fewer decimals never fails verification), more only when the figure "
-                    "needs it (Recall@5: 0.6688, not 0.67). Include the chart_url from "
-                    "generate_chart or generate_beeswarm here as an image -- the user sees no chart otherwise.")
+                    "needs it (Recall@5: 0.6688, not 0.67). Show each chart as an image: "
+                    "![label](chart:<id>), using the chart_url from the generate_chart or "
+                    "generate_beeswarm result, copied exactly. To show a chart from an earlier turn, copy "
+                    "it from the image link in the get_conversation_findings or "
+                    "search_conversation_findings result. The user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
         description="Every number you state in prose as a fact about the data. Leave out numbers in a "
                     "markdown table (checked separately) and narration such as years or how many "
@@ -1203,7 +1206,7 @@ async def generate_beeswarm(
 ) -> list[dict]:
     """Renders a SHAP beeswarm plot for one model and split, optionally limited to listed
     departments, aisles, or products (exact names, any case); features are then ranked
-    within that slice. Returns the image URL, plus the image itself so you can describe
+    within that slice. Returns the chart_url (chart:<id>), plus the image itself so you can describe
     what it shows. Gray points mean the feature had no value for that prediction. You can't
     state numbers from this tool or its plot. To quote how many predictions
     it shows, run SELECT LEAST(COUNT(*), {sample_rows}) over the same split, model, and
@@ -1241,7 +1244,7 @@ GenerateChartToolCallArgs = create_model(
 @tool("generate_chart", args_schema=GenerateChartToolCallArgs)
 async def chart_tool_call_standin(**kwargs) -> None:
     """Renders a chart from an earlier tool call's result and returns its
-    image URL. See the spec type's own description for its exact shape and
+    chart_url (chart:<id>). See the spec type's own description for its exact shape and
     grain. Check whether the spec type offers a sort option and use it whenever a sorted view
     would present the data more clearly -- don't default to unsorted just
     because the query didn't order it.

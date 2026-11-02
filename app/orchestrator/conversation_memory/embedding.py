@@ -5,7 +5,7 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 
-_CHART_LINK = re.compile(r"!?\[([^\]]*)\]\(https?://[^)\s]*/charts/[0-9a-f-]{36}\.png[^)\s]*\)")
+_CHART_LINK = re.compile(r"!?\[([^\]]*)\]\(chart:[0-9a-f-]{36}\)")
 
 
 @lru_cache
@@ -17,7 +17,7 @@ def get_embeddings_client() -> GoogleGenerativeAIEmbeddings:
 def build_embedding_text(
     title: str, topics: list[str], entities: list[str], question: str, answer_markdown: str,
 ) -> str:
-    """The text embedded for one turn. Chart links shrink to their label so signed URLs stay out
+    """The text embedded for one turn. Chart references shrink to their label so chart ids stay out
     of the vector."""
     lines = []
     if title:

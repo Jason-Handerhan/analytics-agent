@@ -97,14 +97,14 @@ columns were); a removed nested field means drop and recreate.
 | `conversation_id`, `user_id` | `user_id` for clustering and future cross-conversation search |
 | `answered_at` | Order; turn numbers come from `ROW_NUMBER()` at read |
 | `question` | The real question (`state["question"]`, not "Approved") |
-| `answer_markdown` | As the user saw it, signed chart URLs included. Those URLs are valid for `CHART_URL_EXPIRATION_HOURS` (1 week); a URL's position in the markdown is what tells the model which chart it is, so it is left raw |
+| `answer_markdown` | The model's answer, with each chart as a `chart:<uuid>` reference, not the signed URL the user saw (`finalize` expands that for the response only; `docs/chart-tool.md`). Recall and search show the references, and a chart shown again is signed fresh, so a link no longer expires with the turn that made it |
 | `verified_numbers` | Repeated FLOAT64: `all_prose_numeric_claims` + `extract_table_values(answer_markdown)`, computed by `finalize` (the helper lives in `orchestrator.py`, which imports this package) |
 | `approx_tokens` | `(len(question) + len(answer_markdown) + len(json.dumps(verified_numbers))) // 4`, computed in `build_findings_row`. Tool calls and tags are not counted — the tool returns tool calls only with `include_tool_calls`, and tags are tens of tokens |
 | `filter_context` (JSON string), `active_page` | A finding means little without the filters it was made under |
 | `sources` | Repeated STRING, from `build_sources` |
 | `title`, `topics`, `entities` | Per-turn tags, written by the answering model (see below). `title` NULL and the lists empty for rows written before the tags existed |
 | `tool_calls` | Repeated STRUCT `{name, args, ref_id}`: successful calls only, no `submit_answer`, no results. `args` is the full args as a JSON string (the SQL stays in it); `ref_id` keeps a chart's `source_ref` link |
-| `embedding`, `embedding_model`, `embedded_text` | Built, live-verified 2026-10-29. `write_findings_row` embeds `embedded_text` (title, topics, entities, question and answer, chart links reduced to their label) with `gemini-embedding-001`, `RETRIEVAL_DOCUMENT`, default dimension. A failed embedding is logged and the row is written with an empty vector, so search skips it. Rows written before this have no vector |
+| `embedding`, `embedding_model`, `embedded_text` | Built, live-verified 2026-10-29. `write_findings_row` embeds `embedded_text` (title, topics, entities, question and answer, chart references reduced to their label) with `gemini-embedding-001`, `RETRIEVAL_DOCUMENT`, default dimension. A failed embedding is logged and the row is written with an empty vector, so search skips it. Rows written before this have no vector |
 
 **`turn_range_summaries`** (schema, create script and writer built; filled by compaction) — non-overlapping chunks, one per
 compaction, so the ledger never holds summaries of summaries.

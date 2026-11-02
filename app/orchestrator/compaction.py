@@ -97,7 +97,7 @@ class TurnRangeSummary(BaseModel):
     summary_markdown: str = Field(
         description="A short synthesis of what these turns found, grouped by subject rather than "
                     "by turn. Combine questions that revisited the same subject. Refer to a chart "
-                    "by its label (the text inside the brackets of its image link), never its URL. "
+                    "by its label (the text inside the brackets of its image link), never its link. "
                     "Describe findings in words; state a figure only when it is the headline of a "
                     "finding, and only if it is in the verified numbers list. Never compute a new "
                     "number.")
@@ -122,7 +122,7 @@ bullets.
 Numbers: describe findings in words. State a figure only when it is the headline of a finding, and \
 only if it appears in the verified numbers list. Never compute a new number.
 
-Refer to a chart by its label, never its URL. Keep the title and topics free of numbers."""
+Refer to a chart by its label, never its link. Keep the title and topics free of numbers."""
 
 
 def format_compaction_rows_for_summarizer(rows: list[dict]) -> str:

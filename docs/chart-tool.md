@@ -1036,7 +1036,7 @@ server (`.claude/rules/tools.md`). The model supplies two enums, `split` and
 - **The image goes back to the model.** Every other chart is built from data the
   agent already holds, so it knows what the picture shows; here it plots rows
   the agent never sees. The tool returns two content blocks — a text block
-  `{"chart_url": ...}` and an `image_url` data URI, the shape `get_page_info`
+  `{"chart_url": ...}` (shown to the model as `chart:<id>`) and an `image_url` data URI, the shape `get_page_info`
   uses. `_unwrap_content` reads the first block, so the tool record, the
   `chart_urls` collection and telemetry are unchanged; history redaction drops the
   image like any other tool result. `render_and_upload` returns `(url, png)` for
@@ -1169,7 +1169,7 @@ For every other tool that's a `@tool`-decorated function's own docstring; for
 built in the bind-time substitution step (below) — built now
 (`chart_tool_call_standin` in `app/orchestrator/tools.py`), with its own
 description: "Renders a chart from an earlier tool call's result and returns
-its image URL. `source_ref` must be the reference id printed alongside the
+its chart_url (chart:<id>). `source_ref` must be the reference id printed alongside the
 `run_bigquery_sql` or `run_dax_query` result you want to chart (e.g.
 `'ref_1'`) -- copy it exactly as shown; never invent one."
 
@@ -1454,6 +1454,44 @@ after the expiry window, which the anonymous-bucket approach wouldn't have
 had. Acceptable here since nothing currently persists chart URLs beyond the
 conversation. `expiration_hours` being a real parameter now (rather than a
 hardcoded `1`) doesn't change this trade-off, only who gets to set it.
+
+## Chart references: the model reads `chart:<id>`, not the URL (2026-11-02)
+
+**Why.** In a six-chart answer the signed URLs were 60% of the output tokens (3,244 of 5,405), about 22
+seconds of generation per regeneration (26.5s with URLs, 4.3s with references, same prose), and once in a
+while the model corrupted a 512-hex signature and the chart didn't display. A reference is
+`chart:<uuid>`, the object name in `charts/{uuid}.png`. Measured in `notebooks/phase3_chart_alias_experiments.ipynb`:
+the model copied a reference at least as reliably as a URL (uuid 100% of trials fully correct at 6 charts,
+98% at 10; `chart_N` labels 95%; URLs 90%).
+
+**The flow.** References are the form everywhere inside the turn; a URL exists only at creation and at the edge.
+- **What the model reads.** `build_tool_call_records_and_messages` shortens every URL in a non-query tool
+  result before it reaches the model (`shorten_message_chart_urls`): the chart tools' `chart_url`, and the
+  answers inside `get_conversation_findings` and `search_conversation_findings` results. The
+  `ToolCallRecord` is built from the original message, so it and `chart_urls` and telemetry keep the real URL.
+- **What the model writes.** `![label](chart:<id>)` in `answer_markdown`; the field description and the
+  `generate_chart` and `generate_beeswarm` descriptions say so. History, the ledger and telemetry store it that
+  way, and the embedding text reduces it to its label.
+- **The edge.** `finalize_node` calls `expand_chart_refs`: it mints the access token once, signs each unique
+  id in parallel threads (`sign_chart_url`, with a storage client cached per token) and substitutes the URLs,
+  inside the same `asyncio.gather` as the telemetry and findings writes. The returned `answer_markdown` has
+  fresh signed URLs, so `answer_html`, the response, the chat-history table and the notebooks' inline display
+  are unchanged. The rows it just wrote keep the references. An answer with no reference mints no token.
+
+**Consequences and limits**
+- A chart reused from an earlier turn is signed fresh when shown, so its link no longer expires with the
+  original (the bucket's lifecycle rule still removes old objects).
+- Signing downloads nothing and does not check the object exists, so a mis-copied or invented id signs
+  fine and renders a broken image. Validating ids before verification is a separate build, not started.
+- A chart the model leaves out of the answer is not flagged, as before.
+- The helpers are regexes (`CHART_URL_RE`, `CHART_REF_RE` in `app/shared_chart.py`) over strings we generate in
+  a fixed shape. A URL that doesn't match stays long, and a reference that doesn't match stays visible, so a
+  miss is loud or harmless. Live checks: no `/charts/` URL left in what the model reads, and the pattern
+  against a real `generate_signed_url` result.
+- The MCP `generate_chart` tool is unchanged and still returns `chart_url` as a URL; the orchestrator
+  shortens it, so the tool stays reusable.
+- Why uuid and not `chart_N` labels: a label needs an alias table in state and a swap back before storage,
+  because a label is meaningless in a later turn; a uuid needs neither.
 
 **`plt.close(fig)` after saving** — figures aren't garbage-collected on return
 and leak memory across requests on a long-running instance. Won't show up in a

@@ -277,7 +277,8 @@ class AgentState(TypedDict):
     title: str                             # same source; written to
     topics: list[str]                       # conversation_findings by
     entities: list[str]                     # finalize, never to AgentResponse
-    chart_urls: list[str]
+    chart_urls: list[str]                   # real signed URLs from the tool records, one per chart
+                                            # this turn -- not the chart:<id> references in the answer
     sources: list[str]
 ```
 
@@ -1211,6 +1212,23 @@ def _lookup_source_ref(source_ref: str, prior_tool_calls: list[ToolCallRecord]) 
 alongside that result, so it has something real to copy into `source_ref` —
 never the raw tool-call id (`source_tool_call_id`, the field's original name,
 dropped along with the id-based design).
+
+### Chart references — the model reads `chart:<id>`, not the URL
+
+Signed chart URLs were 60% of a long answer's output tokens, so the model reads and writes `chart:<uuid>`
+(`docs/chart-tool.md` has the measurements and the full flow). Two edges convert, and nothing between them
+does:
+
+- **In, `build_tool_call_records_and_messages`:** the display message of every non-query tool result passes
+  through `shorten_message_chart_urls`, which replaces each chart URL with its reference. The `ToolCallRecord`
+  is built from the original message, so `chart_urls` and telemetry keep the URL.
+- **Out, `finalize_node`:** `expand_chart_refs(answer_markdown)` signs each unique id in parallel (one token,
+  `sign_chart_url` in threads) inside the gather that writes telemetry and the findings row. Those rows are
+  built from the reference form; the returned `answer_markdown` has the signed URLs, so the gateway, `answer_html`
+  and the notebooks see a normal answer.
+
+Validating that an id exists before verification is a separate build, not started: a mis-copied id signs
+and renders a broken image.
 
 ### Cancellation — two levels, because stopping and killing are different
 

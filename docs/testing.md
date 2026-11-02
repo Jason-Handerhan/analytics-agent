@@ -256,8 +256,8 @@ def test_build_findings_row():
 
 def test_build_embedding_text():
     """Tags and the question and answer become labeled lines, empty tags are
-    skipped, and a chart link (signed image, plain link, CDN host) shrinks to its
-    label while any other link stays."""
+    skipped, and a chart reference (image or plain link) shrinks to its label while
+    any other link stays."""
 
 # tests/test_tools.py
 def test_build_conversation_overview():
@@ -330,6 +330,17 @@ def test_attach_context():
     tasks, status words, scope, all-done hint, block content); notes-only and plan-only attach just their
     own block; the message in state is untouched."""
 
+def test_display_messages_shorten_chart_urls():
+    """A chart result (a list of text blocks) and a recall result (a JSON string) reach the model with
+    chart:<id> in place of the URL; the record keeps the URL, an image block is untouched, a result with
+    no chart is unchanged."""
+
+async def test_expand_chart_refs(...):
+    """Each unique chart:<id> is signed once with the configured bucket, expiry and service account and
+    replaced everywhere; text with no reference is returned unchanged and mints no token. (finalize's
+    message-selection test also checks the telemetry row keeps the reference while the returned answer
+    has the signed URL.)"""
+
 def test_answer_text_length_excludes_image_urls():
     """Image URLs in a paragraph, a table cell and a list item are found and left out of the length; text
     over the cap still counts in full."""
@@ -349,6 +360,10 @@ batch of parallel adds and a mixed batch of deletes, adds and an update, is prov
 `notebooks/phase3_working_memory.ipynb`) — proven in `notebooks/phase3_graph.ipynb` and
 `notebooks/phase3_conversation_search.ipynb`: mocking the one dependency would mock the
 whole function.
+
+Chart signing (`sign_chart_url`, the cached storage client, signing in parallel threads under `agent-sa`) is
+Layer 2 for the same reason: proven live in `notebooks/phase3_graph.ipynb`, with two checks there: no
+`/charts/` URL is left in what the model reads, and the pattern matches a real `generate_signed_url` result.
 
 ## 5. Every tool works, called through the MCP server
 
@@ -375,6 +390,10 @@ async def test_tool_returns_a_sensible_result(tool_name, args):
 
 ```python
 # tests/test_chart_tool.py
+def test_chart_reference_helpers():
+    """A chart URL shortens to chart:<id> in a markdown image and a JSON string, replace_chart_refs
+    restores it, an id with no URL is left as written, text with no chart is unchanged."""
+
 def test_chart_tool_schema_preserves_the_discriminator():
     """The regression this project actually hit: a bare discriminated union
     as the tool parameter silently loses its discriminator."""

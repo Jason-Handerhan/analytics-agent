@@ -599,7 +599,9 @@ mistune renderer embeds chart images directly in the flowing answer text
 (`<img src="..." style="max-width: 100%;" />`), confirmed live to render
 correctly from a real signed GCS URL. `MAX_ANSWER_CHARS` was 7000 to absorb
 the signed URL's query string; it is now 14,000 and counts the answer without image URLs
-(`.claude/rules/orchestrator.md`). **No platform character limit exists on the
+(`.claude/rules/orchestrator.md`). The model writes `chart:<id>` references and
+`finalize` expands them to freshly signed URLs before `answer_html` is rendered, so the control still
+receives real URLs (`docs/chart-tool.md`). **No platform character limit exists on the
 control at all** — confirmed against Microsoft's own Power Fx docs; the
 earlier-assumed "16,384-character limit" was never real.
 

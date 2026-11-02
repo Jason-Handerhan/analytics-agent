@@ -223,7 +223,7 @@ later changes the URL and adds auth headers — not this file.
 | `get_measure_dax` | One measure's DAX body, by exact name | The *how* behind a measure; names come from the registry in static context |
 | `get_repo_contents` | The ML repo: no `path` lists every described file, a folder path lists that folder, a file path returns its text | Entry point and authority for any code question |
 | `generate_chart` | Visualization | Renders already-fetched data; **never** a number source |
-| `generate_beeswarm` | SHAP beeswarm for one model and split, optionally narrowed to a department, aisle, or product — returns the image URL **and the image itself** | Shows the overall pattern across many predictions; **never** a number source |
+| `generate_beeswarm` | SHAP beeswarm for one model and split, optionally narrowed to a department, aisle, or product — returns the chart reference (`chart:<id>`) **and the image itself** | Shows the overall pattern across many predictions; **never** a number source |
 | `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
 | `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions, compaction summaries) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
 | `manage_tasks` | The conversation's task plan: replaces the whole list, an empty list clears it | Never a number source: a task holds work, not results (`docs/conversation-memory.md`) |
@@ -430,8 +430,11 @@ class SubmitAnswerArgs(BaseModel):
                     "checked automatically; don't repeat them in all_prose_numeric_claims. Format "
                     "numbers readably -- thousands separators (977,542), 1-2 decimals by default "
                     "(rounding to fewer decimals never fails verification), more only when the figure "
-                    "needs it (Recall@5: 0.6688, not 0.67). Include the chart_url from "
-                    "generate_chart or generate_beeswarm here as an image -- the user sees no chart otherwise.")
+                    "needs it (Recall@5: 0.6688, not 0.67). Show each chart as an image: "
+                    "![label](chart:<id>), using the chart_url from the generate_chart or "
+                    "generate_beeswarm result, copied exactly. To show a chart from an earlier turn, copy "
+                    "it from the image link in the get_conversation_findings or "
+                    "search_conversation_findings result. The user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
         # prose numbers only -- table cells are checked separately by
         # extract_table_values, not re-declared here

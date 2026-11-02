@@ -7,6 +7,7 @@ import re
 import textwrap
 import uuid
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from typing import Annotated, Literal, Union
 
 import matplotlib
@@ -868,6 +869,41 @@ class GenerateChartArgs(BaseModel):
     ]
 
 
+# A chart's URL in prose, markdown or JSON, whichever host serves it; stops at a quote, ) or space.
+CHART_URL_RE = re.compile(r"https?://[^\s\"')]*/charts/(?P<id>[0-9a-f-]{36})\.png[^\s\"')]*")
+CHART_REF_RE = re.compile(r"chart:(?P<id>[0-9a-f-]{36})")
+
+
+def shorten_chart_urls(text: str) -> str:
+    """Replaces every chart URL in text with its short reference, chart:<id>."""
+    return CHART_URL_RE.sub(lambda match: f"chart:{match['id']}", text)
+
+
+def replace_chart_refs(text: str, urls_by_id: dict[str, str]) -> str:
+    """Replaces each chart:<id> with its URL. A reference with no URL is left as written."""
+    return CHART_REF_RE.sub(lambda match: urls_by_id.get(match["id"], match[0]), text)
+
+
+@lru_cache(maxsize=1)
+def get_storage_client(access_token: str) -> storage.Client:
+    """One client per access token; a new token (they last about an hour) replaces it."""
+    return storage.Client(credentials=Credentials(token=access_token))
+
+
+def sign_chart_url(chart_id: str, bucket_name: str, expiration_hours: float, access_token: str,
+                   service_account_email: str) -> str:
+    """A fresh signed URL for charts/{chart_id}.png. Signing downloads nothing and doesn't check
+    that the object exists."""
+    blob = get_storage_client(access_token).bucket(bucket_name).blob(f"charts/{chart_id}.png")
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=datetime.timedelta(hours=expiration_hours),
+        method="GET",
+        service_account_email=service_account_email,
+        access_token=access_token,
+    )
+
+
 def render_and_upload(fig: plt.Figure, bucket_name: str, storage_backend: str,
                        expiration_hours: float, access_token: str,
                        service_account_email: str) -> tuple[str, bytes]:
@@ -879,15 +915,9 @@ def render_and_upload(fig: plt.Figure, bucket_name: str, storage_backend: str,
     fig.savefig(buf, format="png", dpi=DPI, bbox_inches="tight")
     plt.close(fig)                 
     buf.seek(0)
-    storage_client = storage.Client(credentials=Credentials(token=access_token))
-    blob = storage_client.bucket(bucket_name).blob(f"charts/{uuid.uuid4()}.png")
+    chart_id = uuid.uuid4()
+    blob = get_storage_client(access_token).bucket(bucket_name).blob(f"charts/{chart_id}.png")
     blob.upload_from_file(buf, content_type="image/png")
-    url = blob.generate_signed_url(
-        version="v4",
-        expiration=datetime.timedelta(hours=expiration_hours),
-        method="GET",
-        service_account_email=service_account_email,
-        access_token=access_token,
-    )
+    url = sign_chart_url(str(chart_id), bucket_name, expiration_hours, access_token, service_account_email)
     png = buf.getvalue()
     return url, png

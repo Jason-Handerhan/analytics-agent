@@ -24,6 +24,7 @@ from app.shared_chart import (
     StackedHorizontalBarChartSpec, LineChartSpec, HistogramChartSpec,
     BoxChartSpec, HeatmapChartSpec, ConcentrationChartSpec, ParetoChartSpec,
     WaterfallChartSpec,
+    replace_chart_refs, shorten_chart_urls,
     MAX_BAR_CATEGORIES, MAX_GROUPED_BAR_CATEGORIES, MAX_STACKED_BAR_CATEGORIES,
     MAX_STACKED_BAR_SEGMENTS, MAX_LINE_POINTS, MAX_LINE_HUE_GROUPS,
     MAX_HISTOGRAM_BUCKETS, MAX_BOX_CATEGORIES, MAX_HEATMAP_AXIS,
@@ -405,3 +406,22 @@ def test_waterfall():
     over_cap = [{"driver": f"d{i}", "amount": i, "is_total": False} for i in range(MAX_WATERFALL_STEPS + 1)]
     with pytest.raises(ToolError, match="Too many steps"):
         validate_and_render(over_cap, spec, WaterfallChartSpec)
+
+
+def test_chart_reference_helpers():
+    """A chart URL shortens to chart:<id> in a markdown image and in a JSON string, replace_chart_refs
+    restores it (the same text back), an id with no URL is left as written, and text with no chart is
+    unchanged."""
+    first, second = "7ca2ce36-238c-48a1-a424-4cd6ad60794b", "0b1f6d2e-5a4c-4e8f-9a3b-2c7d8e9f0a1b"
+    urls = {chart_id: (f"https://storage.googleapis.com/bucket/charts/{chart_id}.png"
+                       f"?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature={'ab12' * 128}")
+            for chart_id in (first, second)}
+    answer = f"Intro\n\n![One]({urls[first]})\n\nText\n\n![Two]({urls[second]})"
+    recalled = f'{{"answer": "![One]({urls[first]})", "chart_url": "{urls[second]}"}}'
+
+    assert shorten_chart_urls(answer) == f"Intro\n\n![One](chart:{first})\n\nText\n\n![Two](chart:{second})"
+    assert f'"chart_url": "chart:{second}"' in shorten_chart_urls(recalled)
+    assert replace_chart_refs(shorten_chart_urls(answer), urls) == answer
+    assert replace_chart_refs(f"![x](chart:{first})", {}) == f"![x](chart:{first})"
+    assert shorten_chart_urls("No charts, just 42 and https://example.com/a.png") == \
+        "No charts, just 42 and https://example.com/a.png"

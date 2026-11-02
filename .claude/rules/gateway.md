@@ -800,7 +800,10 @@ branch, the timeout handler, the unexpected-exception handler) — never
 touching `AgentState` or `agent_telemetry`, which both still only ever see
 raw markdown. Power Apps binds its HTML control to `answer_html`; the
 connector needed regenerating regardless of this field, so adding one more
-to it cost nothing extra.
+to it cost nothing extra. **Chart references (2026-11-02):** the `answer_markdown` that reaches the gateway
+has signed chart URLs, because `finalize` expands the model's `chart:<id>` references before returning it; so
+`answer_html`, the response and the chat-history table are built from real URLs, while history, the ledger and
+telemetry keep the references (`docs/chart-tool.md`).
 
 **No platform character limit on the control — confirmed live, not assumed**
 (same finding as `.claude/rules/orchestrator.md`'s answer-length guardrail:
