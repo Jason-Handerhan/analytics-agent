@@ -282,9 +282,8 @@ message history, were considered and dropped.
 - **Errors**: an embedding failure and a BigQuery `GoogleAPICallError` become a
   `ToolError`, so a memory failure doesn't end the turn.
 - **Binding**: bound outside Anthropic's strict mode with the recall tool
-  (`ANTHROPIC_NON_STRICT_TOOLS`); strict schemas share a size limit on the
-  compiled grammar and these two were the cheapest to give up
-  (`.claude/rules/orchestrator.md`).
+  (`ANTHROPIC_NON_STRICT_TOOLS`) because all strict schemas share a limit on the
+  compiled grammar and only some combinations fit (`.claude/rules/tools.md`).
 - **Fallback if testing shows misses on rare exact names**: add a lexical match
   on `entities` as an OR (similarity top-k plus exact matches) — it can only add
   hits. Build it only if the agent doesn't retry reliably.
@@ -300,20 +299,31 @@ earlier turn otherwise doesn't (only a lossy summary is left). Conversation scop
   `state.py`); `status` is `todo`, `in_progress` or `done`. `fetch_session_memory` reads it with the
   history in one read, and the tool writes only that field (a nested-field `update`), so the history
   is untouched.
-- **Tool**: one flat tool, non-strict on Claude. `tasks` replaces the whole list, and an empty list
+- **Tool**: one flat tool, strict on Claude. `tasks` replaces the whole list, and an empty list
   clears the whole plan. `scope` (context every task shares) is optional: omitted keeps the saved one,
-  `""` clears it. Caps: 30 tasks, 500 characters each, scope 800; at most one `in_progress`.
+  `""` clears it. Caps: 30 tasks, 500 characters each, scope 800; at most one `in_progress`. It was
+  non-strict at first, and the model sent it empty or nested under `args` (the shape of the MCP tools); the raw
+  validation error then looped it, since it had sent a full plan and was told a field was missing. Strict makes
+  both impossible, so it and `manage_notes` hold the strict slots (`.claude/rules/tools.md`).
 - **Injection**: `attach_context` puts the rendered plan (after the notes, if any) ahead of the turn's first
   message on a copy at request time, so it is never in `state["messages"]` and never saved. Each block's
-  header says it is current as of this message and that earlier `manage_tasks` or `manage_notes` calls in the
-  history are already reflected; "this turn" was avoided because the model can't tell where a turn starts. It sits after the history
+  header says earlier `manage_tasks` or `manage_notes` calls in the history are already reflected; "this turn"
+  was avoided because the model can't tell where a turn starts. The plan's header says it is the plan as last
+  saved and can be behind the work: an agent that finished a task and forgot to save it read a block calling
+  itself current as the truth, so it now says to bring the plan up to date from what the conversation shows. It sits after the history
   breakpoints, so a changed plan invalidates no cache. It is the plan as of the start of the turn, for
   the whole turn: refreshing it mid-turn made the agent read "our current plan" in the user's question
   as the plan it had just edited. The agent's own `manage_tasks` call carries the new list, and the
   next turn reads it from Firestore.
-- **Sizing is the contract** (in the tool description): a task is one deliverable done in one turn and
-  fetches its own data, because earlier turns' results are redacted and `ref_id`s resolve only within a
-  turn; a pipeline is never split across tasks. Findings, not data, pass between tasks, through the
+- **Sizing is the contract**, in two places that use the same words: the system prompt's `LARGE REQUESTS`
+  section says when to plan, and the tool description says how to size. A deliverable is one answer the
+  user can read on its own: a chart with its explanation (and a table if it helps), or a question answered
+  in prose, such as what the docs or the code say. About two minutes fits three deliverables and about
+  eight tool calls. A request over either, or an all/every/each over something to list first, is large:
+  look things up if needed, save the plan, show it, and ask before any queries or charts. With a plan saved,
+  one task at a time, then a check-in with the next task offered as a suggested follow-up; no running ahead.
+  A task is at most that size and fetches its own data, because earlier turns' results are redacted and
+  `ref_id`s resolve only within a turn; a pipeline is never split across tasks. Findings, not data, pass between tasks, through the
   answer text and the ledger. Tasks never hold results (a figure copied from one would fail
   verification), and the plan is shown to the user as a numbered list, not a table (table cells are
   verified).
@@ -333,7 +343,7 @@ numeric source.
 
 - **Storage**: `sessions.notes` = list of `Note` `{id: int, kind, text}` (`state.py`); `kind` is `preference`,
   `definition`, `goal` or `constraint`. `fetch_session_memory` reads it with the history.
-- **Tool**: one flat tool, non-strict on Claude. `action` is `add`, `update` (a full replace by id: id, kind
+- **Tool**: one flat tool, strict on Claude. `action` is `add`, `update` (a full replace by id: id, kind
   and text are all required) or `delete`. No read action, since every note is shown with its id. Caps: 25
   notes and 300 characters each; over the cap the save fails and lists the existing notes. The args model
   checks what needs only the call's own arguments (blank or overlong text, the fields each action needs);

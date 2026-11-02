@@ -514,7 +514,9 @@ item 3).
   next to the schema they demonstrate rather than trailing as a separate block:
 
   1. **`SYSTEM_INSTRUCTIONS`** — role and behavioral rules, established
-     before the model sees any reference material.
+     before the model sees any reference material. Includes `LARGE REQUESTS`: more than three
+     deliverables or about eight tool calls is planned with `manage_tasks` and confirmed with the
+     user first, then done one task at a time (`docs/conversation-memory.md`).
   2. **Orientation bundle** — exec summary + navigator + architecture summary.
   3. **`TABLE_REGISTRY`** — every semantic-model table with its columns,
      types, and descriptions. Includes *disconnected* tables (measure-only
@@ -843,9 +845,9 @@ a cheap deterministic filter in front of it.
 under `strict=True` and produces well-formed calls on OpenAI and Gemini
 exactly as it already did on Anthropic — no reshaping needed.
 
-**Enabled globally, 2026-10-02 — five tools bound outside it on Claude
-(`generate_chart`, plus the memory and state tools `get_conversation_findings`,
-`search_conversation_findings`, `manage_tasks` and `manage_notes`), now
+**Enabled globally, 2026-10-02 — three tools bound outside it on Claude
+(`generate_chart`, plus the memory tools `get_conversation_findings` and
+`search_conversation_findings`), now
 provider-conditional.** Claude's `strict=True` rejects `oneOf`/
 `discriminator` and `ge=`/`le=` outright, both of which `generate_chart`'s
 schema needs (`docs/chart-tool.md`); confirmed `ge=`/`le=` also broke
@@ -859,10 +861,9 @@ with no workaround at all, so `generate_chart_tool` and the memory tools in
 `build_tools_list(model_provider)`'s assembly (below — rebuilt fresh every
 turn, not a module-level list, now that provider is per-request) that
 branch by provider; every other tool binds identically regardless. The
-memory and state tools (`get_conversation_findings`, `search_conversation_findings`,
-`manage_tasks`, `manage_notes`) move out of strict on Claude only because every strict schema shares one
-size limit on the compiled grammar (a 400, "compiled grammar is too large");
-they stay validated at dispatch.
+two conversation-findings tools (`get_conversation_findings`, `search_conversation_findings`) move out of
+strict on Claude only because all strict schemas share a limit on the compiled grammar (`.claude/rules/tools.md`
+has the tested combinations); they stay validated at dispatch.
 `agent_node` binds with `bind_tools(build_tools_list(state["model_provider"]),
 strict=True)` unconditionally either way. This
 also resolved a real live failure: `submit_answer` previously got no

@@ -96,10 +96,9 @@ FILE_DESCRIPTIONS: dict[str, str] = {}
 # Tools whose result gets a ref_id, resolvable by generate_chart/combine_results.
 CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
-# Memory tools are bound outside Anthropic's strict mode: their flat schemas are still validated at
-# dispatch, and every strict schema counts toward a size limit on the compiled grammar.
-ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "manage_tasks",
-                              "manage_notes"}
+# Bound outside Anthropic's strict mode (the compiled grammar of all strict schemas has a size limit);
+# still validated at dispatch.
+ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings"}
 
 # finalize_node's canned messages -- one per terminal state with no real answer yet.
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
@@ -774,9 +773,11 @@ def render_notes(notes: list[Note]) -> str:
 def render_task_plan(task_plan: TaskPlan) -> str:
     """The saved task plan as text for the model."""
     tasks = task_plan["tasks"]
-    lines = ["Saved task plan for this conversation. This plan is current as of this message. Earlier "
-             "manage_tasks calls in the conversation are already reflected here, so ignore them. If you "
-             "update it after this message, your latest manage_tasks calls take precedence."]
+    lines = ["Saved task plan for this conversation, as last saved with manage_tasks as of this message. "
+             "Earlier manage_tasks calls in the conversation are already reflected here, so ignore them. "
+             "The plan can be behind the work: if the conversation shows tasks finished or changed that it "
+             "doesn't, bring it up to date with manage_tasks before going on. If you update it after this "
+             "message, your latest manage_tasks calls take precedence."]
     if task_plan.get("scope"):
         lines.append(f"Scope for every task: {task_plan['scope']}")
     for number, task in enumerate(tasks, start=1):

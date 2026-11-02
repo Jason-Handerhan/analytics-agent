@@ -832,27 +832,29 @@ TASKS_MAX_COUNT = 30
 TASK_MAX_CHARS = 500    # 30 tasks at 500 characters is at most about 3,750 tokens injected per turn
 TASK_SCOPE_MAX_CHARS = 800
 
-MANAGE_TASKS_DESCRIPTION = """Saves the plan for a request that is too large to finish in one turn, or that \
-the user asks you to plan, so it survives across turns. If you expect a request to need more than about \
-eight queries, charts and lookups in total, don't try to answer it all: save a plan, show it to the user \
-as a numbered list (not a table), and work through it with them. If you find partway through a turn that \
-the work is bigger than you expected, stop, save the plan, and give the user what you have so far. Each \
-call replaces the whole task list, so send every task with its current status, and update statuses in the \
-same turn as the work, before you submit your answer. The saved plan is shown to you at the start of each \
-turn. When everything is done, or the user drops the plan, clear the whole plan, scope included, by \
-sending an empty task list.
+MANAGE_TASKS_DESCRIPTION = """Saves the plan for a request that is too large to answer in one go, or that the user asks you to plan, \
+so it survives across the conversation. A request is large when it needs more than three deliverables; \
+save a plan, show it to the user as a numbered list (not a table), and ask whether to proceed before \
+doing any of it. If you find partway through the work that it is bigger than you expected, stop, save \
+the plan, and give the user what you have so far.
+
+Work one task at a time: complete a task, mark it done, give the user its result, and check with them \
+before starting the next. Each call replaces the whole task list, so send every task with its current \
+status, and update statuses before you submit your answer. Never call this with empty arguments: tasks \
+is always required. When everything is done, or the user drops the plan, clear the whole plan, scope \
+included, by sending an empty task list.
 
 Don't record findings in tasks.
 
-Sizing tasks is what matters most. Each task is one deliverable the user would recognize (for example a \
-chart with its takeaway), completed in a single turn, which has about two minutes and a few tool calls. \
-A task includes everything it needs: the queries, the charts built from them, and a short explanation. \
-Never split a pipeline across tasks (one task to pull data, another to chart it): results from earlier \
-turns are not available, so the second task would have to pull the data again. Work one task per turn by \
-default; when the next tasks are small and share the same data, do them together in one turn and mark \
-each done. A task that needs more than a handful of queries and charts is too big: split it into tasks \
-that are each self-contained, for example by question, by segment, or into groups of two or three \
-related charts."""
+Sizing tasks is what matters most. A task is small enough to complete and answer in about two minutes: \
+at most three deliverables and about eight tool calls in all. A deliverable is one answer the user can \
+read on its own: a chart with its explanation (and a markdown table if it helps), or a question answered \
+in prose, such as what the docs or the code say about something. A task includes everything it needs: \
+the queries, the charts built from them, and the explanation. Never split a pipeline across tasks (one \
+task to pull data, another to chart it): results from earlier answers are not available, so the second \
+task would have to pull the data again. A task over either limit is too big: split it into tasks that \
+are each self-contained, for example by question, by segment, or into groups of two or three related \
+charts."""
 
 
 class TaskItem(BaseModel):

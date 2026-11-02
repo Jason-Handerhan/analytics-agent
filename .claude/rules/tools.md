@@ -837,15 +837,20 @@ the model can't emit a structurally invalid call at all
 can't validate that a SQL query is *correct*, just that the call's shape is
 valid.
 
-**`strict=True` is enabled globally, with five tools bound outside it on Claude —
-confirmed live (2026-10-02, 2026-10-29).** The memory and state tools
-(`get_conversation_findings`, `search_conversation_findings`, `manage_tasks`, `manage_notes`) join `generate_chart`:
-every strict schema counts toward a size limit on the compiled grammar (a 400,
-"compiled grammar is too large"), the memory schemas are flat and still validated at
-dispatch, and a bad call costs one retry. They are pre-converted the same way, in
-`ANTHROPIC_NON_STRICT_TOOLS`; OpenAI and Gemini bind them strict with no issue. The
-rule for what else can move out: query tools and `submit_answer` stay strict, memory
-and state tools don't need to be. About `generate_chart`: `generate_chart`'s discriminated union and
+**`strict=True` is enabled globally, with three tools bound outside it on Claude —
+confirmed live (2026-10-02, 2026-10-29, 2026-11-02).** The two conversation-findings tools
+(`get_conversation_findings`, `search_conversation_findings`) join `generate_chart`. All the strict schemas in a
+request share one limit on the compiled grammar (a 400: "The compiled grammar is too large, which would cause
+performance issues. Simplify your tool schemas or reduce the number of strict tools."). It is a size limit, not a
+count of tools. Tested 2026-11-02 on the four memory and state tools: `manage_tasks` with `manage_notes` strict
+fits (the findings tools non-strict); either findings tool strict fits alone (the other three non-strict); a
+third strict tool added to the manage pair fails with either findings tool; and the two findings tools strict
+together fail even with the manage pair non-strict. The manage pair gets the strict slots because they take
+required, content-heavy arguments and, non-strict, the model sent them empty or nested under `args` (the MCP
+tools' shape); strict makes both impossible. The findings tools are flat, still validated at dispatch, and a
+bad call costs one retry. They are pre-converted the same way, in `ANTHROPIC_NON_STRICT_TOOLS`; OpenAI and
+Gemini bind them strict with no issue. The rule for what else can move out: query tools and `submit_answer`
+stay strict; of the memory and state tools only the manage pair fits. About `generate_chart`: `generate_chart`'s discriminated union and
 numeric bounds aren't representable under it on Claude (`docs/chart-tool.md`,
 `.claude/rules/orchestrator.md`'s "Constrained decoding" section), so it's
 pre-converted to a raw Anthropic tool dict (no `strict` kwarg) that
