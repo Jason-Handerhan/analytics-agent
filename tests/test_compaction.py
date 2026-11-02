@@ -9,23 +9,24 @@ from langchain_core.messages import HumanMessage, messages_to_dict
 
 from app.config import COMPACTION_KEEP_TURNS
 from app.orchestrator.compaction import TurnRangeSummary, compact_history_pipeline
+from app.orchestrator.state import StoredTurn
 
 BASE_TIME = datetime(2026, 10, 1, tzinfo=timezone.utc)
 SUMMARIZED_COUNT = 2
 PREVIOUS_LAST_TURN = 4
 
 
-def _turn(n: int) -> dict:
+def _turn(n: int) -> StoredTurn:
     started = BASE_TIME + timedelta(hours=n)
     message = HumanMessage(content=f"question {n}", additional_kwargs={"turn_start": started.isoformat()})
-    return {"messages": messages_to_dict([message]), "timestamp": started}
+    return StoredTurn(messages=messages_to_dict([message]), timestamp=started)
 
 
-def _previous_summary() -> dict:
+def _previous_summary() -> StoredTurn:
     covers_to = BASE_TIME - timedelta(hours=1)
     message = HumanMessage(content="recap", additional_kwargs={
         "summary": True, "covers_to": covers_to.isoformat(), "last_turn": PREVIOUS_LAST_TURN})
-    return {"messages": messages_to_dict([message]), "timestamp": covers_to}
+    return StoredTurn(messages=messages_to_dict([message]), timestamp=covers_to)
 
 
 def _ledger_row(answered_at: datetime) -> dict:
@@ -71,12 +72,12 @@ async def test_compact_history_pipeline_replaces_old_turns_with_summary(patch_ou
     assert result.stored_history[1:] == kept
 
     expected_after = BASE_TIME - timedelta(hours=1) if has_previous_summary else None
-    first_kept_start = datetime.fromisoformat(kept[0]["messages"][0]["data"]["additional_kwargs"]["turn_start"])
+    first_kept_start = datetime.fromisoformat(kept[0].messages[0]["data"]["additional_kwargs"]["turn_start"])
     assert fetch_args == {"conversation_id": "conv-1", "after": expected_after, "before": first_kept_start}
 
     first_turn = PREVIOUS_LAST_TURN + 1 if has_previous_summary else 1
     last_turn = first_turn + len(rows) - 1
-    summary_kwargs = result.stored_history[0]["messages"][0]["data"]["additional_kwargs"]
+    summary_kwargs = result.stored_history[0].messages[0]["data"]["additional_kwargs"]
     assert summary_kwargs == {"summary": True, "covers_to": rows[-1]["answered_at"].isoformat(), "last_turn": last_turn}
     assert (result.summary_row["first_turn"], result.summary_row["last_turn"]) == (first_turn, last_turn)
     assert result.summary_row["conversation_id"] == "conv-1"

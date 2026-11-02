@@ -5,9 +5,8 @@ summary's first message carries additional_kwargs["summary"] and ["covers_to"].
 """
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import TypedDict
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage, messages_to_dict
@@ -16,22 +15,15 @@ from pydantic import BaseModel, Field
 from app.config import COMPACTION_KEEP_TURNS, COMPACTION_MODEL
 from app.orchestrator.conversation_memory.reader import fetch_compaction_rows
 from app.orchestrator.conversation_memory.writer import build_summary_row
+from app.orchestrator.state import StoredTurn
 
 logger = logging.getLogger(__name__)
 
 
 # --- Helpers (history and ledger) -----------------------------------------------------------
 
-class StoredTurn(TypedDict):
-    """One record of the stored history (sessions.history_messages): a turn's messages, serialized
-    with messages_to_dict, and when it was stored. A stored summary has the same shape but is not
-    a turn."""
-    messages: list[dict]
-    timestamp: datetime
-
-
 def _first_message_kwargs(stored_turn: StoredTurn) -> dict:
-    return stored_turn["messages"][0]["data"]["additional_kwargs"]
+    return stored_turn.messages[0]["data"]["additional_kwargs"]
 
 
 def _is_summary(stored_turn: StoredTurn) -> bool:
@@ -44,10 +36,10 @@ def measure_history_size(stored_history: list[StoredTurn]) -> tuple[int, int]:
     count. stored_bytes is the JSON size of the whole stored history, a proxy for its Firestore size."""
     characters = 0
     for stored_turn in stored_history:
-        for message in stored_turn["messages"]:
+        for message in stored_turn.messages:
             data = message["data"]
             characters += len(json.dumps(data["content"])) + len(json.dumps(data.get("tool_calls", [])))
-    return characters // 4, len(json.dumps(stored_history, default=str))
+    return characters // 4, len(json.dumps([asdict(turn) for turn in stored_history], default=str))
 
 
 def split_history_for_compaction(

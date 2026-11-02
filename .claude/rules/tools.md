@@ -41,6 +41,7 @@ instance of this, not seven independent rules.
 | `get_conversation_findings` | **No** — a plain function in the orchestrator |
 | `search_conversation_findings` | **No** — a plain function in the orchestrator |
 | `manage_tasks` | **No** — a plain function in the orchestrator |
+| `manage_notes` | **No** — a plain function in the orchestrator |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -115,8 +116,9 @@ Not a BigQuery tool as far as guardrails go (no dry-run, cost tier, or
 `bytes_consumed`); its limit is a token budget. Design in
 `docs/conversation-memory.md`.
 
-**`manage_tasks` is part of that exception: it writes this project's `sessions` document** (the
-`task_plan` field, `conversation_id` injected) — nothing portable to host. It is never a numeric source.
+**`manage_tasks` and `manage_notes` are part of that exception: they write this project's `sessions`
+document** (the `task_plan` and `notes` fields, `conversation_id` injected) — nothing portable to host.
+Neither is a numeric source.
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -225,6 +227,7 @@ later changes the URL and adds auth headers — not this file.
 | `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
 | `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions, compaction summaries) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
 | `manage_tasks` | The conversation's task plan: replaces the whole list, an empty list clears it | Never a number source: a task holds work, not results (`docs/conversation-memory.md`) |
+| `manage_notes` | The conversation's standing notes (`preference`, `definition`, `goal`, `constraint`): add, update or delete by id | Never a number source: a note holds what the user stated, not data figures (`docs/conversation-memory.md`) |
 | `search_conversation_findings` | Semantic (vector) search over earlier verified answers, in this conversation or all of the user's: `mode="search"` (closest turns) or `mode="tags"` (topics and entities in use) | Only a hit's `verified_numbers` are a number source; tags are never citable (`docs/conversation-memory.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at
@@ -232,7 +235,7 @@ all, see below. `submit_answer` isn't either — it's not a number *source*,
 it's how the model delivers the answer built from everything above; see its
 own section below.
 
-**Thirteen tools, one vector store** — deliberately not 1:1:
+**Fourteen tools, one vector store** — deliberately not 1:1:
 
 - **Code search is agentic (list or read), not vector search.** Embeddings
   flatten the structural relationships — imports, call graphs — that code
@@ -420,29 +423,21 @@ def _check_unclosed_fence(markdown: str) -> bool:
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
         default="",
-        description=f"Plain Markdown. Empty only when clarifying_question is set. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
+        description=f"Plain Markdown. Empty only when clarifying_question is set. Keep it under {MAX_ANSWER_CHARS:,} characters, not counting image URLs, and any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
                     "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
                     "or use generate_chart instead. Escape a literal | inside a table cell as \\| or "
-                    "it's read as an extra column and breaks the table. Never state a hand-rolled "
-                    "approximation, range, or derived value (a rank, percent change, difference, ratio, "
-                    "average) anywhere, in prose or a table -- add it to the query and re-run, or "
-                    "describe the pattern in words with no number. Only run_bigquery_sql/run_dax_query "
-                    "numbers belong in a table at all. A number from any other tool may be stated in "
-                    "prose, except search_docs -- never state a search_docs number anywhere, in prose "
-                    "or a table. Table cell values are checked automatically against this turn's "
-                    "run_bigquery_sql/run_dax_query results, up to "
-                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers readably -- "
-                    "thousands separators (977,542), 1-2 decimals by default (rounding never "
-                    "fails verification), more only when the figure needs it (Recall@5: "
-                    "0.6688, not 0.67). Include the chart_url from "
+                    "it's read as an extra column and breaks the table. Numbers in a table are "
+                    "checked automatically; don't repeat them in all_prose_numeric_claims. Format "
+                    "numbers readably -- thousands separators (977,542), 1-2 decimals by default "
+                    "(rounding to fewer decimals never fails verification), more only when the figure "
+                    "needs it (Recall@5: 0.6688, not 0.67). Include the chart_url from "
                     "generate_chart or generate_beeswarm here as an image -- the user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
         # prose numbers only -- table cells are checked separately by
         # extract_table_values, not re-declared here
-        description="Every number stated in prose as fact from a run_bigquery_sql or run_dax_query "
-                    "result this turn -- the only two tools checked against. Never include a number "
-                    "already in a markdown table -- checked separately. Never include a number from "
-                    "any other tool -- it will fail verification.")
+        description="Every number you state in prose as a fact about the data. Leave out numbers in a "
+                    "markdown table (checked separately) and narration such as years or how many "
+                    "queries you ran.")
     suggested_follow_ups: list[str] = Field(
         default=[],
         description="1-3 short, natural follow-up questions -- include these by default, since "
@@ -519,25 +514,40 @@ class SubmitAnswerArgs(BaseModel):
                 "(one question for the user, only when the request is genuinely ambiguous).")
         return self
 
-@tool(args_schema=SubmitAnswerArgs)
-async def submit_answer(answer_markdown: str, all_prose_numeric_claims: list[float],
-                         suggested_follow_ups: list[str], clarifying_question: str = "") -> str:
-    """Call this with your final answer once you have everything you need or
-    with a clarifying question when the request is genuinely ambiguous.
-    This is how you respond to the user -- a plain-text reply will not be
-    delivered and the turn will be asked to retry. If you can't fully
-    answer within a reasonable number of steps, submit the best partial
-    answer available and say plainly it's partial, rather than presenting
-    it as complete. Do not batch this with other tool calls -- if you do,
-    the submission is ignored and the loop continues.
+SUBMIT_ANSWER_DESCRIPTION = f"""Call this with your final answer ... (when to call it, partial answers, no
+batching with other tools)
 
-    Don't omit a number from all_prose_numeric_claims to dodge verification
-    -- it still needs a real run_bigquery_sql or run_dax_query source.
-    Verification exists to catch hallucinated or hand-computed numbers, not
-    to be routed around.
-    """
+Numbers. ... (the contract, below)"""
+
+
+@tool(args_schema=SubmitAnswerArgs, description=SUBMIT_ANSWER_DESCRIPTION)
+async def submit_answer(answer_markdown: str = "", all_prose_numeric_claims: list[float] | None = None,
+                         suggested_follow_ups: list[str] | None = None, clarifying_question: str = "",
+                         ...) -> str:
+    """Records the submission; the graph reads the arguments."""
     return "Answer recorded."
 ```
+
+**The numbers contract is stated once, in `SUBMIT_ANSWER_DESCRIPTION` (2026-11-01).** An f-string constant, not a
+docstring, so `MAX_CLAIM_PRECISION` can be interpolated (a docstring can't be an f-string). The system prompt
+and the other tools don't restate it: each tool says only whether its own numbers can be stated, and the static
+system prompt says nothing about verification. The description covers:
+
+- **Can state numbers from:** this turn's `run_bigquery_sql`, `run_dax_query` and `combine_results` results;
+  `verified_numbers` from `get_conversation_findings` (`view="turns"`) and `search_conversation_findings`
+  (`mode="search"`); and an earlier turn still in the history, if it declared them in its
+  `all_prose_numeric_claims` or showed them in a table.
+- **Cannot state numbers from:** `search_docs`, `get_page_info`, `get_repo_contents` or `generate_beeswarm`
+  output; the overviews, summaries or tags of the memory tools; the project background in the static
+  context. The restriction is on numbers only; the text and findings of any tool can still be used.
+- **Notes and the task plan** are context, not data: the numbers in them (a task count, a definition's
+  threshold) can be stated and stay out of `all_prose_numeric_claims`. A number from a query or chart result
+  never goes in a note or task (`manage_notes` and `manage_tasks` say so), and if one is there it isn't used.
+- **Matching:** on the decimals written, up to `MAX_CLAIM_PRECISION`: rounding to fewer decimals than the
+  source is fine, more never is; a percentage may be written as the fraction times 100. A value the model
+  computed itself (rank, change, difference, ratio, average) must come from the query.
+- **Declaring:** prose numbers go in `all_prose_numeric_claims`, and none may be left out to avoid the check.
+  Table cells are extracted and checked automatically.
 
 **Clarifying question.** `clarifying_question` is the second way to end a
 turn, and exactly one of it or `answer_markdown` must be set (the model
@@ -824,9 +834,9 @@ the model can't emit a structurally invalid call at all
 can't validate that a SQL query is *correct*, just that the call's shape is
 valid.
 
-**`strict=True` is enabled globally, with four tools bound outside it on Claude —
+**`strict=True` is enabled globally, with five tools bound outside it on Claude —
 confirmed live (2026-10-02, 2026-10-29).** The memory and state tools
-(`get_conversation_findings`, `search_conversation_findings`, `manage_tasks`) join `generate_chart`:
+(`get_conversation_findings`, `search_conversation_findings`, `manage_tasks`, `manage_notes`) join `generate_chart`:
 every strict schema counts toward a size limit on the compiled grammar (a 400,
 "compiled grammar is too large"), the memory schemas are flat and still validated at
 dispatch, and a bad call costs one retry. They are pre-converted the same way, in

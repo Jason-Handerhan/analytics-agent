@@ -33,7 +33,7 @@ from app.config import (
 )
 from app.gateway.models import AgentResponse
 from app.shared_helpers import label_chartable_result
-from app.orchestrator.state import AgentState, PendingApproval, TaskPlan, ToolCallRecord
+from app.orchestrator.state import AgentState, Note, PendingApproval, StoredTurn, TaskPlan, ToolCallRecord
 
 
 # --- Turn setup (gateway request -> graph input) ---------------------------
@@ -51,7 +51,8 @@ def build_human_message(question: str, filter_context: list[dict], active_page: 
 def build_initial_state(
     question: str, conversation_id: str, user_id: str, model: str, model_provider: str,
     filter_context: list[dict], active_page: str | None, image_base64: str | None,
-    history_messages: list[BaseMessage], notes: list[dict], task_plan: TaskPlan,
+    history_messages: list[BaseMessage], history_verified_numbers: list[float],
+    notes: list[Note], task_plan: TaskPlan,
     turn_started_at: datetime,
 ) -> AgentState:
     """Initializes every AgentState field for a fresh turn."""
@@ -66,6 +67,7 @@ def build_initial_state(
         active_page=active_page,
         image_base64=image_base64,
         history_messages=history_messages,
+        history_verified_numbers=history_verified_numbers,
         notes=notes,
         task_plan=task_plan,
         messages=[build_human_message(question, filter_context, active_page)],
@@ -74,6 +76,7 @@ def build_initial_state(
         verification_retry_count=0,
         length_retry_count=0,
         verified=False,
+        verified_numbers=[],
         bytes_consumed=0,
         bytes_consumed_baseline=0,
         prompt_tokens=0,
@@ -201,22 +204,23 @@ def _restore_gemini_signatures(messages: list[dict]) -> list[dict]:
     return messages
 
 
-def build_updated_history(history_messages: list[dict], state: AgentState) -> list[dict]:
-    """Returns the updated history_messages list with this turn's messages appended."""
+def build_updated_history(stored_history: list[StoredTurn], state: AgentState) -> list[StoredTurn]:
+    """Returns the stored history with this turn appended."""
     redacted = _strip_thinking_blocks(_redact_tool_results(state["messages"], STALE_RESULT_MESSAGE))
-    new_entry = {"messages": _drop_gemini_signatures(messages_to_dict(redacted)),
-                 "timestamp": datetime.now(timezone.utc)}
-    return history_messages + [new_entry]
+    new_turn = StoredTurn(messages=_drop_gemini_signatures(messages_to_dict(redacted)),
+                          timestamp=datetime.now(timezone.utc),
+                          verified_numbers=state["verified_numbers"])
+    return [*stored_history, new_turn]
 
 
-def build_history_messages(history_messages: list[dict]) -> list[BaseMessage]:
+def build_history_messages(stored_history: list[StoredTurn]) -> list[BaseMessage]:
     """Reconstructs prior turns' message sequence -- real tool structure, not prose.
     Keys are sorted because Firestore returns map keys in varying order, which would
     change the rendered prompt and miss the prompt cache."""
     result: list[BaseMessage] = []
-    for turn in history_messages:
+    for turn in stored_history:
         #Convert to json to sort with sort_keys=True, then convert back to dictionary
-        sorted_messages = json.loads(json.dumps(turn["messages"], sort_keys=True))
+        sorted_messages = json.loads(json.dumps(turn.messages, sort_keys=True))
         result.extend(messages_from_dict(sorted_messages))
     return result
 

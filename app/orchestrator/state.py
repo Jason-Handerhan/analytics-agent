@@ -1,10 +1,11 @@
-"""AgentState and its supporting TypedDicts/reducers -- the graph's state
-shape, shared by orchestrator.py (the graph) and app/gateway/entry_exit.py
-(gateway-facing helpers). Deliberately free of heavier LangGraph/LangChain-
-model imports (ChatAnthropic, StateGraph, MultiServerMCPClient, ...), so
-either of those modules can be imported without pulling in the other's
-dependencies.
+"""The shared data shapes: AgentState (the graph's state) and the types around it,
+including the shapes stored in Firestore (StoredTurn, PendingApproval).
+
+Kept separate from orchestrator.py so the gateway, compaction and tests can import
+these types without importing orchestrator.py and its heavy dependencies
+(ChatAnthropic, StateGraph, MultiServerMCPClient, ...).
 """
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -43,9 +44,27 @@ class PendingApproval(TypedDict):
     paused_at: datetime
 
 
+@dataclass
+class StoredTurn:
+    """One element of sessions.history_messages: a turn's messages (messages_to_dict), when it was stored,
+    and the numbers it verified. A stored summary has the same shape but is not a turn and has none."""
+    messages: list[dict]
+    timestamp: datetime
+    verified_numbers: list[float] = field(default_factory=list)
+
+
 class Task(TypedDict):
     text: str
     status: Literal["todo", "in_progress", "done"]
+
+
+NoteKind = Literal["preference", "definition", "goal", "constraint"]
+
+
+class Note(TypedDict):
+    id: int
+    kind: NoteKind
+    text: str
 
 
 class TaskPlan(TypedDict, total=False):
@@ -79,8 +98,9 @@ class AgentState(TypedDict):
     active_page: str | None
     image_base64: str | None
     history_messages: list[BaseMessage]  # conversation history
-    notes: list[dict]   # standing notes for this conversation, read from the sessions document
+    notes: list[Note]   # standing notes for this conversation, read from the sessions document
     task_plan: TaskPlan   # this conversation's task plan, read from the sessions document
+    history_verified_numbers: list[float]   # verified_numbers of the stored turns, read with the history
 
     # Accumulated during the tool loop
     messages: Annotated[list[BaseMessage], add_messages]
@@ -92,6 +112,7 @@ class AgentState(TypedDict):
     length_retry_count: int
 
     verified: bool
+    verified_numbers: list[float]   # claims plus table values when this turn verified, else empty
 
     # Resource accumulators
     bytes_consumed: int

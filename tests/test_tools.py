@@ -351,3 +351,61 @@ def test_manage_tasks_args_validator():
     ]:
         with pytest.raises(ValueError):
             Args(**bad)
+
+
+# --- Notes: manage_notes -----------------------------------------------------------------
+
+
+def test_apply_note_action_flow():
+    """A new note's id is the highest plus one; an update replaces a note in place; a delete leaves the rest."""
+    apply = tools_module.apply_note_action
+    notes = apply([], "add", kind="goal", text="Understand reorder drivers")
+    notes = apply(notes, "add", kind="preference", text="Show the SQL under each chart")
+    assert [n["id"] for n in notes] == [1, 2]
+
+    notes = apply(notes, "update", note_id=2, kind="constraint", text="Exclude the missing department")
+    assert notes[1] == {"id": 2, "kind": "constraint", "text": "Exclude the missing department"}
+    assert notes[0]["text"] == "Understand reorder drivers"
+
+    notes = apply(notes, "delete", note_id=1)
+    assert [n["id"] for n in notes] == [2]
+    assert apply(notes, "add", kind="goal", text="Compare by department")[-1]["id"] == 3
+
+
+def test_apply_note_action_rejections():
+    """A full list rejects an add, and an unknown id rejects an update or delete; each error says why and
+    lists the existing notes."""
+    apply = tools_module.apply_note_action
+    full = [{"id": i, "kind": "goal", "text": f"Note {i}"} for i in range(1, tools_module.NOTES_MAX_COUNT + 1)]
+    for notes, action, args, message in [
+        (full, "add", {"kind": "goal", "text": "One too many"}, "at most"),
+        (full[:2], "update", {"note_id": 9, "kind": "goal", "text": "x"}, "not found"),
+        (full[:2], "delete", {"note_id": 9}, "not found"),
+    ]:
+        with pytest.raises(ToolError, match=message) as error:
+            apply(notes, action, **args)
+        assert "1 (goal): Note 1" in str(error.value)
+
+
+def test_manage_notes_args_validator():
+    """Each action's required fields, a blank or overlong text, and an unknown kind or action are rejected;
+    padded text is stripped."""
+    Args = tools_module.ManageNotesArgs
+
+    assert Args(action="add", kind="goal", text="  Understand reorder drivers ").text == "Understand reorder drivers"
+    Args(action="update", note_id=2, kind="preference", text="Show the SQL")
+    Args(action="delete", note_id=2)
+
+    for bad in [
+        {"action": "add", "text": "No kind"},
+        {"action": "add", "kind": "goal"},
+        {"action": "update", "kind": "goal", "text": "No id"},
+        {"action": "update", "note_id": 2, "text": "No kind"},
+        {"action": "delete"},
+        {"action": "add", "kind": "goal", "text": "   "},
+        {"action": "add", "kind": "goal", "text": "x" * (tools_module.NOTE_MAX_CHARS + 1)},
+        {"action": "add", "kind": "mood", "text": "Unknown kind"},
+        {"action": "archive", "note_id": 2},
+    ]:
+        with pytest.raises(ValueError):
+            Args(**bad)

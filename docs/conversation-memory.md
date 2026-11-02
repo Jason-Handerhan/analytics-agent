@@ -5,7 +5,7 @@ recall tool `get_conversation_findings`, per-turn tags (`title`, `topics`,
 `entities`), compaction (`app/orchestrator/compaction.py`, the
 `turn_range_summaries` table, the gateway pre-step, the telemetry fields), embeddings
 at write time, the search tool `search_conversation_findings`, the summaries
-in the recall overview, and the task plan tool `manage_tasks`. Not yet redeployed. Update this line and
+in the recall overview, the task plan tool `manage_tasks`, and the notes tool `manage_notes`. Not yet redeployed. Update this line and
 `docs/build-order.md` as steps land.
 
 Goal: a long EDA conversation can be summarized, searched, and kept within a
@@ -37,10 +37,9 @@ ledger "summarize what we found" sees only the newest turns.
   message history. Clarifying-question turns stay in the ledger: they are real
   turns and give the agent context for what happened.
 - **Standing context** (definitions the user set, a settled scope, the goal of
-  the analysis) is a different kind of memory — deliberate, not tied to turns,
-  possibly cross-conversation — and is not part of compaction. A future
-  feature: agent-written notes through a small tool, with a short pinned block
-  in the prompt, separate from the summaries.
+  the analysis) is a different kind of memory — deliberate, not tied to turns —
+  and is not part of compaction. It is the notes feature below (`manage_notes`),
+  separate from the summaries.
 
 ## Verification contract extension
 
@@ -52,9 +51,16 @@ takes **only the `verified_numbers` of each returned turn**
 verification in an earlier turn and were written by gateway code the model
 can't touch, so every number still traces to a live tool call.
 
-- A recall is the only way to quote an earlier number: numbers in message
-  history never enter the pool (it is built from this turn's tool calls only),
-  and history's tool results are redacted.
+- A recall, or a stored turn's own `verified_numbers` still in the history, is the way to quote an
+  earlier number. Other numbers in message history never enter the pool, and history's tool results are
+  redacted.
+- **History numbers (2026-11-01).** Each history entry (`StoredTurn`) stores the turn's `verified_numbers`,
+  the same list its ledger row gets, only when the turn verified. After compaction the gateway collects them
+  from the turns left into `history_verified_numbers`, a third pool source beside the query tools and the
+  recall tools (`.claude/rules/orchestrator.md`). Without it a summary restated a recent turn's numbers from
+  what it could see in the history, failed verification, and regenerated a whole long answer. A compaction
+  summary and an entry stored before the field have none. Matching is precision-aware, so a restatement can't
+  carry more decimals than the turn stated.
 - The overview view returns a dict, so `extract_verified_numbers` returns `[]`
   for it. Overview numbers (counts, token sizes) can't be cited. The extractor
   handles a flat list of turns or hits; a dict result (the overview, the tags view)
@@ -297,8 +303,10 @@ earlier turn otherwise doesn't (only a lossy summary is left). Conversation scop
 - **Tool**: one flat tool, non-strict on Claude. `tasks` replaces the whole list, and an empty list
   clears the whole plan. `scope` (context every task shares) is optional: omitted keeps the saved one,
   `""` clears it. Caps: 30 tasks, 500 characters each, scope 800; at most one `in_progress`.
-- **Injection**: `attach_task_plan` puts the rendered plan ahead of the turn's first message on a copy
-  at request time, so it is never in `state["messages"]` and never saved. It sits after the history
+- **Injection**: `attach_context` puts the rendered plan (after the notes, if any) ahead of the turn's first
+  message on a copy at request time, so it is never in `state["messages"]` and never saved. Each block's
+  header says it is current as of this message and that earlier `manage_tasks` or `manage_notes` calls in the
+  history are already reflected; "this turn" was avoided because the model can't tell where a turn starts. It sits after the history
   breakpoints, so a changed plan invalidates no cache. It is the plan as of the start of the turn, for
   the whole turn: refreshing it mid-turn made the agent read "our current plan" in the user's question
   as the plan it had just edited. The agent's own `manage_tasks` call carries the new list, and the
@@ -316,19 +324,35 @@ earlier turn otherwise doesn't (only a lossy summary is left). Conversation scop
   message offers a plan. The clock (`turn_started_at`) starts at the top of `run_agent_turn`, the same
   instant as the hard timeout.
 
-## Notes (designed, not built)
+## Notes — `manage_notes` (built 2026-11-01)
 
-Standing context for a conversation: preferences, definitions, goals. One tool, `manage_notes`, with
-save, update and delete by id; no read action, since every note is shown with its id.
+What the user tells the agent to keep in mind for the conversation. Conversation scope only: a
+conversation-specific note saved at user scope would leak into unrelated chats (a user scope can be added
+later). The agent saves only what the user states or asks for, never an inference or a data finding. Never a
+numeric source.
 
-- Conversation scope only. A conversation-specific note saved at user scope would leak into unrelated
-  chats; a user scope can be added later.
-- The agent saves only what the user states, never inferences.
-- Stored as `sessions.notes`, read with the history. Capped by a token budget for the block (about
-  2,000 tokens) plus a per-note length cap; over the cap the save fails and lists the existing notes.
-- Shown in a second system block after the static one, never stored in history. Notes change rarely, so
-  a change re-caches the history once. Not a numeric source.
-- Bound non-strict on Claude, like the other memory and state tools.
+- **Storage**: `sessions.notes` = list of `Note` `{id: int, kind, text}` (`state.py`); `kind` is `preference`,
+  `definition`, `goal` or `constraint`. `fetch_session_memory` reads it with the history.
+- **Tool**: one flat tool, non-strict on Claude. `action` is `add`, `update` (a full replace by id: id, kind
+  and text are all required) or `delete`. No read action, since every note is shown with its id. Caps: 25
+  notes and 300 characters each; over the cap the save fails and lists the existing notes. The args model
+  checks what needs only the call's own arguments (blank or overlong text, the fields each action needs);
+  `apply_note_action` checks what needs the stored notes (the count cap, an unknown id).
+- **Ids**: stored as ints, next id is the highest plus 1, never reused or renumbered, so a batch of deletes
+  stays valid. Rendered as "Note 3".
+- **Concurrency**: the notes are one list, and several `manage_notes` calls in one round run together, so a
+  plain read-modify-write would give two adds the same id or restore a note a parallel delete removed.
+  `_update_notes` runs in a Firestore transaction, which reruns from the read if the document changed first;
+  `apply_note_action` is pure, so a rerun is safe, and a `ToolError` raised inside rolls it back.
+- **Injection**: `attach_context` puts the notes ahead of the task plan on the turn's first message at
+  request time (`render_notes`), never in `state["messages"]`, never saved, and after the history
+  breakpoints so a change invalidates no cache. A second system block was rejected: a change would re-cache
+  the whole history, and a user-role block carries lower authority. The header says the list is current as
+  of this message and that earlier `manage_notes` calls are already reflected.
+- **Display**: badge "Managed memory"; live status "Managed memory", or "Managed memory and the task plan"
+  when the plan changed in the same batch.
+- **Numbers**: a note holds the user's own words. A number from a query or chart result is never saved in one
+  (the tool says so), and `submit_answer`'s description covers what may be stated.
 
 ## Starting values (placeholders, tune)
 

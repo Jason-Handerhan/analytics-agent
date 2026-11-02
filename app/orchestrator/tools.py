@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 import google.auth
 import google.auth.impersonated_credentials
 from google.api_core.exceptions import GoogleAPICallError
-from google.cloud import bigquery
+from google.cloud import bigquery, firestore
 from langchain_core.tools import tool, InjectedToolArg, ToolException
 from matplotlib.figure import Figure
 import mistune
@@ -29,6 +29,7 @@ from app.config import (
     BIGQUERY_TIMEOUT_SECONDS,
     EMBEDDING_MODEL,
     GCP_PROJECT_ID,
+    MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_BYTES_BILLED,
     MAX_CLAIM_PRECISION,
@@ -52,7 +53,8 @@ from app.orchestrator.conversation_memory.reader import (
     fetch_turns,
     fetch_vector_search_hits,
 )
-from app.shared_helpers import is_cancelled, session_doc
+from app.orchestrator.state import Note, NoteKind
+from app.shared_helpers import get_firestore_client, is_cancelled, session_doc
 
 logger = logging.getLogger(__name__)
 
@@ -269,27 +271,19 @@ def _check_unclosed_fence(markdown: str) -> bool:
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
         default="",
-        description=f"Plain Markdown. Empty only when clarifying_question is set. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
+        description=f"Plain Markdown. Empty only when clarifying_question is set. Keep it under {MAX_ANSWER_CHARS:,} characters, not counting image URLs, and any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
                     "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
                     "or use generate_chart instead. Escape a literal | inside a table cell as \\| or "
-                    "it's read as an extra column and breaks the table. Never state a hand-rolled "
-                    "approximation, range, or derived value (a rank, percent change, difference, ratio, "
-                    "average) anywhere, in prose or a table -- add it to the query and re-run, or "
-                    "describe the pattern in words with no number. Only run_bigquery_sql/run_dax_query "
-                    "numbers belong in a table at all. A number from any other tool may be stated in "
-                    "prose, except search_docs -- never state a search_docs number anywhere, in prose "
-                    "or a table. Table cell values are checked automatically against this turn's "
-                    "run_bigquery_sql/run_dax_query results, up to "
-                    f"{MAX_CLAIM_PRECISION} decimal places. Format numbers readably -- "
-                    "thousands separators (977,542), 1-2 decimals by default (rounding never "
-                    "fails verification), more only when the figure needs it (Recall@5: "
-                    "0.6688, not 0.67). Include the chart_url from "
+                    "it's read as an extra column and breaks the table. Numbers in a table are "
+                    "checked automatically; don't repeat them in all_prose_numeric_claims. Format "
+                    "numbers readably -- thousands separators (977,542), 1-2 decimals by default "
+                    "(rounding to fewer decimals never fails verification), more only when the figure "
+                    "needs it (Recall@5: 0.6688, not 0.67). Include the chart_url from "
                     "generate_chart or generate_beeswarm here as an image -- the user sees no chart otherwise.")
     all_prose_numeric_claims: list[float] = Field(
-        description="Every number stated in prose as fact from a run_bigquery_sql or run_dax_query "
-                    "result this turn -- the only two tools checked against. Never include a number "
-                    "already in a markdown table -- checked separately. Never include a number from "
-                    "any other tool -- it will fail verification.")
+        description="Every number you state in prose as a fact about the data. Leave out numbers in a "
+                    "markdown table (checked separately) and narration such as years or how many "
+                    "queries you ran.")
     suggested_follow_ups: list[str] = Field(
         default=[],
         description="1-3 short, natural follow-up questions -- include these by default, "
@@ -367,25 +361,50 @@ class SubmitAnswerArgs(BaseModel):
         return self
 
 
-@tool(args_schema=SubmitAnswerArgs)
+SUBMIT_ANSWER_DESCRIPTION = f"""Call this with your final answer once you have everything you need or
+with a clarifying question when the request is genuinely ambiguous.
+This is how you respond to the user -- a plain-text reply will not be
+delivered and the turn will be asked to retry. If you can't fully
+answer within a reasonable number of steps, submit the best partial
+answer available and say plainly it's partial, rather than presenting
+it as complete. Do not batch this with other tool calls -- if you do,
+the submission is ignored and the loop continues.
+
+Numbers. Every number in your answer is checked against the sources below, and a number that isn't found
+fails verification and costs a full retry. This only applies to numbers: you can still use the text,
+findings and descriptions from any tool's output, just not numbers that don't come from a source listed here.
+
+You can state numbers from:
+- run_bigquery_sql, run_dax_query and combine_results results from this turn;
+- the verified numbers returned by get_conversation_findings (view="turns") and
+  search_conversation_findings (mode="search");
+- an earlier turn in your message history, if it declared them in its all_prose_numeric_claims or showed
+  them in a table.
+
+You cannot state numbers from:
+- search_docs, get_page_info, get_repo_contents or generate_beeswarm output;
+- the overviews, summaries or tags of the conversation memory tools;
+- the project background in your context (its Recall@5 and profit-lift figures are historical).
+
+Notes and the task plan are context, not data. You can state the numbers in them, such as a task count or
+a definition's threshold ("11 of 12 tasks done", "an active customer ordered in the last 30 days"), and
+those don't go in all_prose_numeric_claims. A number from a query or chart result should never be in a
+note or task, and if one is, don't use it in your answer: take it from one of the approved sources above
+that you can state numbers from.
+
+A number is matched on the decimals you write, up to {MAX_CLAIM_PRECISION}: round to fewer decimals than
+the source if you like, never give more. A percentage may be written as the fraction times 100. Never state
+a value you computed yourself -- a rank, percent change, difference, ratio or average: add it to the query
+and re-run it, or describe the pattern in words. Don't leave a number out of all_prose_numeric_claims to
+avoid this check; verification exists to catch hallucinated or hand-computed numbers."""
+
+
+@tool(args_schema=SubmitAnswerArgs, description=SUBMIT_ANSWER_DESCRIPTION)
 async def submit_answer(answer_markdown: str = "", all_prose_numeric_claims: list[float] | None = None,
                          suggested_follow_ups: list[str] | None = None, clarifying_question: str = "",
                          title: str = "", topics: list[str] | None = None,
                          entities: list[str] | None = None) -> str:
-    """Call this with your final answer once you have everything you need or
-    with a clarifying question when the request is genuinely ambiguous.
-    This is how you respond to the user -- a plain-text reply will not be
-    delivered and the turn will be asked to retry. If you can't fully
-    answer within a reasonable number of steps, submit the best partial
-    answer available and say plainly it's partial, rather than presenting
-    it as complete. Do not batch this with other tool calls -- if you do,
-    the submission is ignored and the loop continues.
-
-    Don't omit a number from all_prose_numeric_claims to dodge verification
-    -- it still needs a real run_bigquery_sql or run_dax_query source.
-    Verification exists to catch hallucinated or hand-computed numbers, not
-    to be routed around.
-    """
+    """Records the submission; the graph reads the arguments."""
     return "Answer recorded."
 
 # Surface Pydantic's own message as an actionable ToolMessage instead of crashing the turn.
@@ -468,7 +487,7 @@ async def get_page_info(page_name: Literal[PAGES],
     other one if the question is clearly about it instead.
 
     The screenshot is a static reference for layout only -- not a live
-    capture, never a source of numbers. Never mention the screenshot, the
+    capture. You can't state numbers from this tool. Never mention the screenshot, the
     reference layout, or a "default" state to the user -- it's for your own
     understanding of page structure only. State only the current,
     filter_context-grounded reality: where filter_context has the entry
@@ -543,11 +562,9 @@ class SearchDocsArgs(BaseModel):
 async def search_docs(query: str, top_k: int = SEARCH_DOCS_TOP_K_DEFAULT) -> list[dict]:
     """Semantic search over this project's own methodology docs -- README
     content on approach, architecture, evaluation. Authoritative for project
-    intent and methodology, never for numbers. Never state a number returned
-    here in your answer, even in passing -- doc chunks aren't authoritative
-    for numbers; use run_bigquery_sql or run_dax_query for any numeric
-    answer. Never include code snippets from this tool in your answer --
-    use get_repo_contents instead.
+    intent and methodology. You can't state numbers from this tool. Never
+    include code snippets from this tool in your answer -- use
+    get_repo_contents instead.
     """
     top_k = max(1, min(top_k, SEARCH_DOCS_MAX_TOP_K))
 
@@ -571,14 +588,12 @@ search_docs.handle_validation_error = lambda e: str(e)
 
 GET_CONVERSATION_FINDINGS_DESCRIPTION = f"""Recalls this conversation's earlier verified answers from a
 ledger that outlasts your message history. Use it to summarize or revisit earlier findings, or to
-quote a number from an earlier turn. Numbers sitting in your message history can't be cited in an
-answer; only numbers returned by view="turns" can.
+quote a number from an earlier turn. You can state the numbers returned by view="turns".
 
 view="overview": takes no other arguments. Returns the number of verified turns, their sizes in
 tokens, how many of the newest turns fit in one call, a summary of each earlier stretch (turn range,
 title, topics, text), and each turn's number, date, sources, title, topics, entities and question.
-Use it to choose which turns to recall. Numbers in the overview, summaries included, cannot pass
-verification and must not be cited in any answer.
+Use it to choose which turns to recall. You can't state numbers from the overview, summaries included.
 
 view="turns": returns full rows (question, answer, verified numbers, sources, title, topics,
 entities, filters) for turns start_turn..end_turn (1-based, inclusive; give both), or for the newest
@@ -727,8 +742,8 @@ TAG_LIST_LIMIT = 300   # most used topics and entities returned per kind
 
 SEARCH_CONVERSATION_FINDINGS_DESCRIPTION = """Semantic (vector) search over earlier verified answers, for when you \
 don't know which turn covered something. It matches on meaning, not exact wording, so describe what you're \
-after. To read turns by position, use get_conversation_findings. Only numbers returned here can be cited in an \
-answer, not numbers in your message history.
+after. To read turns by position, use get_conversation_findings. You can state the numbers returned by \
+mode="search", but not numbers from mode="tags".
 
 mode="search" returns the closest turns with their question, answer, verified numbers, date and a distance \
 (smaller is closer). Hits from other conversations can be old: give their date, since the data may have \
@@ -824,9 +839,7 @@ same turn as the work, before you submit your answer. The saved plan is shown to
 turn. When everything is done, or the user drops the plan, clear the whole plan, scope included, by \
 sending an empty task list.
 
-Don't record findings in tasks. A task list is context, not a verified source: any number in an answer \
-must come from this turn's queries or from get_conversation_findings, so a figure copied from a task \
-would fail verification.
+Don't record findings in tasks.
 
 Sizing tasks is what matters most. Each task is one deliverable the user would recognize (for example a \
 chart with its takeaway), completed in a single turn, which has about two minutes and a few tool calls. \
@@ -916,6 +929,121 @@ async def manage_tasks(
 
 manage_tasks.handle_tool_error = True
 manage_tasks.handle_validation_error = lambda e: str(e)
+
+
+# --- manage_notes -----------------------------------------------------------------
+
+NOTES_MAX_COUNT = 25
+NOTE_MAX_CHARS = 300    # 25 notes at 300 characters is at most about 1,900 tokens injected per turn
+
+
+def apply_note_action(
+    notes: list[Note],
+    action: Literal["add", "update", "delete"],
+    note_id: int | None = None,
+    kind: NoteKind | None = None,
+    text: str | None = None,
+) -> list[Note]:
+    """Returns the notes after one add, update or delete; raises a ToolError listing the existing notes
+    when the action can't apply."""
+    existing = "; ".join(f"{n['id']} ({n['kind']}): {n['text']}" for n in notes) or "none"
+
+    if action != "add" and note_id not in [n["id"] for n in notes]:
+        raise ToolError(f"Note {note_id} not found. Existing notes: {existing}")
+
+    if action == "add":
+        if len(notes) >= NOTES_MAX_COUNT:
+            raise ToolError(f"A conversation holds at most {NOTES_MAX_COUNT} notes; delete or merge some. "
+                            f"Existing notes: {existing}")
+        next_id = max((n["id"] for n in notes), default=0) + 1
+        return [*notes, Note(id=next_id, kind=kind, text=text)]
+
+    if action == "update":
+        return [Note(id=note_id, kind=kind, text=text) if n["id"] == note_id else n for n in notes]
+
+    if action == "delete":
+        return [n for n in notes if n["id"] != note_id]
+
+
+MANAGE_NOTES_DESCRIPTION = """Saves something the user told you to keep in mind for the rest of this \
+conversation, so it is still there on later turns. Save only what the user states or asks for, never a guess \
+about what they want and never a finding from the data. The saved notes are shown to you at the start of each \
+turn, each with its id; follow them when you query and answer.
+
+A goal is the user's overall purpose; the steps toward it belong in manage_tasks. When the user changes \
+something already saved, update that note instead of adding a second one. When the list is full, merge or \
+delete notes.
+
+Don't save numbers from query or chart results in a note."""
+
+
+class ManageNotesArgs(BaseModel):
+    action: Literal["add", "update", "delete"] = Field(
+        description="'add' saves a new note, 'update' replaces the note with note_id, 'delete' removes it.")
+    note_id: int | None = Field(
+        default=None, description="The id shown on the note. For update and delete.")
+    kind: NoteKind | None = Field(
+        default=None,
+        description="For add and update. 'preference': how the user wants answers presented (always show the "
+                    "SQL under a chart). 'definition': what a term means to them (an active customer ordered "
+                    "in the last 30 days). 'goal': what they are trying to learn or decide. 'constraint': a "
+                    "standing scope or filter to apply to your queries (exclude the department).")
+    text: str | None = Field(
+        default=None,
+        description="For add and update. One self-contained statement in the user's terms, so a later turn can "
+                    "follow it without this conversation. An update replaces the whole note, so send the full "
+                    "text.")
+
+    @field_validator("text")
+    def _check_text(cls, text: str | None) -> str | None:
+        """Strips the text and rejects a blank or overlong note."""
+        if text is None:
+            return None
+        text = text.strip()
+        if not text:
+            raise ValueError("The note text is blank.")
+        if len(text) > NOTE_MAX_CHARS:
+            raise ValueError(f"The note is {len(text)} characters; keep it under {NOTE_MAX_CHARS}.")
+        return text
+
+    @model_validator(mode="after")
+    def _check_fields_for_action(self) -> "ManageNotesArgs":
+        """Requires the fields each action needs."""
+        required = {"add": ("kind", "text"), "update": ("note_id", "kind", "text"), "delete": ("note_id",)}
+        missing = [field for field in required[self.action] if getattr(self, field) is None]
+        if missing:
+            raise ValueError(f"'{self.action}' needs {', '.join(missing)}.")
+        return self
+
+
+@firestore.async_transactional
+async def _update_notes(transaction, doc, action, note_id, kind, text) -> list[Note]:
+    """Reads, changes and writes the notes; Firestore reruns it from the read if the document changed first."""
+    snapshot = await doc.get(transaction=transaction)
+    notes = apply_note_action(snapshot.to_dict().get("notes", []), action, note_id, kind, text)
+    transaction.update(doc, {"notes": notes})
+    return notes
+
+
+@tool(args_schema=ManageNotesArgs, description=MANAGE_NOTES_DESCRIPTION)
+async def manage_notes(
+    action: Literal["add", "update", "delete"],
+    conversation_id: Annotated[str, InjectedToolArg],
+    note_id: int | None = None,
+    kind: NoteKind | None = None,
+    text: str | None = None,
+) -> str:
+    try:
+        notes = await _update_notes(
+            get_firestore_client().transaction(), session_doc(conversation_id), action, note_id, kind, text)
+    except GoogleAPICallError as e:
+        raise ToolError(f"Could not save the note ({e}). Retry once, or tell the user.") from e
+    if action == "add":
+        return f"Added note {notes[-1]['id']}."
+    return f"{'Updated' if action == 'update' else 'Deleted'} note {note_id}."
+
+manage_notes.handle_tool_error = True
+manage_notes.handle_validation_error = lambda e: str(e)
 
 
 # --- generate_beeswarm -----------------------------------------------------------
@@ -1076,8 +1204,8 @@ async def generate_beeswarm(
     """Renders a SHAP beeswarm plot for one model and split, optionally limited to listed
     departments, aisles, or products (exact names, any case); features are then ranked
     within that slice. Returns the image URL, plus the image itself so you can describe
-    what it shows. Gray points mean the feature had no value for that prediction. The plot
-    isn't a number source -- don't state values read from it. To quote how many predictions
+    what it shows. Gray points mean the feature had no value for that prediction. You can't
+    state numbers from this tool or its plot. To quote how many predictions
     it shows, run SELECT LEAST(COUNT(*), {sample_rows}) over the same split, model, and
     filters in prediction_explanations. Small slices, a single product especially, rest on
     fewer predictions: note that their rankings are noisier."""

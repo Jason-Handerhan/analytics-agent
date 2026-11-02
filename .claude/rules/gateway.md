@@ -310,10 +310,11 @@ sessions/{conversation_id}            # spans the whole conversation
     {
       "messages": [...],                   # messages_to_dict(state["messages"]), non-submit_answer
                                            # tool results already redacted
-      "timestamp": ...
-    }
-  ],
-  "notes": [...],                          # standing notes (tool not built yet), read with the history
+      "timestamp": ...,
+      "verified_numbers": [...]            # claims + table values, only if the turn verified
+    }                                      # (StoredTurn; a summary record and entries stored
+  ],                                       # before this field have none)
+  "notes": [...],                          # [{id, kind, text}] from manage_notes, read with the history
   "task_plan": {...},                      # {"scope", "tasks"} from manage_tasks, read with the history
   "last_activity_at": <timestamp>          # updated every turn; TTL target
 }
@@ -344,16 +345,26 @@ mistaking stale prior-turn data for this turn's.** `build_updated_history`
 STALE_RESULT_MESSAGE = ("Result removed -- this tool call is from a prior turn, not this one. "
                          "Re-run it if you need this data now.")
 
-def build_updated_history(history_messages: list[dict], state: AgentState) -> list[dict]:
+def build_updated_history(stored_history: list[StoredTurn], state: AgentState) -> list[StoredTurn]:
     redacted = []
     for msg in state["messages"]:
         if isinstance(msg, ToolMessage) and msg.name != "submit_answer" and msg.status != "error":
             msg = ToolMessage(content=STALE_RESULT_MESSAGE, name=msg.name,
                                tool_call_id=msg.tool_call_id, status=msg.status)
         redacted.append(msg)
-    new_entry = {"messages": messages_to_dict(redacted), "timestamp": datetime.now(timezone.utc)}
-    return history_messages + [new_entry]
+    new_turn = StoredTurn(messages=messages_to_dict(redacted), timestamp=datetime.now(timezone.utc),
+                          verified_numbers=state["verified_numbers"])
+    return [*stored_history, new_turn]
 ```
+
+**`StoredTurn` is the shape of one `history_messages` entry** (a `@dataclass` in `app/orchestrator/state.py`,
+with `SessionMemory` a dataclass in `app/gateway/gateway.py`): `messages`, `timestamp`, and
+`verified_numbers` (default empty). Both are for organization, not validation: nothing outside our own code
+writes the document. Conversion happens at the two Firestore edges, `fetch_session_memory` building
+`StoredTurn(**entry)` and `write_history_messages` writing `asdict(turn)`; everything between uses
+attributes (`turn.messages`). `verified_numbers` is the turn's `AgentState.verified_numbers`, set by
+`finalize` only for a verified, non-cancelled turn; `run_agent_turn` collects it from the turns left after
+compaction into `history_verified_numbers`, which seeds the numeric pool (`.claude/rules/orchestrator.md`).
 
 **Also strips thinking/reasoning content and a Firestore-illegal Gemini
 key, model-swappability's own real bug found live, 2026-10-19 — not shown
@@ -446,14 +457,15 @@ imported, and in `entry_exit.py`'s case unit-tested
 async def fetch_session_memory(conversation_id: str) -> SessionMemory:
     snap = await session_doc(conversation_id).get()
     stored = snap.to_dict() if snap.exists else {}
-    return SessionMemory(history_messages=stored.get("history_messages", []),
-                         notes=stored.get("notes", []), task_plan=stored.get("task_plan", {}))
+    return SessionMemory(
+        history_messages=[StoredTurn(**entry) for entry in stored.get("history_messages", [])],
+        notes=stored.get("notes", []), task_plan=stored.get("task_plan", {}))
 
 # app/gateway/entry_exit.py -- pure reconstruction, no I/O
-def build_history_messages(history_messages: list[dict]) -> list[BaseMessage]:
+def build_history_messages(stored_history: list[StoredTurn]) -> list[BaseMessage]:
     result: list[BaseMessage] = []
-    for turn in history_messages:
-        sorted_messages = json.loads(json.dumps(turn["messages"], sort_keys=True))
+    for turn in stored_history:
+        sorted_messages = json.loads(json.dumps(turn.messages, sort_keys=True))
         result.extend(messages_from_dict(sorted_messages))
     return result
 ```
@@ -476,9 +488,8 @@ that entry recursively contain every prior turn too).
 **Tell the model which results are still current**, in the system prompt
 (`app/orchestrator/context.py`): every prior turn's tool result except
 `submit_answer`'s carries the removal notice; any tool result without it is
-from this turn. A prior turn's `submit_answer` numbers are visible but
-explicitly not a live source — the model is told to re-run the call instead
-of reusing them.
+from this turn. Which numbers from a prior turn may be stated is not in the system prompt: it is
+stated once, in `submit_answer`'s description (`.claude/rules/tools.md`).
 
 **The split exists because these two get cleared at opposite times.** All
 three `live_turns` fields die together the moment a turn ends (normally, via
@@ -677,7 +688,8 @@ the initial state. `consume_graph`'s first write replaces the status with
   show only entries it hasn't seen. Adaptive thinking means some rounds have none.
 - **`call_tool`:** `call_tool_status(names)`, from the tools the batch dispatched.
   `submit_answer` is ignored. A chart in the batch (`generate_chart` or `generate_beeswarm` -- `CHART_TOOLS`, `app/config.py`) gives `"Prepared the chart"`, a combine
-  gives `"Combined results"`, and a batch with only `manage_tasks` gives `"Managed the task plan"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
+  gives `"Combined results"`, and a batch with only `manage_tasks` and/or `manage_notes` gives `"Managed the task plan"`,
+  `"Managed memory"`, or `"Managed memory and the task plan"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
   `app/config.py`) distinct sources, such as `"Gathered results from BigQuery, project
   documentation, and semantic model"`, or `"Gathered results from {n} sources"` above that.
   Source names come from `SOURCE_NAMES`. **If every call in the batch errored**, this is
@@ -793,9 +805,9 @@ to it cost nothing extra.
 **No platform character limit on the control — confirmed live, not assumed**
 (same finding as `.claude/rules/orchestrator.md`'s answer-length guardrail:
 Power Fx's Text/HTML text properties have no preset character cap; memory is
-the real constraint). `MAX_ANSWER_CHARS` (7000, raised from 6000 once inline
-`<img>` with signed URLs was chosen over a native `Image` control —
-`docs/build-order.md`) is a readability ceiling, not a workaround for a
+the real constraint). `MAX_ANSWER_CHARS` (14,000, measured without image URLs; it was
+7000, raised from 6000 once inline `<img>` with signed URLs was chosen over
+a native `Image` control — `docs/build-order.md`) is a readability ceiling, not a workaround for a
 control limit that doesn't exist.
 
 **Return a normal `AgentResponse` wherever possible, not an HTTP error.** Power

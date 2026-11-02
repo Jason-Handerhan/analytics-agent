@@ -29,7 +29,7 @@ from app.gateway.entry_exit import (
     build_updated_history,
     rebuild_paused_messages,
 )
-from app.orchestrator.state import AgentState
+from app.orchestrator.state import AgentState, StoredTurn
 
 
 # --- Building a turn: human message and initial state ----------------------------------------
@@ -64,6 +64,7 @@ def test_build_initial_state():
         active_page="Financial Impact",
         image_base64=None,
         history_messages=[],
+        history_verified_numbers=[1.5, 2.5],
         notes=[],
         task_plan={},
         turn_started_at=started_at,
@@ -79,6 +80,7 @@ def test_build_initial_state():
     assert state["model_provider"] == "anthropic"
     assert state["turn_started_at"] == started_at
     assert state["history_messages"] == []
+    assert state["history_verified_numbers"] == [1.5, 2.5] and state["verified_numbers"] == []
     assert len(state["messages"]) == 1
     assert isinstance(state["messages"][0], HumanMessage)
     assert "Financial Impact" in state["messages"][0].content
@@ -110,7 +112,8 @@ def test_build_history_messages_ignores_map_key_order():
     def stored(chart_spec):
         call = {"name": "generate_chart", "args": {"spec": chart_spec, "source_ref": "ref_1"}, "id": "toolu_1"}
         block = {"type": "tool_use", "id": "toolu_1", "name": "generate_chart", "input": call["args"]}
-        return {"messages": messages_to_dict([AIMessage(content=[block], tool_calls=[call])])}
+        return StoredTurn(messages=messages_to_dict([AIMessage(content=[block], tool_calls=[call])]),
+                          timestamp=datetime.now(timezone.utc))
 
     original = build_history_messages([stored(spec)])
     reordered = build_history_messages([stored(reordered_spec)])
@@ -119,12 +122,10 @@ def test_build_history_messages_ignores_map_key_order():
     assert json.dumps(original[0].tool_calls) == json.dumps(reordered[0].tool_calls)
 
 
-def _fake_turn(label: str) -> dict:
+def _fake_turn(label: str) -> StoredTurn:
     """One minimal stored turn -- just enough to be distinguishable and FIFO-trimmable."""
-    return {
-        "messages": messages_to_dict([HumanMessage(content=label)]),
-        "timestamp": datetime.now(timezone.utc),
-    }
+    return StoredTurn(messages=messages_to_dict([HumanMessage(content=label)]),
+                      timestamp=datetime.now(timezone.utc))
 
 
 def test_build_updated_history_redacts_and_round_trips():
@@ -151,10 +152,11 @@ def test_build_updated_history_redacts_and_round_trips():
     state = {"messages": [
         HumanMessage(content="How many orders?"),
         agent_call, bq_result, other_result, failed_call, answer,
-    ]}
+    ], "verified_numbers": [42.0]}
 
     updated = build_updated_history(history_messages, state)
     assert len(updated) == 2
+    assert updated[0].verified_numbers == [] and updated[1].verified_numbers == [42.0]
 
     reconstructed = build_history_messages(updated)
 

@@ -158,9 +158,12 @@ class AgentState(TypedDict):
     # at LLM-call time only, same as the static system prompt:
     # model.ainvoke([system_message, *state["history_messages"], *state["messages"]]).
     history_messages: list[BaseMessage]
-    notes: list[dict]            # standing notes, read with the history (tool not built yet)
-    task_plan: TaskPlan          # {"scope", "tasks"}, read with the history; attached to the
-                                 # turn's first message at request time, never in `messages`
+    history_verified_numbers: list[float]  # verified_numbers of the stored turns still in the
+                                           # history (StoredTurn); part of the numeric pool
+    notes: list[Note]            # standing notes ({id, kind, text}), read with the history;
+                                 # attached with the task plan to the turn's first message at
+                                 # request time, never in `messages`
+    task_plan: TaskPlan          # {"scope", "tasks"}, read with the history; attached the same way
 
     # Seeded at invocation with just the question, then accumulated during
     # the loop. Plain BaseMessage, not a wrapper — passes straight to
@@ -187,6 +190,9 @@ class AgentState(TypedDict):
                                  # out of it. Not on AgentResponse — callers
                                  # get a verified answer or an honest decline,
                                  # never a flag to interpret.
+    verified_numbers: list[float]  # set by finalize: this turn's claims plus table values when
+                                   # verified and not cancelled, else empty. Stored on the turn's
+                                   # history entry and in its ledger row
 
     # Resource accumulators
     bytes_consumed: int          # Cumulative across EVERY tool loop this turn,
@@ -334,12 +340,13 @@ a table it already wrote.
 # config.py is the shared, dependency-light module both sides can import
 # without pulling in the other.
 
-def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
+def build_numeric_pool(tool_calls: list[ToolCallRecord], history_verified_numbers: list[float]) -> set[float]:
     """Every number the answer may cite: this turn's successful query results
     (and combine_results output, which only recombines them, including null-to-0
     fills), every numeric leaf -- never incidental numbers embedded in code, doc
-    chunks, or metadata -- plus the verified_numbers of a successful recall."""
-    pool: set[float] = set()
+    chunks, or metadata -- plus the verified_numbers of a successful recall and of
+    the stored turns still in the history."""
+    pool: set[float] = set(history_verified_numbers)
     for tc in tool_calls:
         if not tc["success"]:
             continue
@@ -393,13 +400,27 @@ def verify_response(state: AgentState) -> tuple[bool, str | None]:
     # table values, both checked against the same pool. Every unmatched claim
     # is collected and reported together, not just the first -- a multi-number
     # answer that fixed one claim per retry was the real bug this replaced.
-    pool = build_numeric_pool(state["tool_calls"])
+    pool = build_numeric_pool(state["tool_calls"], state["history_verified_numbers"])
     all_claimed = state["all_prose_numeric_claims"] + extract_table_values(state["answer_markdown"])
     unmatched = [c for c in all_claimed if not claim_matches_pool(c, pool)]
     if unmatched:
-        return False, f"{unmatched} do not match any tool result this turn."
+        return False, (
+            f"{unmatched} do not match any number this answer is allowed to cite: this turn's query results, "
+            "numbers returned by get_conversation_findings or search_conversation_findings, or the claims "
+            "and table values of earlier turns still in your message history, at the precision they stated "
+            "them. Re-run the query for them, restate them exactly as that earlier turn did, or call "
+            "get_conversation_findings for older turns.")
     return True, None
 ```
+
+**The pool has three sources.** This turn's `NUMERIC_SOURCE_TOOLS` results; a successful recall's
+`verified_numbers` (`MEMORY_SOURCE_TOOLS`); and `history_verified_numbers`, the `verified_numbers` stored on
+each turn still in the history (`StoredTurn`, `.claude/rules/gateway.md`; decided 2026-11-01). The third is the
+same set a recall returns for those turns, reachable without a call, so a summary can restate a recent turn's
+numbers without a retry. A declined or cancelled turn stores none, and neither a compaction summary nor an
+entry written before the field existed has any. Matching is unchanged and precision-aware, so a restatement
+can't carry more decimals than the turn stated. What the model is told it may state lives in one place,
+`submit_answer`'s description (`.claude/rules/tools.md`).
 
 **`verify_response` checks `answer_markdown` only, never `clarifying_question`.**
 On a question turn, `answer_markdown` already holds the question (copied in
@@ -821,9 +842,9 @@ a cheap deterministic filter in front of it.
 under `strict=True` and produces well-formed calls on OpenAI and Gemini
 exactly as it already did on Anthropic — no reshaping needed.
 
-**Enabled globally, 2026-10-02 — four tools bound outside it on Claude
+**Enabled globally, 2026-10-02 — five tools bound outside it on Claude
 (`generate_chart`, plus the memory and state tools `get_conversation_findings`,
-`search_conversation_findings` and `manage_tasks`), now
+`search_conversation_findings`, `manage_tasks` and `manage_notes`), now
 provider-conditional.** Claude's `strict=True` rejects `oneOf`/
 `discriminator` and `ge=`/`le=` outright, both of which `generate_chart`'s
 schema needs (`docs/chart-tool.md`); confirmed `ge=`/`le=` also broke
@@ -838,7 +859,7 @@ with no workaround at all, so `generate_chart_tool` and the memory tools in
 turn, not a module-level list, now that provider is per-request) that
 branch by provider; every other tool binds identically regardless. The
 memory and state tools (`get_conversation_findings`, `search_conversation_findings`,
-`manage_tasks`) move out of strict on Claude only because every strict schema shares one
+`manage_tasks`, `manage_notes`) move out of strict on Claude only because every strict schema shares one
 size limit on the compiled grammar (a 400, "compiled grammar is too large");
 they stay validated at dispatch.
 `agent_node` binds with `bind_tools(build_tools_list(state["model_provider"]),
@@ -902,6 +923,7 @@ SOURCE_LABELS = {
     "get_conversation_findings": "Searched memory",
     "search_conversation_findings": "Searched memory",
     "manage_tasks": "Managed task plan",
+    "manage_notes": "Managed memory",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -984,14 +1006,16 @@ properties have no preset character limit at all (memory is the real
 constraint). Corrected here and in `docs/frontend.md`, which also has an open
 decision — inline chart images vs. a separate `Image` control — that would
 bump this to 7000 if resolved one particular way. Decide before Phase 4's
-frontend build-out (`docs/build-order.md`).
+frontend build-out (`docs/build-order.md`). **Now 14,000 (2026-11-01), measured without image
+URLs:** a signed chart URL is about 850 characters, so several charts used up the old budget, and a
+long multi-chart summary kept retrying under it.
 
 Two checks, not one: total length, and the size of any single table within
 it — a table can blow well past what's reasonable to read in chat while
 still fitting under the character cap.
 
 ```python
-MAX_ANSWER_CHARS = 6000        # real margin below 16,384 — HTML inflation + card chrome
+MAX_ANSWER_CHARS = 14000       # readability ceiling, not a platform limit; image URLs are not counted
 MAX_ANSWER_TABLE_ROWS = 25     # a table this size is still fine as generate_chart's
                                 # input data -- this only ever checks answer_markdown,
                                 # never a tool's raw result, so the chart path is untouched
@@ -1000,10 +1024,6 @@ MAX_ANSWER_TABLE_ROWS = 25     # a table this size is still fine as generate_cha
 # verification's retries. Both are the graph's routing conditions.
 MAX_LENGTH_RETRIES = 2
 MAX_VERIFY_RETRIES = 2
-
-def check_answer_length(answer_markdown: str) -> bool:
-    return len(answer_markdown) <= MAX_ANSWER_CHARS
-
 
 # Shared GFM table parser (mistune, AST walk) -- used by check_table_rows
 # here and by extract_table_values below. Replaced an earlier hand-rolled
@@ -1024,17 +1044,24 @@ def check_table_rows(answer_markdown: str) -> bool:
     return True
 
 
-def check_answer_displayable(answer_markdown: str) -> bool:
-    return check_answer_length(answer_markdown) and check_table_rows(answer_markdown)
+def extract_image_urls(answer_markdown: str) -> list[str]:
+    """Every markdown image URL in the answer, in order (walks paragraphs, tables, lists)."""
+    ...
+
+
+def answer_text_length(answer_markdown: str) -> int:
+    """Characters in the answer, not counting image URLs: they render as pictures, not text."""
+    return len(answer_markdown) - sum(len(url) for url in extract_image_urls(answer_markdown))
 
 
 async def check_length_node(state: AgentState) -> dict:
     answer = state["answer_markdown"]
-    if check_answer_displayable(answer):
+    length = answer_text_length(answer)
+    if length <= MAX_ANSWER_CHARS and check_table_rows(answer):
         return {}
-    if not check_answer_length(answer):
-        note = ("Your answer is too long to display. Summarize the key findings "
-                "concisely, or generate a chart instead of listing rows.")
+    if length > MAX_ANSWER_CHARS:
+        note = (f"Your answer is {length:,} characters; the limit is {MAX_ANSWER_CHARS:,}, not counting image "
+                "URLs. Summarize the key findings concisely, or generate a chart instead of listing rows.")
     else:
         note = (f"Your answer includes a table with more than {MAX_ANSWER_TABLE_ROWS} rows. "
                 "Show only the top results, summarize the rest, or generate a chart "
@@ -1391,7 +1418,8 @@ async def route_after_call_tool(state: AgentState) -> str:
 async def route_after_check_length(state: AgentState) -> str:
     if await is_cancelled(state["conversation_id"]):
         return "finalize"
-    if check_answer_displayable(state["answer_markdown"]):
+    answer = state["answer_markdown"]
+    if answer_text_length(answer) <= MAX_ANSWER_CHARS and check_table_rows(answer):
         return "verify"
     if state["length_retry_count"] < MAX_LENGTH_RETRIES:
         return "agent"
@@ -1515,8 +1543,8 @@ async def agent_node(state: AgentState) -> dict:
     if state["model_provider"] == "anthropic":
         history = mark_anthropic_history_cache(history)
     messages = state["messages"]
-    if state["task_plan"].get("tasks"):
-        messages = attach_task_plan(messages, state["task_plan"])
+    if state["notes"] or state["task_plan"].get("tasks"):
+        messages = attach_context(messages, state["notes"], state["task_plan"])
     seconds_left = GATEWAY_TURN_TIMEOUT_SECONDS - (now - state["turn_started_at"]).total_seconds()
     if seconds_left <= TURN_WARNING_SECONDS_REMAINING:
         messages = [*messages, HumanMessage(content=time_check)]    # the text is in orchestrator.py
@@ -1535,8 +1563,9 @@ sorts map keys (`.claude/rules/gateway.md`), and a history that has
 that grows without bound defeats it (the first entry changes every turn),
 which compaction prevents. OpenAI and Gemini cache automatically.
 
-**What `agent_node` adds to the request, never to state.** The task plan goes ahead of the turn's first
-message and, in the last `TURN_WARNING_SECONDS_REMAINING` seconds of the turn budget, a time check goes at
+**What `agent_node` adds to the request, never to state.** The saved notes, then the task plan, go ahead
+of the turn's first message (`attach_context`; each block's header says it is current as of this message
+and that earlier `manage_notes`/`manage_tasks` calls in the history are already reflected) and, in the last `TURN_WARNING_SECONDS_REMAINING` seconds of the turn budget, a time check goes at
 the end. Both are built on copies at request time, so neither is in `state["messages"]`, neither is saved
 to history, and both sit after the cache breakpoints (`docs/conversation-memory.md`).
 
@@ -1627,7 +1656,8 @@ sees matches what history and the ledger keep), then `needs_approval`, then
 when `verified and not cancelled`, it builds the row from the values it already
 holds plus `verified_numbers` (`all_prose_numeric_claims` +
 `extract_table_values(answer_markdown)`) and awaits it in an `asyncio.gather`
-with the telemetry write. The findings writer logs its own failures, so a
+with the telemetry write. The same list is returned as state `verified_numbers` (empty
+otherwise), which `build_updated_history` stores on the turn's history entry. The findings writer logs its own failures, so a
 ledger gap can't fail the turn.
 
 **`finalize` never touches `live_turns` — that lives in `consume_graph`

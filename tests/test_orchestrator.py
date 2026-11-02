@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 
 from app.config import (
     GATEWAY_TURN_TIMEOUT_SECONDS,
+    MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_LENGTH_RETRIES,
     MAX_VERIFY_RETRIES,
@@ -21,10 +22,12 @@ from app.config import (
 import app.orchestrator.orchestrator as orchestrator
 from app.orchestrator.orchestrator import (
     ToolBatch,
-    attach_task_plan,
+    attach_context,
     build_tool_call_records_and_messages,
     call_tool_node,
+    answer_text_length,
     check_table_rows,
+    extract_image_urls,
     extract_table_values,
     finalize_node,
     iteration_cap_update,
@@ -99,30 +102,38 @@ def test_mark_anthropic_history_cache():
     assert breakpoints(orchestrator.mark_anthropic_history_cache([question("q"), AIMessage(content="")])) == []
 
 
-def test_attach_task_plan():
-    """The plan goes ahead of the turn's first message on a copy: numbered tasks with status words,
-    the scope line, and the all-done hint, for string and block content, with the original
-    messages untouched."""
+def test_attach_context():
+    """Notes then the plan go ahead of the turn's first message on a copy: notes with ids and kinds, numbered
+    tasks with status words, the scope line, and the all-done hint, for string and block content, with the
+    original messages untouched."""
     question = HumanMessage(content="What is next?", additional_kwargs={"turn_start": "t1"})
     messages = [question, AIMessage(content="ok")]
+    notes = [{"id": 2, "kind": "preference", "text": "Show the SQL."}, {"id": 5, "kind": "goal", "text": "Find drivers."}]
     plan = {"scope": "Model: X.", "tasks": [{"text": "A", "status": "done"}, {"text": "B", "status": "in_progress"},
                                             {"text": "C", "status": "todo"}]}
 
-    text = attach_task_plan(messages, plan)[0].content
+    text = attach_context(messages, notes, plan)[0].content
     assert text.endswith("\n\nWhat is next?")
+    assert "Note 2 (preference): Show the SQL." in text and "Note 5 (goal): Find drivers." in text
+    assert text.index("Note 5") < text.index("Saved task plan")
     assert "Scope for every task: Model: X." in text
     assert "1. [done] A" in text and "2. [in progress] B" in text and "3. [todo] C" in text
     assert "All tasks are done" not in text
 
-    attached = attach_task_plan(messages, plan)
+    attached = attach_context(messages, notes, plan)
     assert attached[0].additional_kwargs == question.additional_kwargs and attached[1] is messages[1]
     assert question.content == "What is next?"          # the message in state is not changed
 
-    all_done = attach_task_plan(messages, {"tasks": [{"text": "A", "status": "done"}]})[0].content
+    notes_only = attach_context(messages, notes, {})[0].content
+    assert "Note 2" in notes_only and "Saved task plan" not in notes_only
+    plan_only = attach_context(messages, [], plan)[0].content
+    assert "Saved task plan" in plan_only and "Notes the user asked" not in plan_only
+
+    all_done = attach_context(messages, [], {"tasks": [{"text": "A", "status": "done"}]})[0].content
     assert "All tasks are done; clear the plan" in all_done and "Scope for every task" not in all_done
 
     with_image = HumanMessage(content=[{"type": "text", "text": "Q"}, {"type": "image_url", "image_url": {"url": "data:x"}}])
-    assert [b["type"] for b in attach_task_plan([with_image], plan)[0].content] == ["text", "text", "image_url"]
+    assert [b["type"] for b in attach_context([with_image], notes, plan)[0].content] == ["text", "text", "image_url"]
 
 
 @pytest.mark.asyncio
@@ -145,7 +156,7 @@ async def test_agent_node_adds_time_check_near_the_deadline(monkeypatch):
     monkeypatch.setattr(orchestrator, "get_static_context", lambda: "STATIC")
 
     def state_started(seconds_ago):
-        return {"model": "m", "model_provider": "openai", "history_messages": [], "task_plan": {}, "llm_calls": 0,
+        return {"model": "m", "model_provider": "openai", "history_messages": [], "notes": [], "task_plan": {}, "llm_calls": 0,
                 "messages": [HumanMessage(content="Question?")],
                 "turn_started_at": datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)}
 
@@ -394,6 +405,17 @@ def test_resolve_chart_and_combine_data():
 # The table and numeric checks applied to a submitted answer.
 
 
+def test_answer_text_length_excludes_image_urls():
+    """Image URLs, wherever they sit (paragraph, table cell, list item), are found and left out of the length;
+    text over the cap still counts in full."""
+    url_a, url_b, url_c = (f"https://x.com/{name}.png?sig={'s' * 500}" for name in "abc")
+    answer = "\n\n".join([
+        "Intro", f"![A]({url_a})", f"| a | b |\n|---|---|\n| 1 | ![B]({url_b}) |", f"- item ![C]({url_c})"])
+    assert extract_image_urls(answer) == [url_a, url_b, url_c]
+    assert answer_text_length(answer) == len(answer) - len(url_a) - len(url_b) - len(url_c)
+    assert answer_text_length("x" * (MAX_ANSWER_CHARS + 1)) == MAX_ANSWER_CHARS + 1
+
+
 def test_check_table_rows():
     """True only when every table's row count is within MAX_ANSWER_TABLE_ROWS."""
     within_cap = "| A |\n|---|\n" + "\n".join(f"| {i} |" for i in range(MAX_ANSWER_TABLE_ROWS))
@@ -441,7 +463,8 @@ def test_verify_response():
 
     # No submit_answer call -- empty answer_markdown
     unsubmitted = {"answer_markdown": "", "all_prose_numeric_claims": [],
-                   "suggested_follow_ups": [], "tool_calls": tool_calls}
+                   "suggested_follow_ups": [], "tool_calls": tool_calls,
+                   "history_verified_numbers": []}
     verified, message = verify_response(unsubmitted)
     assert verified is False
     assert "No valid answer was submitted" in message
@@ -452,6 +475,7 @@ def test_verify_response():
         "all_prose_numeric_claims": [66.8],
         "suggested_follow_ups": [],
         "tool_calls": tool_calls,
+        "history_verified_numbers": [],
     }
     assert verify_response(good) == (True, None)
 
@@ -467,7 +491,8 @@ def test_verify_response():
     overview_call = {"name": "get_conversation_findings", "success": True,
                      "result": {"total_turns": 7, "turns": [{"turn": 1, "approx_tokens": 99}]}}
     overview_only = {"answer_markdown": "Some answer.", "all_prose_numeric_claims": [42.0],
-                     "suggested_follow_ups": [], "tool_calls": [overview_call]}
+                     "suggested_follow_ups": [], "tool_calls": [overview_call],
+                     "history_verified_numbers": []}
     verified, message = verify_response(overview_only)
     assert verified is False and "42.0" in message
 
@@ -482,16 +507,23 @@ def test_verify_response():
                  "result": {"topics": [{"tag": "shap", "count": 4}], "entities": []}}
     assert verify_response({**searched, "all_prose_numeric_claims": [4.0], "tool_calls": [tags_call]})[0] is False
 
+    # Numbers a stored turn verified are citable as stated; more precision than it stored is not
+    from_history = {**good, "answer_markdown": "Some answer.", "all_prose_numeric_claims": [0.37],
+                    "history_verified_numbers": [0.37]}
+    assert verify_response(from_history) == (True, None)
+    assert verify_response({**from_history, "all_prose_numeric_claims": [0.3674]})[0] is False
+
     # Claim with no matching pool value
     bad = {
         "answer_markdown": "Some answer.",
         "all_prose_numeric_claims": [42.0],
         "suggested_follow_ups": [],
         "tool_calls": tool_calls,
+        "history_verified_numbers": [],
     }
     verified, message = verify_response(bad)
     assert verified is False
-    assert "42.0" in message and "do not match any tool result this turn" in message
+    assert "42.0" in message and "do not match any number this answer is allowed to cite" in message
 
     # Multiple unmatched claims -- all reported together, not just the first
     multi_bad = {
@@ -499,6 +531,7 @@ def test_verify_response():
         "all_prose_numeric_claims": [42.0, 99.0],
         "suggested_follow_ups": [],
         "tool_calls": tool_calls,
+        "history_verified_numbers": [],
     }
     verified, message = verify_response(multi_bad)
     assert verified is False

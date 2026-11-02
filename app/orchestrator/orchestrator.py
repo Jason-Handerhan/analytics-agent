@@ -66,7 +66,7 @@ from app.config import (
 from app.orchestrator.context import build_static_context, get_static_context
 from app.orchestrator.conversation_memory.writer import build_findings_row, write_findings_row
 from app.shared_helpers import is_cancelled, label_chartable_result
-from app.orchestrator.state import AgentState, TaskPlan, ToolCallRecord, TurnError
+from app.orchestrator.state import AgentState, Note, TaskPlan, ToolCallRecord, TurnError
 from app.orchestrator.tools import (
     CombineResultsToolCallArgs,
     GenerateChartToolCallArgs,
@@ -79,6 +79,7 @@ from app.orchestrator.tools import (
     get_conversation_findings,
     get_measure_dax,
     get_page_info,
+    manage_notes,
     manage_tasks,
     run_bigquery_sql,
     search_conversation_findings,
@@ -96,7 +97,8 @@ CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
 # Memory tools are bound outside Anthropic's strict mode: their flat schemas are still validated at
 # dispatch, and every strict schema counts toward a size limit on the compiled grammar.
-ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "manage_tasks"}
+ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "manage_tasks",
+                              "manage_notes"}
 
 # finalize_node's canned messages -- one per terminal state with no real answer yet.
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
@@ -138,6 +140,7 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "get_conversation_findings": get_conversation_findings,
         "search_conversation_findings": search_conversation_findings,
         "manage_tasks": manage_tasks,
+        "manage_notes": manage_notes,
         "generate_beeswarm": generate_beeswarm,
     }
     get_static_context()  # warms the @lru_cache at startup, not on the first real turn
@@ -402,7 +405,7 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
     # Memory tools that only need the conversation id
-    if tc["name"] in ("get_conversation_findings", "manage_tasks"):
+    if tc["name"] in ("get_conversation_findings", "manage_tasks", "manage_notes"):
         full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
@@ -498,8 +501,23 @@ _markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
 
 # check_length_node: answer-length guardrail
 
-def check_answer_length(answer_markdown: str) -> bool:
-    return len(answer_markdown) <= MAX_ANSWER_CHARS
+def extract_image_urls(answer_markdown: str) -> list[str]:
+    """Every markdown image URL in the answer, in order."""
+    urls: list[str] = []
+
+    def walk(nodes: list[dict]) -> None:
+        for node in nodes:
+            if node["type"] == "image":
+                urls.append(node["attrs"]["url"])
+            walk(node.get("children", []))
+
+    walk(_markdown_ast(answer_markdown))
+    return urls
+
+
+def answer_text_length(answer_markdown: str) -> int:
+    """Characters in the answer, not counting image URLs: they render as pictures, not text."""
+    return len(answer_markdown) - sum(len(url) for url in extract_image_urls(answer_markdown))
 
 
 def check_table_rows(answer_markdown: str) -> bool:
@@ -572,10 +590,10 @@ def extract_table_values(answer_markdown: str) -> list[float]:
     return values
 
 
-def build_numeric_pool(tool_calls: list[ToolCallRecord]) -> set[float]:
-    """Every number the answer may cite: this turn's successful BigQuery/DAX results
-    (every numeric leaf), plus verified_numbers from a successful recall."""
-    pool: set[float] = set()
+def build_numeric_pool(tool_calls: list[ToolCallRecord], history_verified_numbers: list[float]) -> set[float]:
+    """Every number the answer may cite: this turn's successful BigQuery/DAX results (every numeric leaf),
+    verified_numbers from a successful recall, and the verified_numbers of the stored turns in the history."""
+    pool: set[float] = set(history_verified_numbers)
     for tc in tool_calls:
         if not tc["success"]:
             continue
@@ -627,6 +645,7 @@ SOURCE_LABELS = {
     "get_conversation_findings": "Searched memory",
     "search_conversation_findings": "Searched memory",
     "manage_tasks": "Managed task plan",
+    "manage_notes": "Managed memory",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -716,12 +735,22 @@ def mark_anthropic_history_cache(history: list[BaseMessage]) -> list[BaseMessage
     return marked_history
 
 
+def render_notes(notes: list[Note]) -> str:
+    """The saved notes as text for the model."""
+    lines = ["Notes the user asked you to keep for this conversation. This list is current as of this "
+             "message. Earlier manage_notes calls in the conversation are already reflected here, so ignore "
+             "them. If you change the notes after this message, your latest manage_notes calls take "
+             "precedence. Follow these when you query and answer."]
+    lines += [f"Note {n['id']} ({n['kind']}): {n['text']}" for n in notes]
+    return "\n".join(lines)
+
+
 def render_task_plan(task_plan: TaskPlan) -> str:
     """The saved task plan as text for the model."""
     tasks = task_plan["tasks"]
-    lines = ["Saved task plan for this conversation as of the start of this turn. If you update it with "
-             "manage_tasks this turn, your latest call is the current version. Earlier manage_tasks calls "
-             "in the history are outdated."]
+    lines = ["Saved task plan for this conversation. This plan is current as of this message. Earlier "
+             "manage_tasks calls in the conversation are already reflected here, so ignore them. If you "
+             "update it after this message, your latest manage_tasks calls take precedence."]
     if task_plan.get("scope"):
         lines.append(f"Scope for every task: {task_plan['scope']}")
     for number, task in enumerate(tasks, start=1):
@@ -731,13 +760,18 @@ def render_task_plan(task_plan: TaskPlan) -> str:
     return "\n".join(lines)
 
 
-def attach_task_plan(messages: list[BaseMessage], task_plan: TaskPlan) -> list[BaseMessage]:
-    """Returns messages with the task plan ahead of the turn's first message, on a copy so state
-    (and so the saved history) never contains it."""
-    plan_text = render_task_plan(task_plan)
+def attach_context(messages: list[BaseMessage], notes: list[Note], task_plan: TaskPlan) -> list[BaseMessage]:
+    """Returns messages with the saved notes and task plan ahead of the turn's first message, on a copy and new
+    list so state (and thus the saved history) never contains them."""
+    parts = []
+    if notes:
+        parts.append(render_notes(notes))
+    if task_plan.get("tasks"):
+        parts.append(render_task_plan(task_plan))
+    context_text = "\n\n".join(parts)
     first = messages[0]
-    content = (f"{plan_text}\n\n{first.content}" if isinstance(first.content, str)
-               else [{"type": "text", "text": plan_text}, *first.content])
+    content = (f"{context_text}\n\n{first.content}" if isinstance(first.content, str)
+               else [{"type": "text", "text": context_text}, *first.content])
     return [first.model_copy(update={"content": content}), *messages[1:]]
 
 
@@ -745,20 +779,24 @@ def attach_task_plan(messages: list[BaseMessage], task_plan: TaskPlan) -> list[B
 
 async def agent_node(state: AgentState) -> dict:
     """Calls the LLM with tools bound. Emits tool calls -- the final answer
-    only ever arrives via submit_answer, never plain text (gauranteed by verify node)"""
+    only ever arrives via submit_answer, never plain text (gauranteed by verify node).
+    Marking caches for history messages and attaching notes, the task plan and timeout checks are done
+    on object copies and create new lists to avoid altering state["messages"] and state["history_messages"].
+    state["messages"] is saved to history; the notes, task plan and time check stay out of it so they aren't
+    repeated (and billed) every turn."""
     
     model = build_model(state["model"], state["model_provider"]).bind_tools(
         build_tools_list(state["model_provider"]), strict=True)
     
     system_message = SystemMessage(content=build_static_context(state["model_provider"], get_static_context()))
-    
+
     history = state["history_messages"]
     if state["model_provider"] == "anthropic":
         history = mark_anthropic_history_cache(history)
 
     messages = state["messages"]
-    if state["task_plan"].get("tasks"):
-        messages = attach_task_plan(messages, state["task_plan"])
+    if state["notes"] or state["task_plan"].get("tasks"):
+        messages = attach_context(messages, state["notes"], state["task_plan"])
 
     seconds_left = GATEWAY_TURN_TIMEOUT_SECONDS - (datetime.now(timezone.utc) - state["turn_started_at"]).total_seconds()
     if seconds_left <= TURN_WARNING_SECONDS_REMAINING:
@@ -769,6 +807,8 @@ async def agent_node(state: AgentState) -> dict:
             "with what you have, saying plainly that it is partial and what is left. Query results from this turn "
             "are not kept, so the next turn will need to run its queries again. Answer only by calling "
             "submit_answer; a plain-text reply is not delivered.")
+
+        #New list -- avoids altering state["messages"]
         messages = [*messages, HumanMessage(content=time_check)]
         
     response = await model.ainvoke([system_message, *history, *messages])
@@ -925,11 +965,12 @@ async def check_length_node(state: AgentState) -> dict:
     """Checks answer_markdown length and table size; on failure, requests a
     shorter answer or a smaller table."""
     answer = state["answer_markdown"]
-    if check_answer_length(answer) and check_table_rows(answer):
+    length = answer_text_length(answer)
+    if length <= MAX_ANSWER_CHARS and check_table_rows(answer):
         return {}
-    if not check_answer_length(answer):
-        note = ("Your answer is too long to display. Summarize the key findings "
-                "concisely, or generate a chart instead of listing rows.")
+    if length > MAX_ANSWER_CHARS:
+        note = (f"Your answer is {length:,} characters; the limit is {MAX_ANSWER_CHARS:,}, not counting image "
+                "URLs. Summarize the key findings concisely, or generate a chart instead of listing rows.")
     else:
         note = (f"Your answer includes a table with more than {MAX_ANSWER_TABLE_ROWS} rows. "
                 "Show only the top results, summarize the rest, or generate a chart "
@@ -954,11 +995,16 @@ def verify_response(state: AgentState) -> tuple[bool, str | None]:
         return False, (f"No valid answer was submitted: {e}. Call submit_answer "
                         "with your final answer_markdown and numeric claims.")
 
-    pool = build_numeric_pool(state["tool_calls"])
+    pool = build_numeric_pool(state["tool_calls"], state["history_verified_numbers"])
     all_claimed = state["all_prose_numeric_claims"] + extract_table_values(state["answer_markdown"])
     unmatched = [c for c in all_claimed if not claim_matches_pool(c, pool)]
     if unmatched:
-        return False, f"{unmatched} do not match any tool result this turn."
+        return False, (
+            f"{unmatched} do not match any number this answer is allowed to cite: this turn's query results, "
+            "numbers returned by get_conversation_findings or search_conversation_findings, or the claims "
+            "and table values of earlier turns still in your message history, at the precision they stated "
+            "them. Re-run the query for them, restate them exactly as that earlier turn did, or call "
+            "get_conversation_findings for older turns.")
     return True, None
 
 
@@ -984,6 +1030,7 @@ async def finalize_node(state: AgentState) -> dict:
 
     #Set needs_approval to false if cancelled. Cancelled takes priority over approval workflow.
     needs_approval = False if cancelled else state["needs_approval"]
+    verified_numbers: list[float] = []
 
     #Cancelled Branch: Cancel message
     if cancelled:
@@ -1076,6 +1123,7 @@ async def finalize_node(state: AgentState) -> dict:
         "sources": sources,
         "cancelled": cancelled,
         "needs_approval": needs_approval,
+        "verified_numbers": verified_numbers,
     }
 
 
@@ -1107,7 +1155,7 @@ async def route_after_check_length(state: AgentState) -> str:
     if await is_cancelled(state["conversation_id"]):
         return "finalize"
     answer = state["answer_markdown"]
-    if check_answer_length(answer) and check_table_rows(answer):
+    if answer_text_length(answer) <= MAX_ANSWER_CHARS and check_table_rows(answer):
         return "verify"
     if state["length_retry_count"] < MAX_LENGTH_RETRIES:
         return "agent"

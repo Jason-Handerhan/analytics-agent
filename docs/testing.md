@@ -242,7 +242,7 @@ generically; `assert_owns_conversation` has its own test), with no real
 logic of their own to exercise behind a mock. Proven live instead, in
 `notebooks/test_chat_history_endpoints.ipynb`.
 
-## 4d. Conversation memory (`conversation_findings`, `get_conversation_findings`, `search_conversation_findings`, `manage_tasks`)
+## 4d. Conversation memory (`conversation_findings`, `get_conversation_findings`, `search_conversation_findings`, `manage_tasks`, `manage_notes`)
 
 `docs/conversation-memory.md`. The row builder is one test; the recall and search
 tools' pure helpers and args validators live in `tests/test_tools.py`, and the pool
@@ -280,8 +280,16 @@ def test_search_conversation_findings_args_validator():
 # A recall's verified_numbers verify a claim; its turn index and approx_tokens
 # do not; an overview-shaped dict result adds nothing and doesn't crash. The same
 # for a search result: a hit's verified_numbers verify a claim, its distance does
-# not, and the tags result adds nothing.
+# not, and the tags result adds nothing. A stored turn's number in
+# history_verified_numbers verifies a claim as stated; the same number with more
+# decimals than the turn stated does not.
 ```
+
+A stored turn carries its `verified_numbers` (`StoredTurn`), covered by assertions in existing tests, not new
+ones: `test_build_updated_history_redacts_and_round_trips` (a verified turn stores its numbers, an earlier
+one stores none), `test_build_initial_state` (`history_verified_numbers` seeded, `verified_numbers` empty),
+and `test_post_ask_success` (the history write carries the turn's `verified_numbers` as the dict Firestore
+receives).
 
 Compaction is one pipeline test plus a failure case, patching only the ledger
 read and the summarizer:
@@ -306,21 +314,39 @@ def test_manage_tasks_args_validator():
     """Blank, overlong and surplus tasks, a second task in progress and an oversized scope are
     rejected; an omitted scope, an empty list and padded text are valid."""
 
+def test_apply_note_action_flow():
+    """Add, update (full replace) and delete on one list: ids are the highest plus 1 and never reused,
+    other notes are untouched."""
+
+def test_apply_note_action_rejections():
+    """An unknown id and a full list raise a ToolError that lists the existing notes."""
+
+def test_manage_notes_args_validator():
+    """Blank or overlong text, and a missing id, kind or text for the action, are rejected."""
+
 # tests/test_orchestrator.py
-def test_attach_task_plan():
-    """The plan goes ahead of the turn's first message on a copy (numbered tasks, status words, scope,
-    all-done hint, block content); the message in state is untouched."""
+def test_attach_context():
+    """Notes then the plan go ahead of the turn's first message on a copy (note ids and kinds, numbered
+    tasks, status words, scope, all-done hint, block content); notes-only and plan-only attach just their
+    own block; the message in state is untouched."""
+
+def test_answer_text_length_excludes_image_urls():
+    """Image URLs in a paragraph, a table cell and a list item are found and left out of the length; text
+    over the cap still counts in full."""
 
 async def test_agent_node_adds_time_check_near_the_deadline(monkeypatch):
     """Within TURN_WARNING_SECONDS_REMAINING of the budget the request ends with a time check built
     at call time; earlier there is none; state is untouched."""
 
 # tests/test_gateway.py -- inside test_consume_graph_writes_status_and_cleans_up
-# A batch with only manage_tasks writes "Managed the task plan".
+# A batch with only manage_tasks writes "Managed the task plan", only manage_notes "Managed memory",
+# and both "Managed memory and the task plan".
 ```
 
 `read`/`write` against BigQuery (`reader.py`, `write_findings_row`), the embedding
-calls, the search SQL, and the tools' bodies are Layer 2 — proven in `notebooks/phase3_graph.ipynb` and
+calls, the search SQL, and the tools' bodies are Layer 2 (`manage_notes`' Firestore transaction, including a
+batch of parallel adds and a mixed batch of deletes, adds and an update, is proven in
+`notebooks/phase3_working_memory.ipynb`) — proven in `notebooks/phase3_graph.ipynb` and
 `notebooks/phase3_conversation_search.ipynb`: mocking the one dependency would mock the
 whole function.
 

@@ -2,9 +2,9 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from typing import TypedDict
 
 import jwt
 from jwt import PyJWKClient
@@ -56,7 +56,7 @@ from app.orchestrator.compaction import CompactionResult, compact_history_pipeli
 from app.orchestrator.conversation_memory.writer import write_summary_row
 from app.orchestrator.orchestrator import graph, init_orchestrator
 from app.shared_helpers import get_firestore_client, live_turn_doc, session_doc
-from app.orchestrator.state import AgentState, TaskPlan
+from app.orchestrator.state import AgentState, Note, StoredTurn, TaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +128,11 @@ async def create_conversation(user_id: str) -> str:
     return conversation_id
 
 
-class SessionMemory(TypedDict):
+@dataclass
+class SessionMemory:
     """What a turn reads from the sessions document."""
-    history_messages: list[dict]
-    notes: list[dict]
+    history_messages: list[StoredTurn]   # key mirrors the sessions document field
+    notes: list[Note]
     task_plan: TaskPlan
 
 
@@ -140,17 +141,17 @@ async def fetch_session_memory(conversation_id: str) -> SessionMemory:
     snap = await session_doc(conversation_id).get()
     stored = snap.to_dict() if snap.exists else {}
     return SessionMemory(
-        history_messages=stored.get("history_messages", []),
+        history_messages=[StoredTurn(**entry) for entry in stored.get("history_messages", [])],
         notes=stored.get("notes", []),
         task_plan=stored.get("task_plan", {}),
     )
 
 
-async def write_history_messages(conversation_id: str, history_messages: list[dict]) -> None:
+async def write_history_messages(conversation_id: str, stored_history: list[StoredTurn]) -> None:
     """Writes the turn's updated history back, and bumps last_activity_at
     for the sessions TTL."""
     await session_doc(conversation_id).set(
-        {"history_messages": history_messages,
+        {"history_messages": [asdict(turn) for turn in stored_history],
          "last_activity_at": datetime.now(timezone.utc) + timedelta(days=SESSIONS_TTL_DAYS)},
         merge=True,
     )
@@ -193,7 +194,9 @@ def call_tool_status(tool_names: list[str]) -> str | None:
         return "Combined results"
     sources = sorted({SOURCE_NAMES[tn] for tn in tool_names if tn in SOURCE_NAMES}) #sorted set
     if not sources:
-        return "Managed the task plan" if "manage_tasks" in tool_names else None
+        managed = [label for tool, label in (("manage_notes", "memory"), ("manage_tasks", "the task plan"))
+                   if tool in tool_names]
+        return f"Managed {' and '.join(managed)}" if managed else None
     if len(sources) > STATUS_MAX_NAMED_SOURCES:
         return f"Gathered results from {len(sources)} sources"
     return f"Gathered results from {join_names(sources)}"
@@ -368,21 +371,23 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
 
     # Fetch history, notes and tasks; compact the history if needed
     memory = await fetch_session_memory(body.conversation_id)
-    history_messages = memory["history_messages"]
+    stored_history = memory.history_messages
 
-    compaction = CompactionResult(stored_history=history_messages)
-    estimated_tokens, stored_bytes = measure_history_size(history_messages)
+    compaction = CompactionResult(stored_history=stored_history)
+    estimated_tokens, stored_bytes = measure_history_size(stored_history)
     if body.approval_decision is None and (
             estimated_tokens > COMPACTION_HISTORY_TOKEN_THRESHOLD
             or stored_bytes > COMPACTION_HISTORY_MAX_BYTES):
         await live_turn_doc(body.conversation_id).set(
             {"status": "Compacting...", "thinking_log": []}, merge=True)
-        compaction = await compact_history_pipeline(body.conversation_id, user_id, history_messages)
+        compaction = await compact_history_pipeline(body.conversation_id, user_id, stored_history)
         if compaction.compacted:
             await asyncio.gather(
                 write_history_messages(body.conversation_id, compaction.stored_history),
                 write_summary_row(compaction.summary_row))
-        history_messages = compaction.stored_history
+        stored_history = compaction.stored_history
+
+    history_verified_numbers = [number for turn in stored_history for number in turn.verified_numbers]
 
     # Build initial state for approved resume
     if body.approval_decision == "approved":
@@ -395,9 +400,10 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             filter_context=pending["filter_context"],
             active_page=pending["active_page"],
             image_base64=None,
-            history_messages=build_history_messages(history_messages),
-            notes=memory["notes"],
-            task_plan=memory["task_plan"],
+            history_messages=build_history_messages(stored_history),
+            history_verified_numbers=history_verified_numbers,
+            notes=memory.notes,
+            task_plan=memory.task_plan,
             turn_started_at=turn_started_at,
         )
         initial_state["messages"] = rebuild_paused_messages(pending["messages"], pending["tool_calls"])
@@ -419,9 +425,10 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             filter_context=body.filter_context,
             active_page=body.active_page,
             image_base64=body.image_base64,
-            history_messages=build_history_messages(history_messages),
-            notes=memory["notes"],
-            task_plan=memory["task_plan"],
+            history_messages=build_history_messages(stored_history),
+            history_verified_numbers=history_verified_numbers,
+            notes=memory.notes,
+            task_plan=memory.task_plan,
             turn_started_at=turn_started_at,
         )
 
@@ -435,7 +442,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
     #Write update history to firestore (Message history write does not occur for needs approval & cancel paths)
     if not final_state["needs_approval"] and not final_state["cancelled"]:
         await write_history_messages(
-            body.conversation_id, build_updated_history(history_messages, final_state)
+            body.conversation_id, build_updated_history(stored_history, final_state)
         )
     return build_agent_response(final_state)
 

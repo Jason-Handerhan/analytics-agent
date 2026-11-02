@@ -196,6 +196,7 @@ class _FakeGraph:
     async def astream(self, initial_state, stream_mode=None, version=None):
         yield {"type": "values", "data": {
             "messages": [],  # build_updated_history's write-back needs this key
+            "verified_numbers": [551399.0],  # and this one
             "answer_markdown": "There were 551,399 orders.",
             "sources": ["Query warehouse"],
             "needs_approval": False,
@@ -228,6 +229,7 @@ def test_post_ask_success(monkeypatch, patch_jwks, auth_headers):
     assert [method for method, _ in live.writes] == ["set", "delete"]
     assert session.writes[0][1]["last_activity_at"] > datetime.now(timezone.utc) + timedelta(
         days=SESSIONS_TTL_DAYS - 1)
+    assert session.writes[0][1]["history_messages"][-1]["verified_numbers"] == [551399.0]
 
     # A normal turn's chat-history row uses the real question text, not a
     # canned "Approved"/"Rejected" label.
@@ -292,6 +294,14 @@ CALL_TOOL_OVER_CAP_CHUNK = {"type": "updates", "data": {"call_tool": {"messages"
 CALL_TOOL_TASK_PLAN_CHUNK = {"type": "updates", "data": {"call_tool": {"messages": [
     ToolMessage(content="Saved", name="manage_tasks", tool_call_id="c8", status="success"),
 ]}}}
+# Memory notes alone, and notes with the task plan, each get their own wording.
+CALL_TOOL_NOTES_CHUNK = {"type": "updates", "data": {"call_tool": {"messages": [
+    ToolMessage(content="Added note 1.", name="manage_notes", tool_call_id="c9", status="success"),
+]}}}
+CALL_TOOL_NOTES_AND_TASKS_CHUNK = {"type": "updates", "data": {"call_tool": {"messages": [
+    ToolMessage(content="Added note 2.", name="manage_notes", tool_call_id="c10", status="success"),
+    ToolMessage(content="Saved", name="manage_tasks", tool_call_id="c11", status="success"),
+]}}}
 CHECK_CHUNK = {"type": "updates", "data": {"check_length": {"length_retry_count": 0}}}
 # A rejected answer writes nothing -- the agent's "Thought" line stays up instead.
 VERIFY_REJECTED_CHUNK = {"type": "updates", "data": {"verify": {"verified": False}}}
@@ -306,7 +316,8 @@ async def test_consume_graph_writes_status_and_cleans_up(monkeypatch):
     """Four rounds through the tool loop, exercising call_tool_status's and
     get_node_status's branches through the real consume_graph path: chart
     priority, a rejected answer writing nothing, an all-error batch's generic
-    retry status, a thinking-free agent round, a task-plan-only batch, an
+    retry status, a thinking-free agent round, a task-plan-only batch, a
+    notes-only batch, a notes-and-task-plan batch, an
     over-cap source count, then a normal verified finalize. The document is
     deleted at the end."""
     _, live = _patch_docs(monkeypatch)
@@ -314,9 +325,11 @@ async def test_consume_graph_writes_status_and_cleans_up(monkeypatch):
         AGENT_CHUNK, CALL_TOOL_CHART_CHUNK, CHECK_CHUNK, VERIFY_REJECTED_CHUNK,
         AGENT_CHUNK_NO_THINKING, CALL_TOOL_ALL_ERROR_CHUNK,
         AGENT_CHUNK_NO_THINKING, CALL_TOOL_TASK_PLAN_CHUNK,
+        AGENT_CHUNK_NO_THINKING, CALL_TOOL_NOTES_CHUNK,
+        AGENT_CHUNK_NO_THINKING, CALL_TOOL_NOTES_AND_TASKS_CHUNK,
         AGENT_CHUNK_NO_THINKING, CALL_TOOL_OVER_CAP_CHUNK, CHECK_CHUNK, VERIFY_CHUNK,
         FINALIZE_CHUNK, FINAL_VALUES]))
-    ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+    ticks = iter([float(t) for t in range(15)])
     monkeypatch.setattr(gateway, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
 
     final_state = await gateway.consume_graph({"conversation_id": "conv-1"})
@@ -333,6 +346,9 @@ async def test_consume_graph_writes_status_and_cleans_up(monkeypatch):
         ("update", {"status": "Thought (1.0s)"}),
         ("update", {"status": "Managed the task plan (1.0s)"}),
         ("update", {"status": "Thought (1.0s)"}),
+        ("update", {"status": "Managed memory (1.0s)"}),
+        ("update", {"status": "Thought (1.0s)"}),
+        ("update", {"status": "Managed memory and the task plan (1.0s)"}),        ("update", {"status": "Thought (1.0s)"}),
         ("update", {"status": "Gathered results from 4 sources (1.0s)"}),
         ("update", {"status": "Verified results (1.0s)"}),
         ("update", {"status": "Prepared your answer (1.0s)"}),
@@ -377,6 +393,7 @@ class _RecordingGraph:
         self.captured_state = initial_state
         yield {"type": "values", "data": {
             "messages": [],
+            "verified_numbers": [],
             "answer_markdown": "There were 3 orders.",
             "sources": ["Query warehouse"],
             "needs_approval": False,
