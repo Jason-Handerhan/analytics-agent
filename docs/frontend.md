@@ -59,11 +59,10 @@ non-Power-BI URL.
   grounding" below).
 - **Browser support:** Edge and Chrome only. Safari is view-only with a
   privacy caveat; Firefox and other browsers are unsupported.
-- **Screen size doesn't auto-match the visual's placed size.** Set the
-  Screen's own `Width`/`Height` properties directly (Tree view → select the
-  Screen → formula bar → pick the property, same mechanism as any other
-  control) to match the visual's pixel size in the report's Format pane. A
-  mismatch shows as a hard crop, not a proportional shrink.
+- **Screen size doesn't auto-match the visual's placed size.** The Screen's default `Height` formula is
+  `Max(App.Height, App.MinScreenHeight)` (836 here), so it follows the app size under Settings → Display, not
+  the visual's. Keep the app size equal to the visual's pixel size in the report's Format pane. A mismatch
+  shows as a hard crop, not a proportional shrink.
 - **Fixed vs. Responsive layout (App Settings → Display):** this app uses
   **Fixed** — Responsive screens don't take an explicit size at all; they
   fill whatever space their host gives them, which for an embedded visual
@@ -597,13 +596,14 @@ every table cell — nothing is left to the surrounding context.
 **Chart display: inline `<img>`, decided and built.** `answer_html`'s
 mistune renderer embeds chart images directly in the flowing answer text
 (`<img src="..." style="max-width: 100%;" />`), confirmed live to render
-correctly from a real signed GCS URL. `MAX_ANSWER_CHARS` was 7000 to absorb
-the signed URL's query string; it is now 14,000 and counts the answer without image URLs
-(`.claude/rules/orchestrator.md`). The model writes `chart:<id>` references and
+correctly from a real signed GCS URL. The model writes `chart:<id>` references and
 `finalize` expands them to freshly signed URLs before `answer_html` is rendered, so the control still
 receives real URLs (`docs/chart-tool.md`). **No platform character limit exists on the
 control at all** — confirmed against Microsoft's own Power Fx docs; the
-earlier-assumed "16,384-character limit" was never real.
+earlier-assumed "16,384-character limit" was never real. **It does have a height cap:** AutoHeight stops at
+7,680 app units, and the gallery row also holds the question, thinking log, sources and follow-ups. Rows up to
+2,886 displayed fully and one at 6,674 was cut a little at the bottom, so an answer's height is estimated from
+its markdown and a tall one is split into parts (`MAX_ANSWER_HEIGHT`, `.claude/rules/orchestrator.md`).
 
 ## Response formatting — pipeline
 

@@ -264,7 +264,7 @@ message history, were considered and dropped.
   `COSINE_DISTANCE` over the rows that have an embedding. It returns a flat
   list of hits: the `view="turns"` fields plus `conversation_id`, `answered_at`
   and `distance`, with no turn numbers. No token-budget check: a hit is bounded
-  by `MAX_ANSWER_CHARS` and the count by `top_k`.
+  by `MAX_ANSWER_HEIGHT` and the count by `top_k`.
 - **`mode="tags"`** returns the most used topics and entities (300 of each,
   lowercased) with counts, so the agent filters with real wording.
 - **`scope="user"`** searches all of the user's conversations, soft-deleted ones

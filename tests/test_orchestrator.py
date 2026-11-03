@@ -17,7 +17,6 @@ from app.config import (
     CHART_URL_EXPIRATION_HOURS,
     GATEWAY_TURN_TIMEOUT_SECONDS,
     GCS_CHART_BUCKET,
-    MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_LENGTH_RETRIES,
     MAX_VERIFY_RETRIES,
@@ -26,19 +25,26 @@ from app.config import (
 )
 import app.orchestrator.orchestrator as orchestrator
 from app.orchestrator.orchestrator import (
+    HEADING_CHAR_WEIGHT,
+    HEIGHT_PER_CHAR,
+    HEIGHT_PER_CHART,
+    HEIGHT_PER_CODE_LINE,
+    HEIGHT_PER_TABLE_ROW,
+    MAX_ANSWER_HEIGHT,
     ToolBatch,
     attach_context,
     build_tool_call_records_and_messages,
     call_tool_node,
-    answer_text_length,
+    answer_height,
+    check_length_node,
     check_table_rows,
-    extract_image_urls,
     extract_table_values,
     expand_chart_refs,
     finalize_node,
     iteration_cap_update,
     resolve_chart_data,
     resolve_combine_data,
+    split_answer_into_sections,
     route_after_agent,
     route_after_call_tool,
     route_after_check_length,
@@ -471,15 +477,66 @@ def test_resolve_chart_and_combine_data():
 # The table and numeric checks applied to a submitted answer.
 
 
-def test_answer_text_length_excludes_image_urls():
-    """Image URLs, wherever they sit (paragraph, table cell, list item), are found and left out of the length;
-    text over the cap still counts in full."""
-    url_a, url_b, url_c = (f"https://x.com/{name}.png?sig={'s' * 500}" for name in "abc")
-    answer = "\n\n".join([
-        "Intro", f"![A]({url_a})", f"| a | b |\n|---|---|\n| 1 | ![B]({url_b}) |", f"- item ![C]({url_c})"])
-    assert extract_image_urls(answer) == [url_a, url_b, url_c]
-    assert answer_text_length(answer) == len(answer) - len(url_a) - len(url_b) - len(url_c)
-    assert answer_text_length("x" * (MAX_ANSWER_CHARS + 1)) == MAX_ANSWER_CHARS + 1
+def test_answer_height():
+    """Each block kind adds its own height; a chart counts the same wherever it sits, whatever its URL length;
+    a list sums its items."""
+    assert answer_height("x" * 100) == pytest.approx(HEIGHT_PER_CHAR * 100)
+    assert answer_height("# " + "x" * 100) == pytest.approx(HEIGHT_PER_CHAR * HEADING_CHAR_WEIGHT * 100)
+    assert answer_height("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |") == pytest.approx(HEIGHT_PER_TABLE_ROW * 3)
+    assert answer_height("```\na\nb\nc\n```") == pytest.approx(HEIGHT_PER_CODE_LINE * 3)
+    assert answer_height("- " + "x" * 50 + "\n- " + "y" * 50) == pytest.approx(HEIGHT_PER_CHAR * 100)
+
+    long_url = f"https://x.com/chart.png?sig={'s' * 500}"
+    assert answer_height(f"![A]({long_url})") == pytest.approx(HEIGHT_PER_CHART)
+    assert answer_height("- item ![B](chart:b)") == pytest.approx(HEIGHT_PER_CHAR * 5 + HEIGHT_PER_CHART)
+
+
+def test_split_answer_into_sections():
+    """Sections fit the limit and start at headings when there are any; a block taller than the limit gets a
+    section to itself, including when it is the last block."""
+    chars = int(MAX_ANSWER_HEIGHT * 0.4 / HEIGHT_PER_CHAR)
+    paragraph = "word " * (chars // 5)
+    headed = "\n\n".join(f"## Section {n}\n\n{paragraph}" for n in range(1, 6))
+    sections = split_answer_into_sections(headed)
+    assert len(sections) > 1
+    assert all(section["height"] <= MAX_ANSWER_HEIGHT for section in sections)
+    assert sections[0]["starts_with"] == "Section 1"
+    assert all(section["starts_with"].startswith("Section") for section in sections)
+
+    no_headings = "\n\n".join([paragraph] * 6)
+    unheaded = split_answer_into_sections(no_headings)
+    assert len(unheaded) > 1 and all(section["height"] <= MAX_ANSWER_HEIGHT for section in unheaded)
+
+    assert len(split_answer_into_sections("Short answer.")) == 1
+
+    huge_list = "- " + "item " * int(MAX_ANSWER_HEIGHT / HEIGHT_PER_CHAR / 4)
+    for markdown in (f"# Title\n\n{huge_list}", f"intro\n\n{huge_list}\n\n# End\n\nclosing"):
+        sections = split_answer_into_sections(markdown)
+        oversized = [section for section in sections if section["height"] > MAX_ANSWER_HEIGHT]
+        assert [section["starts_with"] for section in oversized] == ["a list"]
+
+
+@pytest.mark.asyncio
+async def test_check_length_node():
+    """A fitting answer passes; a tall one gets a retry note naming where parts 2 onward start; a lone
+    oversized block gets only the shorten note; a long table gets the table note."""
+    chars = int(MAX_ANSWER_HEIGHT * 0.4 / HEIGHT_PER_CHAR)
+    paragraph = "word " * (chars // 5)
+    state = {"answer_markdown": "Short answer.", "length_retry_count": 0}
+    assert await check_length_node(state) == {}
+
+    tall = {**state, "answer_markdown": "\n\n".join(f"## Section {n}\n\n{paragraph}" for n in range(1, 6))}
+    update = await check_length_node(tall)
+    note = update["messages"][0].content
+    assert update["length_retry_count"] == 1
+    assert 'part 2 starts with "Section' in note and "Continue" in note and "part 1 starts" not in note
+
+    lone = {**state, "answer_markdown": "- " + "item " * int(MAX_ANSWER_HEIGHT / HEIGHT_PER_CHAR / 4)}
+    note = (await check_length_node(lone))["messages"][0].content
+    assert "too long on its own" in note and "Split it" not in note
+
+    table = {**state, "answer_markdown": "| A |\n|---|\n" + "\n".join(f"| {i} |" for i in range(MAX_ANSWER_TABLE_ROWS + 1))}
+    assert "more than" in (await check_length_node(table))["messages"][0].content
 
 
 def test_check_table_rows():
@@ -653,12 +710,16 @@ async def test_route_after_call_tool(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_route_after_check_length(monkeypatch):
-    """Displayable -> verify; over cap with retries left -> agent; exhausted -> finalize; cancelled -> finalize."""
+    """Displayable -> verify; too tall or an over-long table with retries left -> agent; exhausted -> finalize; cancelled -> finalize."""
     monkeypatch.setattr(orchestrator, "is_cancelled", AsyncMock(return_value=False))
     short_answer = {"conversation_id": "c1", "answer_markdown": "Short answer.", "length_retry_count": 0}
     assert await route_after_check_length(short_answer) == "verify"
 
-    # Table row count over cap, well under the character cap
+    # Too tall to display in one message
+    tall = {**short_answer, "answer_markdown": "word " * int(MAX_ANSWER_HEIGHT / HEIGHT_PER_CHAR)}
+    assert await route_after_check_length(tall) == "agent"
+
+    # Table row count over cap, well under the height limit
     long_table = {
         "conversation_id": "c1",
         "answer_markdown": "| A |\n|---|\n" + "\n".join(f"| {i} |" for i in range(30)),

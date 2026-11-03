@@ -808,10 +808,9 @@ telemetry keep the references (`docs/chart-tool.md`).
 **No platform character limit on the control — confirmed live, not assumed**
 (same finding as `.claude/rules/orchestrator.md`'s answer-length guardrail:
 Power Fx's Text/HTML text properties have no preset character cap; memory is
-the real constraint). `MAX_ANSWER_CHARS` (14,000, measured without image URLs; it was
-7000, raised from 6000 once inline `<img>` with signed URLs was chosen over
-a native `Image` control — `docs/build-order.md`) is a readability ceiling, not a workaround for a
-control limit that doesn't exist.
+the real constraint). The control does have a height cap (AutoHeight's 7,680 app units), which is what
+`MAX_ANSWER_HEIGHT` (4,000, an estimate from the markdown) keeps an answer under; a tall answer is split into
+parts (`.claude/rules/orchestrator.md`).
 
 **Return a normal `AgentResponse` wherever possible, not an HTTP error.** Power
 Apps has one response-handling path; an HTTP error needs separate UI code for

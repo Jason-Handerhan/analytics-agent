@@ -341,9 +341,17 @@ async def test_expand_chart_refs(...):
     message-selection test also checks the telemetry row keeps the reference while the returned answer
     has the signed URL.)"""
 
-def test_answer_text_length_excludes_image_urls():
-    """Image URLs in a paragraph, a table cell and a list item are found and left out of the length; text
-    over the cap still counts in full."""
+def test_answer_height():
+    """Text, a heading (weighted), a table (header counts), a code block and a list each add their own height;
+    a chart counts the same wherever it sits and whatever its URL length."""
+
+def test_split_answer_into_sections():
+    """Sections fit the limit and start at headings when there are any; a block taller than the limit gets a
+    section of its own, including as the last block."""
+
+async def test_check_length_node(...):
+    """A fitting answer passes; a tall one gets a note naming where parts 2 onward start and mentioning
+    Continue; a lone oversized block gets only the shorten note; a long table gets the table note."""
 
 async def test_agent_node_adds_time_check_near_the_deadline(monkeypatch):
     """Within TURN_WARNING_SECONDS_REMAINING of the budget the request ends with a time check built

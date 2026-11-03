@@ -29,7 +29,6 @@ from app.config import (
     BIGQUERY_TIMEOUT_SECONDS,
     EMBEDDING_MODEL,
     GCP_PROJECT_ID,
-    MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_BYTES_BILLED,
     MAX_CLAIM_PRECISION,
@@ -271,7 +270,7 @@ def _check_unclosed_fence(markdown: str) -> bool:
 class SubmitAnswerArgs(BaseModel):
     answer_markdown: str = Field(
         default="",
-        description=f"Plain Markdown. Empty only when clarifying_question is set. Keep it under {MAX_ANSWER_CHARS:,} characters, not counting image URLs, and any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
+        description=f"Plain Markdown. Empty only when clarifying_question is set. Be concise: lead with the answer and leave out filler. Keep any single table to at most {MAX_ANSWER_TABLE_ROWS} rows -- "
                     "show the top results and summarize the rest, aggregate to fewer rows in a new query, "
                     "or use generate_chart instead. Escape a literal | inside a table cell as \\| or "
                     "it's read as an extra column and breaks the table. Numbers in a table are "

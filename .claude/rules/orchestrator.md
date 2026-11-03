@@ -969,7 +969,7 @@ source the answer rests on. Every attempt is still in `agent_telemetry`.
 | **Absolute byte cap** → hard decline | `AgentState.bytes_consumed`, **cumulative across every loop** and carried through a pause | No approval offered above this |
 | BigQuery row cap (`max_results`) | Rows returned | Orthogonal to cost |
 | DAX row cap (`TOPN` + count check) | Rows returned | Different mechanism than BigQuery |
-| Answer-length check | Chars in `answer_markdown`, and rows in any single table | Separate from verification |
+| Answer-height check | Estimated display height of `answer_markdown`, and rows in any single table | Separate from verification; a tall answer is split into parts, not shortened |
 | Question-length cap | Chars in the incoming `question` | Gateway request validation, not a turn guard |
 | `max_iterations` (50 tool calls, a backstop) | Loop count | Conditional edge |
 | Per-tool timeout (40s) | One slow call | Recoverable — agent retries narrower. Sized to leave room under the ~90s gateway budget for retries + synthesis; a long query isn't inherently a wrong one |
@@ -1000,24 +1000,30 @@ tables significantly. Kept separate from `verify_response` on purpose — this
 is about whether an answer can be *displayed*, not whether its numbers are
 real.
 
-**`MAX_ANSWER_CHARS` is a readability ceiling, not a workaround for a
-platform limit — confirmed live (2026-09-28) that no such limit exists.**
-This previously cited a "hard 16,384-character limit" on the Power Apps HTML
-text control; Microsoft's Power Fx docs state Text/Hyperlink/Image/Media
-properties have no preset character limit at all (memory is the real
-constraint). Corrected here and in `docs/frontend.md`, which also has an open
-decision — inline chart images vs. a separate `Image` control — that would
-bump this to 7000 if resolved one particular way. Decide before Phase 4's
-frontend build-out (`docs/build-order.md`). **Now 14,000 (2026-11-01), measured without image
-URLs:** a signed chart URL is about 850 characters, so several charts used up the old budget, and a
-long multi-chart summary kept retrying under it.
+**The limit is an estimated display height, not a character count (2026-11-02).** The Power Apps HTML text
+control stops growing at 7,680 app units (AutoHeight's maximum) and an answer with several charts or tables
+reaches that long before it is long in characters. There is no character limit on the control
+(`docs/frontend.md`). The check only has the model's markdown, so `answer_height` estimates from its AST:
+0.6 per character (heading characters x1.33, for the larger font), 42 per table row (the header counts), 700
+per chart and 30 per code line. A list or quote is one block whose items are summed. The constants were fitted
+to heights read from the app (`notebooks/phase3_answer_height_calibration.ipynb`; mean error about 195, mostly
+over-estimating); the chart cost sits between a standard chart (about 613) and a beeswarm (about 1,000), so a
+beeswarm answer is under-estimated. `MAX_ANSWER_HEIGHT = 4000` is well under the cap on purpose: the gallery
+row also holds the question, thinking log, sources and follow-ups, and an answer measured at 6,674 was already
+cut at the bottom. The constants live in `orchestrator.py` beside the estimator, not in `config.py`.
 
-Two checks, not one: total length, and the size of any single table within
-it — a table can blow well past what's reasonable to read in chat while
-still fitting under the character cap.
+An answer over the limit is split, not shortened. `split_answer_into_sections` cuts it into consecutive
+sections that each fit, before a heading where one is available, and the retry note names where parts 2 onward
+start; the agent submits part 1 only and adds "Continue" to its follow-ups. The rejected draft stays in the
+stored history (retry messages are kept), but its later numbers were never verified, so a Continue turn queries
+again; nothing in the prompt says so, because verification already tells the agent. A block taller than the
+limit on its own (one very long list) can't be split: the note says to shorten it.
+
+Two checks, not one: total height, and the size of any single table within it — a table can blow well past
+what's reasonable to read in chat while still fitting under the height limit.
 
 ```python
-MAX_ANSWER_CHARS = 14000       # readability ceiling, not a platform limit; image URLs are not counted
+MAX_ANSWER_HEIGHT = 4000      # estimated display height one answer may have
 MAX_ANSWER_TABLE_ROWS = 25     # a table this size is still fine as generate_chart's
                                 # input data -- this only ever checks answer_markdown,
                                 # never a tool's raw result, so the chart path is untouched
@@ -1046,28 +1052,34 @@ def check_table_rows(answer_markdown: str) -> bool:
     return True
 
 
-def extract_image_urls(answer_markdown: str) -> list[str]:
-    """Every markdown image URL in the answer, in order (walks paragraphs, tables, lists)."""
+# Estimated height of an answer, from the markdown AST (constants fitted to heights read from the app)
+def block_height(node: dict) -> float: ...        # one top-level block; a list or quote sums its items
+def answer_height(answer_markdown: str) -> float: ...   # block_height summed over the top-level blocks
+
+
+def split_answer_into_sections(answer_markdown: str) -> list[dict]:
+    """Consecutive sections that each fit MAX_ANSWER_HEIGHT, cut before the last heading that fits (else
+    before the block that overflowed). A block taller than the limit is a section of its own.
+    Each is {"starts_with": its first block, "height": its estimated height}."""
     ...
-
-
-def answer_text_length(answer_markdown: str) -> int:
-    """Characters in the answer, not counting image URLs: they render as pictures, not text."""
-    return len(answer_markdown) - sum(len(url) for url in extract_image_urls(answer_markdown))
 
 
 async def check_length_node(state: AgentState) -> dict:
     answer = state["answer_markdown"]
-    length = answer_text_length(answer)
-    if length <= MAX_ANSWER_CHARS and check_table_rows(answer):
-        return {}
-    if length > MAX_ANSWER_CHARS:
-        note = (f"Your answer is {length:,} characters; the limit is {MAX_ANSWER_CHARS:,}, not counting image "
-                "URLs. Summarize the key findings concisely, or generate a chart instead of listing rows.")
-    else:
+    height = answer_height(answer)
+    if height > MAX_ANSWER_HEIGHT:
+        answer_sections = split_answer_into_sections(answer)
+        # More than one section: name where parts 2.. start, then "Submit only part 1 now, add "Continue"
+        # to your suggested follow-ups, and tell the user more follows."
+        # Any section still over the limit: "The part starting with ... is too long on its own:
+        # shorten it or show its content as a chart."
+        note = ...
+    elif not check_table_rows(answer):
         note = (f"Your answer includes a table with more than {MAX_ANSWER_TABLE_ROWS} rows. "
                 "Show only the top results, summarize the rest, or generate a chart "
                 "instead of listing every row.")
+    else:
+        return {}
     return {
         "length_retry_count": state["length_retry_count"] + 1,
         "messages": [HumanMessage(content=note)],
@@ -1438,7 +1450,7 @@ async def route_after_check_length(state: AgentState) -> str:
     if await is_cancelled(state["conversation_id"]):
         return "finalize"
     answer = state["answer_markdown"]
-    if answer_text_length(answer) <= MAX_ANSWER_CHARS and check_table_rows(answer):
+    if answer_height(answer) <= MAX_ANSWER_HEIGHT and check_table_rows(answer):
         return "verify"
     if state["length_retry_count"] < MAX_LENGTH_RETRIES:
         return "agent"

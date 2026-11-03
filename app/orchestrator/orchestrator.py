@@ -47,7 +47,6 @@ from app.config import (
     GITHUB_REPO_OWNER,
     LANGCHAIN_PROJECT,
     LANGSMITH_TRACING,
-    MAX_ANSWER_CHARS,
     MAX_ANSWER_TABLE_ROWS,
     MAX_CLAIM_PRECISION,
     MAX_ITERATIONS,
@@ -260,6 +259,8 @@ async def inject_chart_args(tc: dict) -> dict:
 async def expand_chart_refs(text: str) -> str:
     """Replaces each chart:<id> in text with a freshly signed URL, signing the charts in parallel.
     Returns text untouched, and mints no token, when it has no chart references."""
+    
+    #Build the list of unique chart id's in answer text (dict.from keys used instead of set to dedupe and maintain order)
     chart_ids = list(dict.fromkeys(CHART_REF_RE.findall(text)))
     if not chart_ids:
         return text
@@ -526,25 +527,6 @@ _markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
 
 # check_length_node: answer-length guardrail
 
-def extract_image_urls(answer_markdown: str) -> list[str]:
-    """Every markdown image URL in the answer, in order."""
-    urls: list[str] = []
-
-    def walk(nodes: list[dict]) -> None:
-        for node in nodes:
-            if node["type"] == "image":
-                urls.append(node["attrs"]["url"])
-            walk(node.get("children", []))
-
-    walk(_markdown_ast(answer_markdown))
-    return urls
-
-
-def answer_text_length(answer_markdown: str) -> int:
-    """Characters in the answer, not counting image URLs: they render as pictures, not text."""
-    return len(answer_markdown) - sum(len(url) for url in extract_image_urls(answer_markdown))
-
-
 def check_table_rows(answer_markdown: str) -> bool:
     """True if every markdown table in the answer has at most
     MAX_ANSWER_TABLE_ROWS data rows."""
@@ -557,6 +539,94 @@ def check_table_rows(answer_markdown: str) -> bool:
         if len(body["children"]) > MAX_ANSWER_TABLE_ROWS:
             return False
     return True
+
+
+# Answer height estimate, fitted to heights read from the app (app units).
+MAX_ANSWER_HEIGHT = 4000
+HEIGHT_PER_CHAR = 0.6
+HEIGHT_PER_TABLE_ROW = 42
+HEIGHT_PER_CHART = 700
+HEIGHT_PER_CODE_LINE = 30
+HEADING_CHAR_WEIGHT = 1.33     # headings are 32px against 24px body text
+
+
+def inline_text_and_images(nodes: list[dict]) -> tuple[str, int]:
+    """Visible text and image count of inline nodes."""
+    text, images = "", 0
+    for node in nodes:
+        if node["type"] == "image":
+            images += 1
+        elif "children" in node:
+            inner_text, inner_images = inline_text_and_images(node["children"])
+            text, images = text + inner_text, images + inner_images
+        else:
+            text += node.get("raw", "")
+    return text, images
+
+
+def block_height(node: dict) -> float:
+    kind = node["type"]
+    if kind in ("paragraph", "block_text", "heading"):
+        text, images = inline_text_and_images(node["children"])
+        weight = HEADING_CHAR_WEIGHT if kind == "heading" else 1
+        return HEIGHT_PER_CHAR * weight * len(text) + HEIGHT_PER_CHART * images
+    if kind == "block_code":
+        return HEIGHT_PER_CODE_LINE * (node["raw"].rstrip("\n").count("\n") + 1)
+    if kind == "table":
+        body = next((c for c in node["children"] if c["type"] == "table_body"), None)
+        return HEIGHT_PER_TABLE_ROW * (1 + (len(body["children"]) if body else 0))
+    return sum(block_height(child) for child in node.get("children", []))
+
+
+def answer_height(answer_markdown: str) -> float:
+    return sum(block_height(node) for node in _markdown_ast(answer_markdown))
+
+
+def block_label(node: dict) -> str:
+    """What a block starts with, for naming where an answer is cut."""
+    if node["type"] in ("heading", "paragraph", "block_text"):
+        return inline_text_and_images(node["children"])[0][:60] or "a chart"
+    return {"list": "a list", "table": "a table", "block_code": "a code block"}.get(node["type"], node["type"])
+
+
+def split_answer_into_sections(answer_markdown: str) -> list[dict]:
+    """Splits the answer into consecutive sections that each fit MAX_ANSWER_HEIGHT, cutting before a
+    heading when one is available. Each section is {"starts_with": its first block, "height": its estimated height}."""
+    block_list = []
+    for markdown_node in _markdown_ast(answer_markdown):
+        if markdown_node["type"] == "blank_line":
+            continue
+        block_list.append({
+            "label": block_label(markdown_node),
+            "is_heading": markdown_node["type"] == "heading",
+            "height": block_height(markdown_node),
+        })
+
+    answer_sections = []
+    height_left = sum(block["height"] for block in block_list)
+    while len(block_list) > 1 and height_left > MAX_ANSWER_HEIGHT:
+        # index of the first block where the running height passes the limit
+        running_height = 0
+        for first_over_limit_index, block in enumerate(block_list):
+            running_height += block["height"]
+            if running_height > MAX_ANSWER_HEIGHT:
+                break
+        first_over_limit_index = max(first_over_limit_index, 1)    # a block taller than the limit gets a section to itself
+
+        # index where the next section begins: the last heading before that block, else the block itself
+        cut_index = first_over_limit_index
+        for index in range(1, first_over_limit_index):
+            if block_list[index]["is_heading"]:
+                cut_index = index
+
+        section_blocks = block_list[:cut_index]
+        section_height = sum(block["height"] for block in section_blocks)
+        answer_sections.append({"starts_with": section_blocks[0]["label"], "height": section_height})
+        block_list = block_list[cut_index:]
+        height_left -= section_height
+    answer_sections.append({"starts_with": block_list[0]["label"], "height": height_left})
+
+    return answer_sections
 
 
 # verify_node: pooled numeric-claim verification
@@ -989,19 +1059,45 @@ async def call_tool_node(state: AgentState) -> dict:
 
 
 async def check_length_node(state: AgentState) -> dict:
-    """Checks answer_markdown length and table size; on failure, requests a
-    shorter answer or a smaller table."""
+    """Checks answer_markdown height and table size; on failure, asks for the answer in parts or for a
+    smaller table."""
     answer = state["answer_markdown"]
-    length = answer_text_length(answer)
-    if length <= MAX_ANSWER_CHARS and check_table_rows(answer):
-        return {}
-    if length > MAX_ANSWER_CHARS:
-        note = (f"Your answer is {length:,} characters; the limit is {MAX_ANSWER_CHARS:,}, not counting image "
-                "URLs. Summarize the key findings concisely, or generate a chart instead of listing rows.")
-    else:
+    height = answer_height(answer)
+
+    #If estimated answer height exceeds threshold (Needed for Power Apps pixel height cap)
+    if height > MAX_ANSWER_HEIGHT:
+        answer_sections = split_answer_into_sections(answer)
+        note_sentences = []
+
+        # If the answer has more than one section
+        if len(answer_sections) > 1:
+            later_sections = "; ".join(
+                f'part {number} starts with "{section["starts_with"]}"'
+                for number, section in enumerate(answer_sections[1:], start=2))
+            note_sentences.append(
+                f"Your answer is too long to display in one message. Split it into {len(answer_sections)} parts: "
+                f"{later_sections}. Submit only part 1 now, add \"Continue\" to your suggested follow-ups, "
+                "and tell the user more follows.")
+
+        #check the size of each section to ensure each section is less than max height    
+        for section in answer_sections:
+            if section["height"] > MAX_ANSWER_HEIGHT:
+                note_sentences.append(
+                    f'The part starting with "{section["starts_with"]}" is too long on its own: '
+                    "shorten it or show its content as a chart.")
+                
+        note = " ".join(note_sentences)
+
+    # If markdown table exceeds max table rows cap
+    elif not check_table_rows(answer):
         note = (f"Your answer includes a table with more than {MAX_ANSWER_TABLE_ROWS} rows. "
                 "Show only the top results, summarize the rest, or generate a chart "
                 "instead of listing every row.")
+    # Happy Path    
+    else:
+        return {}
+
+    # Failure state update
     return {
         "length_retry_count": state["length_retry_count"] + 1,
         "messages": [HumanMessage(content=note)],
@@ -1143,7 +1239,7 @@ async def finalize_node(state: AgentState) -> dict:
         )
         writes.append(write_findings_row(findings_row))
     # The rows above keep the short references; the answer returned gets signed URLs.
-    shown_markdown = (await asyncio.gather(*writes, expand_chart_refs(answer_markdown)))[-1]
+    *_, shown_markdown = await asyncio.gather(*writes, expand_chart_refs(answer_markdown))
     return {
         "answer_markdown": shown_markdown,
         "prompt_tokens": prompt_tokens,
@@ -1183,7 +1279,7 @@ async def route_after_check_length(state: AgentState) -> str:
     if await is_cancelled(state["conversation_id"]):
         return "finalize"
     answer = state["answer_markdown"]
-    if answer_text_length(answer) <= MAX_ANSWER_CHARS and check_table_rows(answer):
+    if answer_height(answer) <= MAX_ANSWER_HEIGHT and check_table_rows(answer):
         return "verify"
     if state["length_retry_count"] < MAX_LENGTH_RETRIES:
         return "agent"
