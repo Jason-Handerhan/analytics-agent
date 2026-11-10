@@ -316,6 +316,7 @@ sessions/{conversation_id}            # spans the whole conversation
   ],                                       # before this field have none)
   "notes": [...],                          # [{id, kind, text}] from manage_notes, read with the history
   "task_plan": {...},                      # {"scope", "tasks"} from manage_tasks, read with the history
+  "coding_plan": {...},                    # {plan, version, saved_at} from save_coding_plan, read with the history; absent once started
   "last_activity_at": <timestamp>          # updated every turn; TTL target
 }
 ```
@@ -688,7 +689,7 @@ the initial state. `consume_graph`'s first write replaces the status with
   show only entries it hasn't seen. Adaptive thinking means some rounds have none.
 - **`call_tool`:** `call_tool_status(names)`, from the tools the batch dispatched.
   `submit_answer` is ignored. A chart in the batch (`generate_chart` or `generate_beeswarm` -- `CHART_TOOLS`, `app/config.py`) gives `"Prepared the chart"`, a combine
-  gives `"Combined results"`, and a batch with only `manage_tasks` and/or `manage_notes` gives `"Managed the task plan"`,
+  gives `"Combined results"`, and a batch with only `manage_tasks`, `manage_notes` and/or `save_coding_plan` gives `"Managed the task plan"`,
   `"Managed memory"`, or `"Managed memory and the task plan"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
   `app/config.py`) distinct sources, such as `"Gathered results from BigQuery, project
   documentation, and semantic model"`, or `"Gathered results from {n} sources"` above that.

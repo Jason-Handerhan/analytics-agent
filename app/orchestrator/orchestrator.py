@@ -65,7 +65,8 @@ from app.config import (
 from app.orchestrator.context import build_static_context, get_static_context
 from app.orchestrator.conversation_memory.writer import build_findings_row, write_findings_row
 from app.shared_helpers import is_cancelled, label_chartable_result
-from app.orchestrator.state import AgentState, Note, TaskPlan, ToolCallRecord, TurnError
+from app.orchestrator.coding_tools import save_coding_plan
+from app.orchestrator.state import AgentState, CodingPlanDraft, Note, TaskPlan, ToolCallRecord, TurnError
 from app.shared_chart import CHART_REF_RE, replace_chart_refs, shorten_chart_urls, sign_chart_url
 from app.orchestrator.tools import (
     CombineResultsToolCallArgs,
@@ -97,7 +98,7 @@ CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
 # Bound outside Anthropic's strict mode (the compiled grammar of all strict schemas has a size limit);
 # still validated at dispatch.
-ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings"}
+ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "save_coding_plan"}
 
 # finalize_node's canned messages -- one per terminal state with no real answer yet.
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
@@ -140,6 +141,7 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "search_conversation_findings": search_conversation_findings,
         "manage_tasks": manage_tasks,
         "manage_notes": manage_notes,
+        "save_coding_plan": save_coding_plan,
         "generate_beeswarm": generate_beeswarm,
     }
     get_static_context()  # warms the @lru_cache at startup, not on the first real turn
@@ -431,7 +433,7 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
     # Memory tools that only need the conversation id
-    if tc["name"] in ("get_conversation_findings", "manage_tasks", "manage_notes"):
+    if tc["name"] in ("get_conversation_findings", "manage_tasks", "manage_notes", "save_coding_plan"):
         full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
@@ -741,6 +743,7 @@ SOURCE_LABELS = {
     "search_conversation_findings": "Searched memory",
     "manage_tasks": "Managed task plan",
     "manage_notes": "Managed memory",
+    "save_coding_plan": "Drafted coding plan",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -857,14 +860,27 @@ def render_task_plan(task_plan: TaskPlan) -> str:
     return "\n".join(lines)
 
 
-def attach_context(messages: list[BaseMessage], notes: list[Note], task_plan: TaskPlan) -> list[BaseMessage]:
-    """Returns messages with the saved notes and task plan ahead of the turn's first message, on a copy and new
+def render_coding_plan(coding_plan: CodingPlanDraft) -> str:
+    """The saved draft coding plan as text for the model."""
+    plan = {key: value for key, value in coding_plan["plan"].items() if key != "review"}
+    return (f"Draft coding plan, version {coding_plan['version']}, as last saved with save_coding_plan as of this "
+            "message. Earlier save_coding_plan calls in the conversation are already reflected here, so ignore "
+            "them. The user has not approved it unless they said so after you showed them this version. If you "
+            "save it again after this message, your latest save_coding_plan call takes precedence.\n"
+            + json.dumps(plan, indent=2))
+
+
+def attach_context(messages: list[BaseMessage], notes: list[Note], task_plan: TaskPlan,
+                   coding_plan: CodingPlanDraft) -> list[BaseMessage]:
+    """Returns messages with the saved notes, task plan and draft coding plan ahead of the turn's first message, on a copy and new
     list so state (and thus the saved history) never contains them."""
     parts = []
     if notes:
         parts.append(render_notes(notes))
     if task_plan.get("tasks"):
         parts.append(render_task_plan(task_plan))
+    if coding_plan:
+        parts.append(render_coding_plan(coding_plan))
     context_text = "\n\n".join(parts)
     first = messages[0]
     content = (f"{context_text}\n\n{first.content}" if isinstance(first.content, str)
@@ -892,8 +908,8 @@ async def agent_node(state: AgentState) -> dict:
         history = mark_anthropic_history_cache(history)
 
     messages = state["messages"]
-    if state["notes"] or state["task_plan"].get("tasks"):
-        messages = attach_context(messages, state["notes"], state["task_plan"])
+    if state["notes"] or state["task_plan"].get("tasks") or state["coding_plan"]:
+        messages = attach_context(messages, state["notes"], state["task_plan"], state["coding_plan"])
 
     seconds_left = GATEWAY_TURN_TIMEOUT_SECONDS - (datetime.now(timezone.utc) - state["turn_started_at"]).total_seconds()
     if seconds_left <= TURN_WARNING_SECONDS_REMAINING:
@@ -1144,6 +1160,42 @@ async def verify_node(state: AgentState) -> dict:
     }
 
 
+APPROVAL_QUERY_ROW_HEIGHT = 33    # 22px code at line-height 1.5
+APPROVAL_QUERY_ROW_CHARS = 45     # narrow wrap width, so long lines are over-counted rather than under
+
+
+def approval_message(estimated_cost: str, query: str) -> str:
+    """The approval card text. Only as many query lines as fit in half the answer height are shown, so the
+    card's buttons stay on screen."""
+    lines = query.split("\n")
+    row_budget = int(MAX_ANSWER_HEIGHT / 2 // APPROVAL_QUERY_ROW_HEIGHT)
+    shown_lines, rows_used = [], 0
+    is_one_long_line = False
+
+    for line in lines:
+        rows_used += max(1, math.ceil(len(line) / APPROVAL_QUERY_ROW_CHARS))
+        if rows_used > row_budget:
+            break
+        shown_lines.append(line)
+
+    if not shown_lines:     # the first line alone is over the budget
+        is_one_long_line = True
+        shown_lines = [lines[0][:row_budget * APPROVAL_QUERY_ROW_CHARS]]
+
+    shown_query = "\n".join(shown_lines)
+    message = (
+        f"{PENDING_APPROVAL_MESSAGE}\n\n"
+        f"Estimated cost: {estimated_cost}\n\n"
+        f"```sql\n{shown_query}\n```"
+    )
+
+    trimmed = len(shown_lines) < len(lines) or is_one_long_line
+    if trimmed:
+        message += "\n..."
+        message += "\n\nThe query is too long to display in full"
+    return message
+
+
 async def finalize_node(state: AgentState) -> dict:
     """Tallies tokens/sources, builds and writes the telemetry row. Each
     terminal state ships its own canned message if the turn has no real
@@ -1161,11 +1213,7 @@ async def finalize_node(state: AgentState) -> dict:
 
     #Approval Branch: Build approval message for answer markdown
     elif needs_approval:
-        answer_markdown = (
-            f"{PENDING_APPROVAL_MESSAGE}\n\n"
-            f"Estimated cost: {state['estimated_cost']}\n\n"
-            f"```sql\n{state['largest_pending_query']}\n```"
-        )
+        answer_markdown = approval_message(state["estimated_cost"], state["largest_pending_query"])
 
     #Verification failure branch
     elif not state["verified"]:

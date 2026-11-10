@@ -47,6 +47,8 @@ can cite a figure.
 
 ## The cost gate lives in `call_tool_node`, not the tool — dry-run, decide, dispatch
 
+*Planned: the gate moves into its own node ahead of `call_tool` (`docs/build-order.md`, Phase 6 item 2a).*
+
 **Per-tool gating is unsafe for a batch.** Three BigQuery calls dispatched
 together each read the same `state["bytes_consumed"]`, captured before any of
 them ran. Each individually under the threshold, all three pass — combined

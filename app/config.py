@@ -80,10 +80,16 @@ VECTOR_SEARCH_SA_EMAIL = "vector-search-sa@instacart-ml-model.iam.gserviceaccoun
 SEARCH_DOCS_TOP_K_DEFAULT = 5
 SEARCH_DOCS_MAX_TOP_K = 20
 
+# Coding agent (job process): its service account, and the only datasets its schema and dry-run tools accept (metadata only)
+CODING_AGENT_SA_EMAIL = "coding-agent-sa@instacart-ml-model.iam.gserviceaccount.com"
+CODING_AGENT_DATASETS = ("instacart", "building_blocks", "ml_model_feature_table")
+CODING_AGENT_DEFAULT_BASE_BRANCH = "dev"  # the branch a new coding task starts from
+
 # GitHub (get_repo_contents, MCP-hosted)
 GITHUB_REPO_OWNER = "Jason-Handerhan"
 GITHUB_REPO_NAME = "Kaggle-Instacart-Reorder-Engine-Portfolio-Project"
 GITHUB_REPO_BRANCH = "main"
+REPO_URL = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}.git"  # clone URL for the coding agent's clones and pushes
 MAX_REPO_FILE_CONTENT_CHARS = 300_000  # final cap on returned text, after any stripping
 
 # Conversation history

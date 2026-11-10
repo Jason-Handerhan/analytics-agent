@@ -164,6 +164,7 @@ class AgentState(TypedDict):
                                  # attached with the task plan to the turn's first message at
                                  # request time, never in `messages`
     task_plan: TaskPlan          # {"scope", "tasks"}, read with the history; attached the same way
+    coding_plan: CodingPlanDraft # the draft coding plan {plan, version, saved_at}, {} if none; attached the same way
 
     # Seeded at invocation with just the question, then accumulated during
     # the loop. Plain BaseMessage, not a wrapper — passes straight to
@@ -926,6 +927,7 @@ SOURCE_LABELS = {
     "search_conversation_findings": "Searched memory",
     "manage_tasks": "Managed task plan",
     "manage_notes": "Managed memory",
+    "save_coding_plan": "Drafted coding plan",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -1021,6 +1023,16 @@ limit on its own (one very long list) can't be split: the note says to shorten i
 
 Two checks, not one: total height, and the size of any single table within it — a table can blow well past
 what's reasonable to read in chat while still fitting under the height limit.
+
+**The approval message is bounded separately (2026-11-03).** `finalize_node` builds it with `approval_message`,
+and a query too tall to show would cut the row off with the approval buttons beneath it, leaving the user no way
+to approve or reject. A query can't be split into parts, so only the first lines are shown: each line costs
+`ceil(len / APPROVAL_QUERY_ROW_CHARS)` rows (45, deliberately narrow, because the code block wraps long lines)
+at `APPROVAL_QUERY_ROW_HEIGHT` (33, 22px at line-height 1.5), and lines are kept while they fit in half of
+`MAX_ANSWER_HEIGHT`. A cut query ends with `...` and a note that it is too long to display; the user can
+reject if they can't approve it unseen. The full query stays in the telemetry row's `pending_query`. This does
+not use `answer_height`: its code-line cost (30) was never measured and ignores wrapping, which two real
+approval cards (97 lines, lines of 565 characters) showed to matter.
 
 ```python
 MAX_ANSWER_HEIGHT = 4000      # estimated display height one answer may have
@@ -1633,7 +1645,8 @@ turn's `AskRequest` arrives; none of the three pass `api_key=`/
 - **Cost gating is not a node** — it lives inside `call_tool_node`, which
   dry-runs every BigQuery call in the batch before dispatching anything
   (`docs/approval-workflow.md`). `call_tool` routes on what that decision
-  produces.
+  produces. Planned to become its own `cost_gate` node after the coding agent is
+  wired in (`docs/build-order.md`, Phase 6 item 2a).
 - `check_length` before `verify` — cheap check first; no point walking the
   answer's numbers against tool data if it can't be displayed regardless.
 - `finalize` is the **single exit** — full breakdown below.
@@ -1669,7 +1682,7 @@ this table and the code ever disagree.
 | From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
 |---|---|---|---|---|
 | any routing function | `is_cancelled` (live Firestore read, not `state["cancelled"]` -- nothing sets that until Layer 2 lands) | Cancelled | `answer_markdown` = `CANCELLED_MESSAGE` always, even if `verify_node` already confirmed an answer (a cancelled turn is discarded, never written to history); `needs_approval` forced to `False` regardless of what `call_tool` last set it to | Normal row, `cancelled: True`, `needs_approval: False` |
-| `call_tool` | `needs_approval` (only reached if not also cancelled) | Approval pause | `answer_markdown` = `PENDING_APPROVAL_MESSAGE`; `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
+| `call_tool` | `needs_approval` (only reached if not also cancelled) | Approval pause | `answer_markdown` = `approval_message(...)` (`PENDING_APPROVAL_MESSAGE`, the cost, the query cut to fit); `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
 | `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question | Normal row |
 | `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit`/`cost_cap_exceeded` set `True` if either is how this turn got here | Normal row |
 | `verify` | failed, `verification_retry_count` exhausted | Honest decline | `VERIFICATION_FAILURE_MESSAGE` — no unverified number emitted | Normal row |

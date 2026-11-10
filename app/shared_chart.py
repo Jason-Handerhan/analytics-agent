@@ -47,6 +47,7 @@ MAX_HEATMAP_AXIS           = 30
 HEATMAP_FONT_FACTOR        = 18   # cell size (inches) to annotation fontsize (points)
 MAX_HEATMAP_ANNOT_FONTSIZE = 14
 MIN_HEATMAP_ANNOT_FONTSIZE = 5    # below this, annotations are dropped
+HEATMAP_AXES_WIDTH_SHARE   = 0.7  # axes' share of the figure width, after y labels and colorbar
 MAX_WATERFALL_STEPS        = 20   # named driver/step chart, not a high-cardinality one
 WATERFALL_ZOOM_TRIGGER     = 0.3  # zoom when step span / |baseline| is below this
 WATERFALL_ZOOM_TARGET      = 0.5  # step span / visible |baseline| after zooming
@@ -577,8 +578,9 @@ class HeatmapChartSpec(ChartSpecBase):
     7 days x 24 hours = 168 rows. Both axes must be low-cardinality, or the
     grid is unreadable before the row cap is even reached.
 
-    Put the axis with MORE distinct values on x_field, not y_field -- the
-    figure is wider than tall.
+    Cell values are wider than tall, so put the axis with MORE distinct
+    values on y_field. If the values won't fit as given but would fit with the
+    axes swapped, the tool errors and says to swap.
     """
     chart_type: Literal["heatmap"] = Field(description='Always "heatmap".')
     x_field: str = Field(description="Column with the x-axis category.")
@@ -588,6 +590,13 @@ class HeatmapChartSpec(ChartSpecBase):
     def required_fields(self) -> list[str]:
         return [self.x_field, self.y_field, self.value_field]
 
+    def _annotation_fontsize(self, n_rows: int, n_cols: int, longest_annotation: int) -> float:
+        """Largest annotation font that fits a cell's height and its width, capped."""
+        height_fit = FIGSIZE[1] / n_rows * HEATMAP_FONT_FACTOR
+        cell_width_points = FIGSIZE[0] * HEATMAP_AXES_WIDTH_SHARE / n_cols * 72
+        width_fit = cell_width_points * LABEL_FIT_MARGIN / (longest_annotation * CHAR_WIDTH_FACTOR)
+        return min(height_fit, width_fit, MAX_HEATMAP_ANNOT_FONTSIZE)
+
     def render(self, df: pd.DataFrame) -> plt.Figure:
         self._check_no_duplicate_grain(df, [self.x_field, self.y_field])
         self._check_max_categories(df[self.x_field].nunique(), MAX_HEATMAP_AXIS, "x-axis categories")
@@ -595,17 +604,22 @@ class HeatmapChartSpec(ChartSpecBase):
         # Long to wide grid, one cell per x/y pair.
         grid = df.pivot(index=self.y_field, columns=self.x_field,
                         values=self.value_field)
-        fig, ax = self._setup()
-        # Cell size from figure size and grid shape.
-        cell_width = FIGSIZE[0] / grid.shape[1]
-        cell_height = FIGSIZE[1] / grid.shape[0]
-        # Annotation font scales with cell size, capped.
-        fontsize = min(min(cell_width, cell_height) * HEATMAP_FONT_FACTOR, MAX_HEATMAP_ANNOT_FONTSIZE)
-        # Hide annotations when too small to read.
-        show_annot = fontsize >= MIN_HEATMAP_ANNOT_FONTSIZE
         # Pre-format each cell's text to avoid scientific notation.
-        annot = grid.map(lambda v: self._format_value(v, "auto")) if show_annot else False
-        sns.heatmap(grid, annot=annot, fmt="", cmap="Blues", ax=ax,
+        annot = grid.map(self._format_value, value_format="auto")
+        n_rows, n_cols = grid.shape
+        longest_annotation = int(annot.map(len).to_numpy().max())
+        fontsize = self._annotation_fontsize(n_rows, n_cols, longest_annotation)
+        if fontsize >= MIN_HEATMAP_ANNOT_FONTSIZE:
+            show_annot = True
+        elif self._annotation_fontsize(n_cols, n_rows, longest_annotation) >= MIN_HEATMAP_ANNOT_FONTSIZE:
+            raise ToolError(
+                f"Cell values won't fit with {n_cols} '{self.x_field}' categories across and "
+                f"{n_rows} '{self.y_field}' down. Swap them: set x_field to '{self.y_field}' and "
+                f"y_field to '{self.x_field}', so the axis with more categories runs down the side.")
+        else:
+            show_annot = False
+        fig, ax = self._setup()
+        sns.heatmap(grid, annot=annot if show_annot else False, fmt="", cmap="Blues", ax=ax,
                     annot_kws={"fontsize": fontsize} if show_annot else None)
         return self._finish(fig, ax)
 

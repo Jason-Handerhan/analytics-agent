@@ -124,7 +124,7 @@ def test_attach_context():
     plan = {"scope": "Model: X.", "tasks": [{"text": "A", "status": "done"}, {"text": "B", "status": "in_progress"},
                                             {"text": "C", "status": "todo"}]}
 
-    text = attach_context(messages, notes, plan)[0].content
+    text = attach_context(messages, notes, plan, {})[0].content
     assert text.endswith("\n\nWhat is next?")
     assert "Note 2 (preference): Show the SQL." in text and "Note 5 (goal): Find drivers." in text
     assert text.index("Note 5") < text.index("Saved task plan")
@@ -132,20 +132,25 @@ def test_attach_context():
     assert "1. [done] A" in text and "2. [in progress] B" in text and "3. [todo] C" in text
     assert "All tasks are done" not in text
 
-    attached = attach_context(messages, notes, plan)
+    attached = attach_context(messages, notes, plan, {})
     assert attached[0].additional_kwargs == question.additional_kwargs and attached[1] is messages[1]
     assert question.content == "What is next?"          # the message in state is not changed
 
-    notes_only = attach_context(messages, notes, {})[0].content
+    notes_only = attach_context(messages, notes, {}, {})[0].content
     assert "Note 2" in notes_only and "Saved task plan" not in notes_only
-    plan_only = attach_context(messages, [], plan)[0].content
+    plan_only = attach_context(messages, [], plan, {})[0].content
     assert "Saved task plan" in plan_only and "Notes the user asked" not in plan_only
 
-    all_done = attach_context(messages, [], {"tasks": [{"text": "A", "status": "done"}]})[0].content
+    all_done = attach_context(messages, [], {"tasks": [{"text": "A", "status": "done"}]}, {})[0].content
     assert "All tasks are done; clear the plan" in all_done and "Scope for every task" not in all_done
 
     with_image = HumanMessage(content=[{"type": "text", "text": "Q"}, {"type": "image_url", "image_url": {"url": "data:x"}}])
-    assert [b["type"] for b in attach_context([with_image], notes, plan)[0].content] == ["text", "text", "image_url"]
+    assert [b["type"] for b in attach_context([with_image], notes, plan, {})[0].content] == ["text", "text", "image_url"]
+
+    draft = {"plan": {"name": "Aisle pacing", "review": "grader notes"}, "version": 2}
+    coding = attach_context(messages, notes, plan, draft)[0].content
+    assert "version 2" in coding and '"name": "Aisle pacing"' in coding and "grader notes" not in coding
+    assert coding.index("Saved task plan") < coding.index("Draft coding plan")
 
 
 @pytest.mark.asyncio
@@ -168,7 +173,7 @@ async def test_agent_node_adds_time_check_near_the_deadline(monkeypatch):
     monkeypatch.setattr(orchestrator, "get_static_context", lambda: "STATIC")
 
     def state_started(seconds_ago):
-        return {"model": "m", "model_provider": "openai", "history_messages": [], "notes": [], "task_plan": {}, "llm_calls": 0,
+        return {"model": "m", "model_provider": "openai", "history_messages": [], "notes": [], "task_plan": {}, "coding_plan": {}, "llm_calls": 0,
                 "messages": [HumanMessage(content="Question?")],
                 "turn_started_at": datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)}
 
@@ -805,6 +810,20 @@ async def test_finalize_node_message_selection(monkeypatch):
     assert pending["answer_markdown"].startswith(orchestrator.PENDING_APPROVAL_MESSAGE)
     assert "$1.25" in pending["answer_markdown"]
     assert "```sql\nSELECT * FROM big_table\n```" in pending["answer_markdown"]
+    assert "too long to display" not in pending["answer_markdown"]
+
+    # A query too tall to display is cut to its first lines, marked and noted.
+    many_lines = "\n".join(f"SELECT col_{i}" for i in range(300))
+    cut = await finalize_node({**base, "verified": False, "needs_approval": True,
+                               "estimated_cost": "$1.25", "largest_pending_query": many_lines})
+    assert "SELECT col_0\n" in cut["answer_markdown"] and "col_299" not in cut["answer_markdown"]
+    assert "\n...\n\nThe query is too long to display in full" in cut["answer_markdown"]
+
+    # So is a query that is one very long line.
+    one_line = await finalize_node({**base, "verified": False, "needs_approval": True,
+                                    "estimated_cost": "$1.25", "largest_pending_query": "x" * 100_000})
+    assert len(one_line["answer_markdown"]) < 5000
+    assert "\n...\n\nThe query is too long to display in full" in one_line["answer_markdown"]
 
     # Only the first, verified and uncancelled turn wrote a findings row.
     write_findings.assert_awaited_once()

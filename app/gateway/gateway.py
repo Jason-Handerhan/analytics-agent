@@ -56,7 +56,7 @@ from app.orchestrator.compaction import CompactionResult, compact_history_pipeli
 from app.orchestrator.conversation_memory.writer import write_summary_row
 from app.orchestrator.orchestrator import graph, init_orchestrator
 from app.shared_helpers import get_firestore_client, live_turn_doc, session_doc
-from app.orchestrator.state import AgentState, Note, StoredTurn, TaskPlan
+from app.orchestrator.state import AgentState, CodingPlanDraft, Note, StoredTurn, TaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -134,16 +134,18 @@ class SessionMemory:
     history_messages: list[StoredTurn]   # key mirrors the sessions document field
     notes: list[Note]
     task_plan: TaskPlan
+    coding_plan: CodingPlanDraft
 
 
 async def fetch_session_memory(conversation_id: str) -> SessionMemory:
-    """Reads the sessions document's history, notes and task plan -- empty if the doc doesn't exist yet."""
+    """Reads the sessions document's history, notes, task plan and draft coding plan -- empty if the doc doesn't exist yet."""
     snap = await session_doc(conversation_id).get()
     stored = snap.to_dict() if snap.exists else {}
     return SessionMemory(
         history_messages=[StoredTurn(**entry) for entry in stored.get("history_messages", [])],
         notes=stored.get("notes", []),
         task_plan=stored.get("task_plan", {}),
+        coding_plan=stored.get("coding_plan", {}),
     )
 
 
@@ -194,7 +196,8 @@ def call_tool_status(tool_names: list[str]) -> str | None:
         return "Combined results"
     sources = sorted({SOURCE_NAMES[tn] for tn in tool_names if tn in SOURCE_NAMES}) #sorted set
     if not sources:
-        managed = [label for tool, label in (("manage_notes", "memory"), ("manage_tasks", "the task plan"))
+        managed = [label for tool, label in (("manage_notes", "memory"), ("manage_tasks", "the task plan"),
+                                  ("save_coding_plan", "the coding plan"))
                    if tool in tool_names]
         return f"Managed {' and '.join(managed)}" if managed else None
     if len(sources) > STATUS_MAX_NAMED_SOURCES:
@@ -404,6 +407,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             history_verified_numbers=history_verified_numbers,
             notes=memory.notes,
             task_plan=memory.task_plan,
+            coding_plan=memory.coding_plan,
             turn_started_at=turn_started_at,
         )
         initial_state["messages"] = rebuild_paused_messages(pending["messages"], pending["tool_calls"])
@@ -429,6 +433,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             history_verified_numbers=history_verified_numbers,
             notes=memory.notes,
             task_plan=memory.task_plan,
+            coding_plan=memory.coding_plan,
             turn_started_at=turn_started_at,
         )
 

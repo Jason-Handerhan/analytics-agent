@@ -67,6 +67,7 @@ def test_build_initial_state():
         history_verified_numbers=[1.5, 2.5],
         notes=[],
         task_plan={},
+        coding_plan={},
         turn_started_at=started_at,
     )
 

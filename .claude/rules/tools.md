@@ -42,6 +42,7 @@ instance of this, not seven independent rules.
 | `search_conversation_findings` | **No** — a plain function in the orchestrator |
 | `manage_tasks` | **No** — a plain function in the orchestrator |
 | `manage_notes` | **No** — a plain function in the orchestrator |
+| `save_coding_plan` | **No** — a plain function in `app/orchestrator/coding_tools.py` |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -116,9 +117,9 @@ Not a BigQuery tool as far as guardrails go (no dry-run, cost tier, or
 `bytes_consumed`); its limit is a token budget. Design in
 `docs/conversation-memory.md`.
 
-**`manage_tasks` and `manage_notes` are part of that exception: they write this project's `sessions`
-document** (the `task_plan` and `notes` fields, `conversation_id` injected) — nothing portable to host.
-Neither is a numeric source.
+**`manage_tasks`, `manage_notes` and `save_coding_plan` are part of that exception: they write this project's `sessions`
+document** (the `task_plan`, `notes` and `coding_plan` fields, `conversation_id` injected) — nothing portable to host.
+None is a numeric source. `save_coding_plan` also reads the repo's branches from GitHub (`github-read-token`).
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -228,6 +229,7 @@ later changes the URL and adds auth headers — not this file.
 | `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions, compaction summaries) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
 | `manage_tasks` | The conversation's task plan: replaces the whole list, an empty list clears it | Never a number source: a task holds work, not results (`docs/conversation-memory.md`) |
 | `manage_notes` | The conversation's standing notes (`preference`, `definition`, `goal`, `constraint`): add, update or delete by id | Never a number source: a note holds what the user stated, not data figures (`docs/conversation-memory.md`) |
+| `save_coding_plan` | A draft coding plan, built and revised with the user: saves it as the session's `coding_plan` (a new version each save). `base_branch` `dev` is a new task; another existing branch (listed from GitHub, not `main`) is a revision, else an error lists the eligible branches. The result tells the agent to show the plan and get the user's approval of that version before `start_coding_task` | Never a number source: a plan holds work to do, not results (`docs/coding-agent.md`) |
 | `search_conversation_findings` | Semantic (vector) search over earlier verified answers, in this conversation or all of the user's: `mode="search"` (closest turns) or `mode="tags"` (topics and entities in use) | Only a hit's `verified_numbers` are a number source; tags are never citable (`docs/conversation-memory.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at

@@ -232,8 +232,8 @@ hourly order count) flips to `"5.4e+04"`-style text, confirmed live, not
 hypothetical. `sns.heatmap`'s `fmt=` only accepts a plain format-spec
 string per cell, not a callable, so the fix is exactly what this section
 previously said wasn't worth the complexity: pre-build a matching-shape
-grid of already-formatted strings (`grid.map(lambda v: self._format_value(v,
-"auto"))`, pandas 3.x's current name for the elementwise operation — the
+grid of already-formatted strings (`grid.map(self._format_value,
+value_format="auto")`, pandas 3.x's current name for the elementwise operation — the
 older `applymap` is gone, not just deprecated, in the pandas version this
 project runs) and pass that as `annot=` with `fmt=""`, instead of handing
 seaborn the raw numeric grid to format itself. Confirmed live that seaborn
@@ -241,6 +241,16 @@ still correctly skips annotating a masked/NaN cell regardless of what
 string sits in that position in the custom annotation grid, so the existing
 "hide annotations once cells are too small to read" behavior
 (`MIN_HEATMAP_ANNOT_FONTSIZE`) needed no changes alongside this.
+
+**Heatmap annotations are sized for the text's width, and a swap is requested when it helps (2026-11-03).** A
+cell holds one line of height but the whole annotation in width, so a grid with many columns of long values
+(15 columns of `-0.07823`) overlapped under the old cell-size rule. `_annotation_fontsize` takes the smaller of
+the height fit, the width fit (the longest annotation at `CHAR_WIDTH_FACTOR`, in the axes' share of the figure,
+`HEATMAP_AXES_WIDTH_SHARE`) and `MAX_HEATMAP_ANNOT_FONTSIZE`. `render` then branches: at least
+`MIN_HEATMAP_ANNOT_FONTSIZE` as given, draw it; else if the swapped axes reach it, raise a `ToolError` telling
+the agent to swap `x_field` and `y_field` (the agent never sees the image, so it is told rather than flipped
+silently); else draw without annotations. The model-facing guidance is now to put the axis with more categories
+on `y_field`.
 
 **`histogram`'s count doesn't need the *choice* — it's never a percent or
 currency — but it still gets `_apply_value_format`, just without the mixin
@@ -745,6 +755,10 @@ class HeatmapChartSpec(ChartSpecBase):
 
     7 days x 24 hours = 168 rows. Both axes must be low-cardinality, or the
     grid is unreadable before the row cap is even reached.
+
+    Cell values are wider than tall, so put the axis with MORE distinct
+    values on y_field. If the values won't fit as given but would fit with the
+    axes swapped, the tool errors and says to swap.
     """
     chart_type: Literal["heatmap"]
     x_field: str
@@ -760,8 +774,11 @@ class HeatmapChartSpec(ChartSpecBase):
         self._check_max_categories(df[self.y_field].nunique(), MAX_HEATMAP_AXIS, "y-axis categories")
         grid = df.pivot(index=self.y_field, columns=self.x_field,
                         values=self.value_field)
+        annot = grid.map(self._format_value, value_format="auto")
+        # fontsize = _annotation_fontsize(n_rows, n_cols, longest annotation): fits as given -> draw;
+        # fits with the axes swapped -> ToolError telling the agent to swap; else draw without annotations
         fig, ax = self._setup()
-        sns.heatmap(grid, annot=True, fmt=".4g", ax=ax)
+        sns.heatmap(grid, annot=annot, fmt="", ax=ax)
         return self._finish(fig, ax)
 
 ```

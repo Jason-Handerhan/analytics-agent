@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+
+# git for the clone, apply, commit and push; ca-certificates so git can reach GitHub over https
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# uv's official binary, no pip install needed
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+# Only the coding-agent group's packages, in their own layer so code edits skip reinstalling them
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --only-group coding-agent --no-install-project
+
+COPY app ./app
+COPY coding_agent_app ./coding_agent_app
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Shell form (no brackets), so the shell fills in $PORT, the port Cloud Run says to listen on.
+# exec makes uvicorn replace the shell, so uvicorn gets Cloud Run's shutdown signal itself and can stop cleanly.
+CMD exec uvicorn coding_agent_app.main:app --host 0.0.0.0 --port $PORT

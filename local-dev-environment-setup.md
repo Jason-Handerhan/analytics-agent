@@ -1117,6 +1117,7 @@ risk of forgetting to change something before deploying.
    ```
    Ten `OK` lines and you're done. This proves *your* access; `agent-sa`'s
    comes from the same loop in item 2, so a failure there means re-running it.
+   (`github-agent-push-token`, created in Step 19, is deliberately not in these loops: only `coding-agent-sa` may read it.)
 4. Read it from Python — a small helper you'll reuse everywhere you need a secret:
    ```python
    from google.cloud import secretmanager
@@ -1463,6 +1464,266 @@ Fifteen `OK` lines and every grant from Steps 13/15/16 is confirmed in place.
 exists. Exercising it would mean impersonating `agent-sa`, which nothing here
 grants your own account, and isn't worth adding just for this check. That
 gap closes naturally in Phase 1 when the code itself runs as `agent-sa`.
+
+---
+
+## Step 19 — Coding agent: its service account, BigQuery access and runtime roles
+
+**When:** when you start building the coding agent's tools (`docs/coding-agent.md`); nothing before this depends
+on it. The coding agent edits the ML repo and runs as a private Cloud Run service under its **own** service account,
+`coding-agent-sa`: separate from `agent-sa`, with no access to `agent_safe`. This step creates it with only what its
+schema tools and the dry-run experiment need (steps 1 to 6). The roles the running service needs (Firestore, secrets) are
+steps 7 and 8; permission for the gateway to create its tasks comes when the queue is built.
+
+**What it can and can't do after this step**
+
+| It can | It can't |
+|---|---|
+| List tables and read table schemas (names, types, descriptions) in `instacart`, `building_blocks` and `ml_model_feature_table` | Write to, create or delete any table or dataset |
+| Create BigQuery query jobs in the project, and dry-run queries on those three datasets (step 6) | Touch `agent_safe`, `telemetry` or any other dataset |
+| Be impersonated by you, for testing from a notebook with exactly its permissions | Return rows to the agent: its tools expose none |
+
+The commands below are PowerShell; run them in one window so the variables stay set. Names and the project ID are the
+values in `app/config.py`.
+
+1. **Set the variables and create the account.**
+   ```powershell
+   $project = "instacart-ml-model"
+   $sa = "coding-agent-sa"
+   $saEmail = "$sa@$project.iam.gserviceaccount.com"
+   $me = gcloud config get-value account
+
+   gcloud iam service-accounts create $sa --project=$project --display-name="Coding agent (job process)" --description="Runs the coding agent job; metadata-only BigQuery access"
+   ```
+   It prints `Created service account [coding-agent-sa]`. (A notice that gcloud components can be updated is only
+   advertising a newer version.)
+
+2. **Let yourself impersonate it.** Notebook tests call BigQuery *as* the service account, so a permission that is
+   missing shows up in the notebook before it shows up in production. This needs the IAM Credentials API and the
+   Token Creator role on the account.
+   ```powershell
+   gcloud services enable iamcredentials.googleapis.com --project=$project
+   gcloud iam service-accounts add-iam-policy-binding $saEmail --project=$project --member="user:$me" --role="roles/iam.serviceAccountTokenCreator"
+   ```
+   `$me` is your own gcloud account, so no address is typed into the command.
+
+3. **Metadata Viewer on the three datasets.** Names, types and descriptions, never rows. The BigQuery **console** is the
+   dependable route (the `bq` command line has given trouble here before). For each of `instacart`,
+   `building_blocks` and `ml_model_feature_table`:
+   - Open the dataset in the Explorer panel, then **Share → Manage permissions → Add principal**.
+   - Principal: `coding-agent-sa@instacart-ml-model.iam.gserviceaccount.com`. Role: **BigQuery Metadata Viewer**. Save.
+
+   The same grant as SQL, pasted into a console query tab one statement at a time:
+   ```sql
+   GRANT `roles/bigquery.metadataViewer`
+   ON SCHEMA `instacart-ml-model.instacart`
+   TO "serviceAccount:coding-agent-sa@instacart-ml-model.iam.gserviceaccount.com"
+   ```
+   (Repeat with `building_blocks` and `ml_model_feature_table`.)
+
+4. **Permission to create query jobs,** at project level. A dry run is a query job that is validated and never executed.
+   ```powershell
+   gcloud projects add-iam-policy-binding $project --member="serviceAccount:$saEmail" --role="roles/bigquery.jobUser"
+   ```
+
+5. **Verify.**
+   ```powershell
+   gcloud projects get-iam-policy $project --flatten="bindings[].members" --filter="bindings.members:$saEmail" --format="table(bindings.role)"
+   ```
+   It should list `roles/bigquery.jobUser`. The dataset grants show under each dataset's **Share → Manage permissions**,
+   and the impersonation grant under the service account's **Permissions** tab in IAM. As with Step 18, a binding that
+   exists is not proof that it *works*: `notebooks/phase6_dry_run_access.ipynb` exercises it through impersonation.
+
+6. **Data Viewer on the same three datasets.** Added after the experiment showed a dry run needs read access to the tables it
+   references (it is denied with only Metadata Viewer and Job User). Same console steps as step 3, with the role
+   **BigQuery Data Viewer**, or as SQL:
+   ```sql
+   GRANT `roles/bigquery.dataViewer`
+   ON SCHEMA `instacart-ml-model.instacart`
+   TO "serviceAccount:coding-agent-sa@instacart-ml-model.iam.gserviceaccount.com"
+   ```
+   (Repeat for `building_blocks` and `ml_model_feature_table`.) Then run the notebook again.
+
+7. **What the running service needs (2026-11-08).** The deployed service runs as this account, so these are granted to it, not to you.
+   The notebooks that call the service in-process use your own credentials for Firestore and Secret Manager, as the main agent's
+   notebooks do, so they do not exercise these grants.
+   ```powershell
+   $project = "instacart-ml-model"
+   $saEmail = "coding-agent-sa@$project.iam.gserviceaccount.com"
+
+   # read and write the task documents in Firestore
+   gcloud projects add-iam-policy-binding $project --member="serviceAccount:$saEmail" --role="roles/datastore.user"
+
+   # read the secrets it loads at startup, one by one (never project-wide)
+   foreach ($secret in "anthropic-api-key", "langsmith-api-key") {
+       gcloud secrets add-iam-policy-binding $secret --project=$project --member="serviceAccount:$saEmail" --role="roles/secretmanager.secretAccessor"
+   }
+   ```
+   Firestore has no per-collection IAM, so `roles/datastore.user` covers the whole database, the same as `agent-sa`'s grant. The
+   GitHub token (step 9) gets the same binding, and Token Creator on `turn-writer-sa` is added with the telemetry step.
+
+8. **Expire old task documents.** The documents carry an `expires_at` field (30 days); this makes Firestore delete them then.
+   ```powershell
+   gcloud firestore fields ttls update expires_at --collection-group=background_tasks --enable-ttl --project=instacart-ml-model
+   ```
+
+9. **The GitHub token the service pushes with.** The service pushes `agent/<plan name>-<id>` branches to the ML repo; the token lives in Secret
+   Manager and in the service's process only, never in the sandbox. At startup `coding_agent_app/main.py` reads it and hands it to git as an
+   authorization header through `GIT_CONFIG_*` environment variables, so it never appears in a URL or a command line.
+
+   a. **Create it.** GitHub, then your profile picture, **Settings**, **Developer settings**, **Personal access tokens**, **Fine-grained
+      tokens**, **Generate new token**. Token name `coding-agent-push`. Expiration: your choice (put a reminder in your calendar; an
+      expired token makes the push fail). Resource owner: your account. Repository access: **Only select repositories**, then the ML repo.
+      Under **Permissions**, click **Add permissions**, type `Contents` in the search box and tick only that. It appears in the table with
+      its access level: change it to **Read and write**. GitHub adds **Metadata** (read-only) by itself; leave it. Tick nothing else, in
+      particular not **Workflows**, **Pull requests** or **Administration**, so the table has exactly those two rows. Click **Generate
+      token** and copy the value (it starts with `github_pat_` and is shown once).
+
+   b. **Store it in Secret Manager** (PowerShell). The value is read from a hidden prompt and written to a temporary file without a
+      trailing newline, so it is not left in your shell history and the secret has no stray line break.
+      ```powershell
+      $project = "instacart-ml-model"
+      $secure = Read-Host "GitHub token" -AsSecureString
+      $file = New-TemporaryFile
+      Set-Content -Path $file -Value ([System.Net.NetworkCredential]::new("", $secure).Password) -NoNewline
+      gcloud secrets create github-agent-push-token --project=$project --replication-policy=automatic --data-file=$file
+      Remove-Item $file
+      ```
+
+   c. **Let the service read it.**
+      ```powershell
+      gcloud secrets add-iam-policy-binding github-agent-push-token --project=$project --member="serviceAccount:coding-agent-sa@$project.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+      gcloud secrets versions list github-agent-push-token --project=$project
+      ```
+      The list should show version 1 as `enabled`. The first real push (a task whose patch applies) is the end-to-end test of the token.
+
+   d. **Optional hardening.** The token can push to any branch of that repo. Our code only ever pushes `agent/...` branches, but a ruleset stops a
+      leaked token from rewriting `main` or `dev`: GitHub repo **Settings**, **Rules**, **Rulesets**, **New ruleset**, **New branch ruleset**.
+      Name it `Protect main and dev`, set Enforcement to **Active**, leave the bypass list empty, use **Add target** to include `main` and
+      `dev` (each shows with a green plus, meaning included), and keep
+      **Restrict deletions** and **Block force pushes** ticked. Do not tick "Require a pull request": that would block your own direct pushes.
+      Making the token unable to push to those branches at all needs a separate GitHub account for the agent, because the owner can always push.
+
+   Rotating it later is a new secret version (`gcloud secrets versions add github-agent-push-token --data-file=...`); the service reads the
+   latest version when it starts.
+
+**Deliberately not granted:** every write role, and anything on `agent_safe`, `telemetry` or the other datasets. Data Viewer
+means this account can read rows in those three datasets; the coding agent's tools never execute a query or return rows,
+and the account's credentials exist only in the job process, never in the sandbox. `docs/coding-agent.md` records the decision.
+
+**Added with the service (step 7 above):** `roles/datastore.user` and `secretAccessor` on the Anthropic and LangSmith keys. **Still to add:**
+the queue and invoker permissions (Step 20), and Token Creator on `turn-writer-sa`.
+
+**If something fails**
+- *Permission denied right after a grant:* IAM changes can take a minute or two to apply; wait and retry before changing
+  anything.
+- *Impersonation fails with a permission or "API not enabled" error:* check that step 2 ran in the same project and that the
+  Token Creator binding names your current account (`gcloud config get-value account`).
+- *`bq` errors on the `GRANT`:* use the console route in step 3.
+
+## Step 20 — Coding agent service: the queue, the invoker account and the permissions
+
+**When:** before the coding agent service is deployed. Cloud Tasks makes the long request to the service (so the gateway's chat request does
+not have to), and Cloud Run's own IAM check is what keeps the service private. Four identities are involved, and each gets only what it
+needs:
+
+| Identity | Role in this flow | What it may do |
+|---|---|---|
+| `agent-sa` | the gateway's account (it will run `start_coding_task`) | add tasks to the queue, and tell Cloud Tasks to call as the invoker account; it may **not** call the service |
+| `coding-agent-invoker` | the identity Cloud Tasks puts in the token it sends | call this one service (`run.invoker`), nothing else; no keys, no code runs as it |
+| `coding-agent-sa` | the service's own account (Step 19) | Firestore, its secrets, BigQuery metadata |
+| you (`$me`) | creating tasks by hand for the first tests, and deploying | the same two grants as `agent-sa`, and to deploy as `coding-agent-sa` |
+
+Cloud Tasks's own built-in service agent signs the token and needs no grant. Run these in one PowerShell window.
+
+**A. Before the service exists**
+```powershell
+$project = "instacart-ml-model"; $region = "us-central1"
+$me = gcloud config get-value account
+$invoker = "coding-agent-invoker@$project.iam.gserviceaccount.com"
+$gateway = "agent-sa@$project.iam.gserviceaccount.com"
+
+gcloud services enable cloudtasks.googleapis.com --project=$project
+gcloud iam service-accounts create coding-agent-invoker --project=$project --display-name="Cloud Tasks calls the coding agent service as this"
+gcloud tasks queues create coding-agent-queue --project=$project --location=$region --max-concurrent-dispatches=1 --max-attempts=1
+```
+The queue runs one task at a time and makes one attempt, because a retry would push a branch twice.
+
+For you and for `agent-sa`, the right to add tasks to the queue and to act as the invoker account (without the second, Cloud Tasks refuses to
+put the invoker's identity in a task):
+```powershell
+foreach ($member in "user:$me", "serviceAccount:$gateway") {
+    gcloud tasks queues add-iam-policy-binding coding-agent-queue --project=$project --location=$region --member=$member --role="roles/cloudtasks.enqueuer"
+    gcloud iam service-accounts add-iam-policy-binding $invoker --project=$project --member=$member --role="roles/iam.serviceAccountUser"
+}
+```
+For you, the right to deploy a service that runs as `coding-agent-sa`:
+```powershell
+gcloud iam service-accounts add-iam-policy-binding "coding-agent-sa@$project.iam.gserviceaccount.com" --project=$project --member="user:$me" --role="roles/iam.serviceAccountUser"
+```
+An Owner or Editor already has the two "act as" rights, so those lines change nothing for you.
+
+**B. After the service is deployed** (the service must exist first). Only the invoker account may call it:
+```powershell
+gcloud run services add-iam-policy-binding coding-agent --project=$project --region=$region --member="serviceAccount:$invoker" --role="roles/run.invoker"
+```
+
+**C. Check what is set**
+```powershell
+gcloud iam service-accounts get-iam-policy $invoker --project=$project
+gcloud tasks queues get-iam-policy coding-agent-queue --project=$project --location=$region
+gcloud projects get-iam-policy $project --flatten="bindings[].members" --filter="bindings.members:coding-agent-sa@$project.iam.gserviceaccount.com" --format="table(bindings.role)"
+```
+The first two should list you and `agent-sa` (`serviceAccountUser` and `enqueuer`). The last should list `roles/bigquery.jobUser` and
+`roles/datastore.user` for `coding-agent-sa`; its secret and dataset grants are on those resources and do not appear there.
+
+**Not needed:** a grant for Cloud Build to push the image (the gateway's build already pushed to the same repository with the same
+builder), and Token Creator on `turn-writer-sa`, which waits for the telemetry step.
+
+**If something fails**
+- *`PERMISSION_DENIED` when creating a task:* the grants above are missing for the account creating it; allow a minute or two after granting.
+- *A task's attempt fails with a 401 or 403 in the queue's logs:* the invoker account does not have `run.invoker` on the service (part B),
+  or the token's audience is not the service URL.
+- *The build cannot push the image:* the account that runs builds needs Artifact Registry writer on the repository; send the error text.
+
+## Step 21 — Coding agent service: build, deploy, first test
+
+**When:** after Step 20, part A. Run in one PowerShell window (the variables are from Step 20).
+
+1. **Build and push the image** (Cloud Build, using the repo-root `cloudbuild.coding-agent.yaml`). It reuses the `cloud-run-source-deploy`
+   repository the gateway's deploy created.
+   ```powershell
+   $image = "$region-docker.pkg.dev/$project/cloud-run-source-deploy/coding-agent:v1"
+   gcloud builds submit --project=$project --config cloudbuild.coding-agent.yaml --substitutions "_IMAGE=$image" .
+   ```
+
+2. **Deploy it, private.** Runs as `coding-agent-sa`, one request at a time, one instance, a 30-minute request timeout. Memory is a starting
+   point to size from what a run uses.
+   ```powershell
+   gcloud run deploy coding-agent --project=$project --region=$region --image=$image `
+     --service-account="coding-agent-sa@$project.iam.gserviceaccount.com" --no-allow-unauthenticated `
+     --memory=1Gi --cpu=1 --timeout=1800 --concurrency=1 --min-instances=0 --max-instances=1
+   ```
+   Then Step 20, part B (`run.invoker` for the invoker account).
+
+3. **First test, with a task that pushes nothing.** In `notebooks/coding_agent_e2e.ipynb`, pick `promo_share_ambiguous`, run the cells up to
+   "Create the task" (not "Run it"), and note the `task_id`. Then start it from Cloud Tasks:
+   ```powershell
+   $url = gcloud run services describe coding-agent --project=$project --region=$region --format="value(status.url)"
+   gcloud tasks create-http-task <task_id> --project=$project --location=$region --queue=coding-agent-queue `
+     --url="$url/run/<task_id>" --method=POST `
+     --oidc-service-account-email=$invoker --oidc-token-audience=$url
+   ```
+   Check `gcloud tasks create-http-task --help` for a dispatch-deadline option and set 30 minutes if there is one (the HTTP default is
+   shorter than a run). Run the notebook's "Watch a task the deployed service runs" cell: it prints `Starting...` through `completed`.
+   Next, `rapidfuzz_dependency` (a clean task that pushes a branch).
+
+**If something fails**
+- *The task's attempt shows 401 or 403:* part B of Step 20 is missing, or the audience is not the service URL exactly.
+- *The service starts and the task stays `queued`:* the call never reached `run_coding_task`; read the service's logs in Cloud Run.
+- *The task ends `stopped` with `sandbox_error` or `internal_error`:* the report holds the error; check that `coding-agent-sa` has the secret
+  and Firestore grants from Step 19.
+- *Slow first request:* a cold start loads the secrets and the image; later requests are faster.
 
 ---
 

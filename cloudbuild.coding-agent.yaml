@@ -1,0 +1,11 @@
+# Cloud Build runs these steps in order on a copy of this folder.
+# _IMAGE is set on the command line: --substitutions "_IMAGE=<registry path>:<tag>"
+
+steps:
+  # the container that runs the step: Google's builder image that provides the docker command
+  - name: gcr.io/cloud-builders/docker
+    # docker build: -f the Dockerfile to use, -t the image's name and tag, . the folder the Dockerfile copies from
+    args: ["build", "-f", "Dockerfile.coding-agent", "-t", "$_IMAGE", "."]
+
+# push these images to the registry when the steps succeed; unlisted ones are discarded
+images: ["$_IMAGE"]

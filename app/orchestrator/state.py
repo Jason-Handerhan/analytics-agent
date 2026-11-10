@@ -73,6 +73,13 @@ class TaskPlan(TypedDict, total=False):
     tasks: list[Task]
 
 
+class CodingPlanDraft(TypedDict, total=False):
+    """The conversation's draft coding plan; empty when none is saved or after it is started."""
+    plan: dict   # a CodingAgentPlan, as saved by save_coding_plan
+    version: int
+    saved_at: datetime
+
+
 class TurnError(TypedDict):
     stage: str
     error_type: str
@@ -100,6 +107,7 @@ class AgentState(TypedDict):
     history_messages: list[BaseMessage]  # conversation history
     notes: list[Note]   # standing notes for this conversation, read from the sessions document
     task_plan: TaskPlan   # this conversation's task plan, read from the sessions document
+    coding_plan: CodingPlanDraft   # this conversation's draft coding plan, read from the sessions document
     history_verified_numbers: list[float]   # verified_numbers of the stored turns, read with the history
 
     # Accumulated during the tool loop

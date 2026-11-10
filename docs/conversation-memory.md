@@ -419,6 +419,10 @@ numeric source.
 
 ## Open
 
+- Add each turn's tool names to the overview rows (from `tool_calls`), so the agent can find the turns that used
+  `manage_tasks` or `save_coding_plan` without reading every turn. Both replace their whole state on each call, so
+  the ledger's `tool_calls` already holds every earlier version of the task list and of the coding plan
+  (`include_tool_calls`). Planned after the coding agent works (`docs/build-order.md`, Phase 6 item 2a).
 - Whether `approx_tokens` should include tool-call size (a SQL-computed
   `LENGTH(args)` in the overview query would make the pre-check exact with
   `include_tool_calls`). Revisit only if that flag is hit often.

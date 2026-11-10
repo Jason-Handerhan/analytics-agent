@@ -278,6 +278,21 @@ def test_heatmap():
     fig2 = validate_and_render(dense_grid, spec, HeatmapChartSpec)
     assert len(fig2.axes[0].texts) == 0
 
+    # Short values across many columns fit as given.
+    day_hour = [{"order_hour": x, "order_dow": y, "orders": 100 + x * y}
+                for x in range(24) for y in range(7)]
+    assert len(validate_and_render(day_hour, spec, HeatmapChartSpec).axes[0].texts) == 168
+
+    # Long values across many columns don't fit; swapping the axes does.
+    correlations = [{"feature": f"f{i}", "candidate": f"c{j}", "corr": -0.007123 - 0.01111 * (i * 3 + j)}
+                    for i in range(15) for j in range(3)]
+    wide_spec = {"chart_type": "heatmap", "x_field": "feature", "y_field": "candidate",
+                 "value_field": "corr", **LABELS}
+    with pytest.raises(ToolError, match="Swap them"):
+        validate_and_render(correlations, wide_spec, HeatmapChartSpec)
+    swapped_spec = {**wide_spec, "x_field": "candidate", "y_field": "feature"}
+    assert len(validate_and_render(correlations, swapped_spec, HeatmapChartSpec).axes[0].texts) == 45
+
 
 def test_concentration():
     """20 rows (the required grain), front-loaded cumulative curve."""

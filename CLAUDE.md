@@ -126,6 +126,7 @@ that area, rather than reconstructing the design from memory:
 | `docs/ci-cd.md` | The GitHub Actions workflow, deploy gate, `github-deployer` |
 | `docs/frontend.md` | Power Apps controls, filter capture, response rendering |
 | `docs/llm-judge.md` | The scheduled eval job scoring faithfulness |
+| `docs/coding-agent.md` | The planned coding agent: Cloud Run Job, task tools, branch and draft-PR flow |
 | `docs/golden-dataset.md` | Hand-verified correctness regression tests |
 | `docs/success-criteria.md` | What proves a phase works — read before building, not just at the end |
 | `docs/build-order.md` | What phase we're in and what's next |
@@ -234,4 +235,4 @@ connection) actually needs it as a config constant rather than a deploy-time
 value. Secrets live in Secret Manager: `power-bi-sp-client-id`,
 `power-bi-sp-client-secret`, `azure-tenant-id`, `entra-client-secret`,
 `gateway-api-key`, `github-read-token`, `anthropic-api-key`,
-`langsmith-api-key`, `gemini-api-key`, `openai-api-key`.
+`langsmith-api-key`, `gemini-api-key`, `openai-api-key`, `github-agent-push-token`.
