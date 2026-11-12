@@ -111,15 +111,17 @@ class CleanSandboxVerification:
 
 
 def verify_patch_in_clean_sandbox(client: SandboxClient, snapshot_id: str, patch_bytes: bytes, changed_paths: list[str],
-                                  dev_moved: bool, sandbox_start_commit: str, base_branch: str) -> CleanSandboxVerification:
+                                  sandbox_start_commit: str, base_branch: str) -> CleanSandboxVerification:
     """Apply the patch to a clean clone of the base branch in a fresh sandbox and check it there: compile, dependencies, ruff, pytest.
+    Runs before the patch is pushed, so the clone is the base branch as the push will find it.
     The agent's own sandbox proves nothing, because it had a shell there. The job container is not used, because compiling
     runs the project's JavaScript and the container holds the git token."""
     with client.sandbox(snapshot=snapshot_id) as sandbox:
         # clone only the base branch's latest commit
         sandbox.run(f"git clone --depth 1 --branch {base_branch} {REPO_URL} {WORK_DIR}", timeout=300)
         # the branch has moved: also fetch the start commit, so git has the original files the patch was made from and can merge
-        if dev_moved:
+        tip = sandbox.run(f"git -C {WORK_DIR} rev-parse HEAD").stdout.strip()
+        if tip != sandbox_start_commit:
             sandbox.run(f"git -C {WORK_DIR} fetch --depth 1 origin {sandbox_start_commit}", timeout=300)
 
         # apply the patch (--3way merges it with changes dev made to the same files); if it does not apply, nothing else can run
@@ -131,10 +133,10 @@ def verify_patch_in_clean_sandbox(client: SandboxClient, snapshot_id: str, patch
         # compile the Dataform project; the JSON output lists its tables and any compilation errors
         result.compile = sandbox.run(f"cd {WORK_DIR} && dataform compile --json", timeout=300)
 
-        # dependencies: if the patch changes requirements.txt, install from it as a person would, with versions held to
+        # dependencies: if the patch changes requirements.txt, install from it, with versions held to
         # requirements.lock. The repo runs on a Vertex AI Workbench VM and the lock file is a freeze of that VM's environment, so
         # it also lists the VM's own packages (nb_micromamba_kernels, vertex_ai_workbench, wbi_*). Those are files on the VM and
-        # cannot be installed here, so the grep drops them. gcsfs, which the code needs to read gs:// paths, was apparently
+        # cannot be installed here, so the grep drops them. gcsfs, which the code needs to read gs:// paths, was
         # preinstalled on the VM, so requirements.txt never declared it: it is added to the install here.
         if "requirements.txt" in changed_paths:
             result.dependencies = sandbox.run(
@@ -180,8 +182,8 @@ def build_final_checks(validation_problems: list[str], apply_patch_result: Apply
 
     # the checks below only run for a patch that passed validation
     if not validation_problems:
-        # ---- from applying the patch to a fresh clone of dev (apply_patch_result)
-        checks.append(FinalCheck(name="patch applies to a fresh clone of the current dev", passed=apply_patch_result.applied,
+        # ---- from applying the patch to a fresh clone of the base branch (apply_patch_result)
+        checks.append(FinalCheck(name="patch applies to a fresh clone of the base branch", passed=apply_patch_result.applied,
                                  detail=apply_patch_result.error))
         # dev moved and the patch conflicts with its changes: the task ends as needs_rebase
         needs_rebase = apply_patch_result.dev_moved and not apply_patch_result.applied

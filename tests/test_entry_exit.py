@@ -68,6 +68,7 @@ def test_build_initial_state():
         notes=[],
         task_plan={},
         coding_plan={},
+        coding_task_notifications=[],
         turn_started_at=started_at,
     )
 

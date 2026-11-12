@@ -74,7 +74,7 @@ Options not taken:
 | `start_coding_task()` | Takes no arguments; starts the active plan. Snapshots the plan into `background_tasks/{task_id}` (so later edits can't change a running task), creates a Cloud Tasks task for the coding-agent service with the task id, returns the id. Refused if the plan was last saved in the current turn A plan whose `base_branch` is not `dev` continues that branch: refused unless the branch is one a completed task of this user pushed, and while another task is running on it (the main agent types the branch, so a wrong or someone else's must be caught here; the conversation does not matter, a user can revise an earlier conversation's task; the service trusts the task document and does not check) |
 | `get_coding_task(task_id=None, diff=False, include_plan=False)` | With no id, lists this conversation's tasks, most recent first (about 10), as summary rows (a dict built in the tool from each stored task, not a class): id, name, goal, status, outcome, parent task, PR link, completion time, the changed file paths, and the questions of a `needs_input` task, enough to match a task to what the user is asking about (the findings tools help with that match; they do not find tasks). With an id, returns the task's `status` and `progress` and, once completed, the `CodingAgentResult` below. With `diff=True`, also the branch's diff from GitHub ("The port"); with `include_plan=True`, the plan snapshot, which a revision needs |
 | `coding_plans/{plan_id}` (Firestore) | `conversation_id`, `user_id`, the latest plan with its `version` and `saved_in_turn`, status (`draft` or `started`), with a TTL; the session document holds an `active_plan_id` |
-| `open_pull_request(task_id)` | Takes only the id. Opens a **draft** PR using the stored title and body; returns the existing PR if one is already open for that task |
+| `open_pull_request(task_id)` | Takes only the id. Opens a **draft** PR into `dev` from the task's pushed branch, signed in with `github-pr-token` (setup guide, Step 22). The title (the plan name) and body are built in code from the stored plan and result (`build_pull_request_body`), never from text the main agent writes. A `failed` task is allowed. Returns the existing PR if the task has one or the branch has an open one, and stores `pr_url` on the task |
 | `background_tasks/{task_id}` (Firestore) | `conversation_id`, `user_id`, the plan snapshot, `status` (`queued`, `running`, `completed`, `notified`), `progress` (a stage line the job overwrites), the `CodingAgentResult` (which holds the outcome), `cancel_requested`, timestamps, with a TTL |
 | Coding-agent service (Cloud Run) | Private; `POST /run/{task_id}`, called by Cloud Tasks. Reads its task from Firestore, runs the deep agent, writes progress and the result back |
 | `GET /tasks/{id}` | Ownership-checked read of the task document, for the client's poll |
@@ -206,8 +206,8 @@ from `main`'s code could be wrong for `dev`. The intent is to point the main age
   `agent_safe` boundary is untouched; it can read the three ML pipeline datasets (the dry-run tool needs that, decided
   2026-11-06), and the tools return no rows.
 - **Always a draft PR into `dev`; never merged by the agent.** Branch protection on `dev` and `main` (humans
-  merge into `dev` and promote `dev` to `main`), and agent branches prefixed `agent/`. The chat "yes" is a courtesy; the real gate is review in GitHub. An in-app hard gate
-  (generalizing the approval pause to a PR card) is possible later.
+  merge into `dev` and promote `dev` to `main`), and agent branches prefixed `agent/`. The chat "yes" is a courtesy; the real gate is review in GitHub. An in-app hard gate is planned:
+  `start_coding_task` and `open_pull_request` go through the approval pause (`docs/approval-workflow.md`, "Planned").
 - **The PR title and body come from the stored result,** not free text from the main agent. The verification
   contract only covers `answer_markdown`, so a PR description is a route for ungrounded claims otherwise.
 - **Path policy: a blocked list, not a `definitions/` allowlist (decided 2026-11-04).** The agent may change any
@@ -649,6 +649,8 @@ The container of the coding-agent service: `Dockerfile.coding-agent` at the repo
 - **Python 3.12 and `uv`**, as the gateway image, for the agent loop and the job code. It installs only the `coding-agent` dependency
   group (`uv sync --only-group`), not the gateway's heavier packages.
 - **Git**, which `python:3.12-slim` doesn't include, for the fresh clone, `git apply`, commit and push.
+- **Only the `app/` modules it imports** (`config`, `coding_task_models`, `coding_task_store`, `shared_helpers`), listed in the `COPY`, not the
+  whole package. A `RUN python -c "import coding_agent_app.main"` fails the build if a new import needs a file that is not listed.
 - **No Node, no Dataform CLI, no ML libraries.** Those live in the sandbox snapshot, which the agent's sandbox and
   the independent compile check both start from, pinned in one place (Dataform CLI 3.1.3 today; the core is pinned in
   `workflow_settings.yaml`, 3.0.52, and is fetched at the first compile). The job never compiles or runs
@@ -764,7 +766,7 @@ How the notebook becomes the job. **Exists** means in the notebook or `coding_ag
 |---|---|
 | `coding_agent.py` | exists in the notebook: `build_coding_agent`, `SANDBOX_SYSTEM_PROMPT`, the grader prompt (`CODING_RUBRIC` stays in `app/coding_task_models.py`, where the plan model embeds it), `compact_transcript`, `PatchCheckMiddleware`. The middleware lives here because it is agent-loop glue, which keeps `patch.py` free of langchain imports |
 | `patch.py` | exists: `read_patch`, `validate_patch`, `validate_notebooks`, `build_patch`, the blocked-path and size constants, `RESTORE_ENDINGS` |
-| `apply_and_verify.py` | exists: `apply_patch_and_push`, `verify_patch_in_clean_sandbox`, `build_final_checks` and their dataclasses. The push is part of `apply_patch_and_push` (built 2026-11-08): given a `new_branch` (a first task) or `is_revision` (the base branch is the agent's own), a patch that applies is committed (author `coding-agent`, message = `agent: <plan name> (task <task id>)` plus the plan's goal) and pushed; a new task creates `agent/<plan name>-<short task id>`, a revision adds a commit to the branch it continues. Tested against a local bare repo; the real push with the branch-only token (from the job's environment) is Layer 2 |
+| `apply_and_verify.py` | exists: `apply_patch_and_push`, `verify_patch_in_clean_sandbox`, `build_final_checks` and their dataclasses. The push is part of `apply_patch_and_push` (built 2026-11-08): given a `new_branch` (a first task) or `is_revision` (the base branch is the agent's own), a patch that applies is committed (author `coding-agent`, message = `agent: <plan name> (task <task id>)` plus the plan's goal) and pushed; a new task creates `agent/<plan name>-<short task id>`, a revision adds a commit to the branch it continues. Tested against a local bare repo; the real push with the branch-only token (from the job's environment) is Layer 2. The clean sandbox verifies **before** the push (decided 2026-11-10): a revision is pushed onto its own base branch, so a clone made after the push would already hold the patch and the patch would not apply; a failed verification still does not block the push, so a failed task keeps its branch for a revision |
 | `orchestration.py` | `execute_coding_run` (built: the sandbox, the agent, apply and verify, the result) and `run_coding_task(task_id)` (built: claim the task, read the parent for a revision, send the preamble and the plan as JSON, call `execute_coding_run`, write the result in a `finally`; an error becomes a stopped result with `model_unavailable`, `sandbox_error` or `internal_error`; a revision's parent is trusted to have pushed a branch, which `start_coding_task` checks) |
 | `main.py` | built: the FastAPI app and `POST /run/{task_id}` (not found 404, not queued 409, otherwise 200 after the run); a lazily cached `load_environment` puts the Anthropic and LangSmith keys in the environment and hands the push token to git as a `GIT_CONFIG_*` authorization header; no logic |
 | `tools.py`, `skills/` | exist |
@@ -799,8 +801,8 @@ needs promotion data the pipeline lacks stopped after 7 tool calls with two bloc
 task still ran the normal path.
 
 **Push rule.** The branch is pushed whenever the patch is valid and applies, even if the clean-sandbox checks fail; the failed checks
-and their output are in the result so a revision can fix them. A rejected or empty patch has no branch. Proposed, not confirmed:
-`open_pull_request` refuses a `failed` outcome unless the user explicitly says to open it anyway.
+and their output are in the result so a revision can fix them. A rejected or empty patch has no branch. A `failed` task's branch can still get a PR: the draft PR is gated by the user's approval, not by the
+outcome (decided 2026-11-10), and the prompt says never to open one without it.
 
 **Why a service, and how it is started (decided 2026-11-07).** A Cloud Run Job's start latency is not documented; one forum report
 says 90 to 120 seconds in us-central1 even with a minimal image, against 2 to 3 seconds for a service, and tasks run 3 to 5 minutes.
@@ -829,6 +831,8 @@ metrics from `CodingAgentResult`, plus the plan, the result and the task documen
 everything (decided 2026-11-07) and Firestore holds only the live state under its TTL. `get_coding_task` does not read BigQuery for now.
 written by impersonating `turn-writer-sa` as the gateway does (`coding-agent-sa` needs Token Creator on it, `turn-writer-sa` write access
 to the table). Our job code holds the identity, never the sandbox or the agent. Read `.claude/rules/telemetry.md` first.
+The row holds nothing about the PR: `open_pull_request` is a main-agent tool call, recorded in the main agent's telemetry
+(`tool_calls`); a PR field becomes a top-level column there only if it is wanted for querying (decided 2026-11-10).
 
 **Seeing the code.** `get_coding_task` builds the compare link from the repo constants and the branch
 (`https://github.com/{owner}/{repo}/compare/dev...<the result's branch>`), not stored in the result, since nothing returns it and it is derived,
@@ -869,8 +873,8 @@ scratch harnesses used while building are not ported.
 4. The task store and the push.
 5. The coding-agent service, the Cloud Tasks queue and the IAM (`google-cloud-tasks` approved), after a cold-start check of the real image.
 6. The telemetry table.
-7. The main-agent tools, `GET /tasks/{id}`, the `ref` change, the prompt attachment and the numbers rule; then the cost-gate extraction
-   (`docs/build-order.md`).
+7. The main-agent tools, `GET /tasks/{id}`, the `ref` change, the prompt attachment and the numbers rule; then the approval pause for
+   `start_coding_task` and `open_pull_request` (`docs/approval-workflow.md`, "Planned").
 8. Later: the snapshot GitHub Action, live progress, cancellation, the one-task cap.
 
 **Revisit later: run memory for very large tasks (noted 2026-11-09, after the coding agent works end to end).** Deep Agents'

@@ -53,6 +53,10 @@ GitHub's Contents API already returns either a list or a file from the same
 endpoint, so one tool with a single optional `path` covers both — no mode
 switch, no conditionally required args.
 
+**`alternate_branch` reads another branch** (2026-11-10), so the agent can read what a coding task pushed (the branch is in the
+task's result). It is checked first with the branches API; an unknown branch fails with the list of existing branches. The hidden
+`branch` argument stays the default. The whole-repo listing still shows only described files, so a new file is found by listing its folder.
+
 **Reads are bounded.** A file over GitHub's 1MB inline limit comes back with no
 content, so notebooks are refetched via `download_url` and stripped of outputs,
 execution counts, and attachments (`nbformat`) — a real 3.6MB notebook became

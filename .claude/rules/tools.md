@@ -43,6 +43,9 @@ instance of this, not seven independent rules.
 | `manage_tasks` | **No** — a plain function in the orchestrator |
 | `manage_notes` | **No** — a plain function in the orchestrator |
 | `save_coding_plan` | **No** — a plain function in `app/orchestrator/coding_tools.py` |
+| `start_coding_task` | **No** — a plain function in `app/orchestrator/coding_tools.py` |
+| `get_coding_task` | **No** — a plain function in `app/orchestrator/coding_tools.py` |
+| `open_pull_request` | **No** — a plain function in `app/orchestrator/coding_tools.py` |
 
 **`run_bigquery_sql` is one exception, deliberately.** Its safety depends
 on state that spans more than one call — the dry-run threshold applies to a
@@ -120,6 +123,8 @@ Not a BigQuery tool as far as guardrails go (no dry-run, cost tier, or
 **`manage_tasks`, `manage_notes` and `save_coding_plan` are part of that exception: they write this project's `sessions`
 document** (the `task_plan`, `notes` and `coding_plan` fields, `conversation_id` injected) — nothing portable to host.
 None is a numeric source. `save_coding_plan` also reads the repo's branches from GitHub (`github-read-token`).
+`start_coding_task` and `get_coding_task` read and write this project's `background_tasks` documents (`conversation_id` injected,
+and a task id from another conversation is refused); `get_coding_task(diff=True)` also reads the branch's diff from GitHub. `open_pull_request` reads the same documents, writes the task's `pr_url`, and opens the draft pull request on GitHub with `github-pr-token`.
 
 `dispatch_tool` and `call_tool_node` (`docs/approval-workflow.md`,
 `.claude/rules/orchestrator.md`) handle both kinds of tool through the same
@@ -222,7 +227,7 @@ later changes the URL and adds auth headers — not this file.
 | `run_bigquery_sql` | Warehouse numbers | Only authority for raw/warehouse numbers |
 | `run_dax_query` | Semantic-model numbers | Only authority for measure-level numbers |
 | `get_measure_dax` | One measure's DAX body, by exact name | The *how* behind a measure; names come from the registry in static context |
-| `get_repo_contents` | The ML repo: no `path` lists every described file, a folder path lists that folder, a file path returns its text | Entry point and authority for any code question |
+| `get_repo_contents` | The ML repo: no `path` lists every described file, a folder path lists that folder, a file path returns its text; `alternate_branch` reads a coding task's branch instead of the default | Entry point and authority for any code question |
 | `generate_chart` | Visualization | Renders already-fetched data; **never** a number source |
 | `generate_beeswarm` | SHAP beeswarm for one model and split, optionally narrowed to a department, aisle, or product — returns the chart reference (`chart:<id>`) **and the image itself** | Shows the overall pattern across many predictions; **never** a number source |
 | `combine_results` | Recombines earlier results (stack or join) into a new ref | Recombines already-fetched numbers; a left-join null filled with 0 is a numeric source (`docs/combine-tool.md`) |
@@ -230,6 +235,9 @@ later changes the URL and adds auth headers — not this file.
 | `manage_tasks` | The conversation's task plan: replaces the whole list, an empty list clears it | Never a number source: a task holds work, not results (`docs/conversation-memory.md`) |
 | `manage_notes` | The conversation's standing notes (`preference`, `definition`, `goal`, `constraint`): add, update or delete by id | Never a number source: a note holds what the user stated, not data figures (`docs/conversation-memory.md`) |
 | `save_coding_plan` | A draft coding plan, built and revised with the user: saves it as the session's `coding_plan` (a new version each save). `base_branch` `dev` is a new task; another existing branch (listed from GitHub, not `main`) is a revision, else an error lists the eligible branches. The result tells the agent to show the plan and get the user's approval of that version before `start_coding_task` | Never a number source: a plan holds work to do, not results (`docs/coding-agent.md`) |
+| `start_coding_task` | Starts the saved draft plan as a background coding agent task (no arguments): refused if there is no draft or it was saved this turn; writes the task, queues it with Cloud Tasks, clears the draft | Never a number source (`docs/coding-agent.md`) |
+| `get_coding_task` | The conversation's coding tasks: no `task_id` lists them (summary rows); with one, its status and, once finished, the result, with options for the diff, the plan and the agent's to-dos | Never a number source: a coding task's numbers are context, not data (`docs/coding-agent.md`) |
+| `open_pull_request` | Opens a draft pull request into `dev` from a finished task's branch (`task_id` only); the title and description are built in code from the stored plan and result; returns the existing pull request if there is one, and stores `pr_url` on the task | Never a number source (`docs/coding-agent.md`) |
 | `search_conversation_findings` | Semantic (vector) search over earlier verified answers, in this conversation or all of the user's: `mode="search"` (closest turns) or `mode="tags"` (topics and entities in use) | Only a hit's `verified_numbers` are a number source; tags are never citable (`docs/conversation-memory.md`) |
 
 `bigquery_schema` isn't in this table — it's not an MCP tool or resource at
@@ -545,9 +553,11 @@ system prompt says nothing about verification. The description covers:
 - **Cannot state numbers from:** `search_docs`, `get_page_info`, `get_repo_contents` or `generate_beeswarm`
   output; the overviews, summaries or tags of the memory tools; the project background in the static
   context. The restriction is on numbers only; the text and findings of any tool can still be used.
-- **Notes and the task plan** are context, not data: the numbers in them (a task count, a definition's
-  threshold) can be stated and stay out of `all_prose_numeric_claims`. A number from a query or chart result
-  never goes in a note or task (`manage_notes` and `manage_tasks` say so), and if one is there it isn't used.
+- **Notes, the task plan, the draft coding plan and coding task results** are context, not data: the numbers in
+  them (a task count, a definition's threshold, how many files a coding task changed) can be stated, in prose and
+  never in a markdown table (table cells are checked), and stay out of `all_prose_numeric_claims`. A number from a
+  query or chart result never goes in a note, task or coding plan (`manage_notes` and `manage_tasks` say so), and if
+  one is there it isn't used. A number a coding report gives about the data is never repeated as data.
 - **Matching:** on the decimals written, up to `MAX_CLAIM_PRECISION`: rounding to fewer decimals than the
   source is fine, more never is; a percentage may be written as the fraction times 100. A value the model
   computed itself (rank, change, difference, ratio, average) must come from the query.

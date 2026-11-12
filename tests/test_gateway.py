@@ -87,6 +87,7 @@ def _patch_gateway(monkeypatch):
     # not covered by _FakeGraph/_ScriptedGraph the way write_telemetry_row
     # is (that one's inside a real node, which the fakes never execute).
     monkeypatch.setattr(gateway, "write_chat_history", AsyncMock())
+    monkeypatch.setattr(gateway, "fetch_open_coding_task_notifications", AsyncMock(return_value=[]))
 
 
 class _ScriptedGraph:

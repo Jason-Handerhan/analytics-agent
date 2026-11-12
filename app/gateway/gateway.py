@@ -25,6 +25,7 @@ from app.config import (
     TENANT_ID,
     get_secret,
 )
+from app.coding_task_store import fetch_open_coding_task_notifications
 from app.gateway.entry_exit import (
     build_agent_response,
     build_history_messages,
@@ -170,6 +171,7 @@ SOURCE_NAMES = {
     "get_repo_contents": "code repository",
     "get_conversation_findings": "memory",
     "search_conversation_findings": "memory",
+    "get_coding_task": "coding task",
 }
 
 STATUS_BY_NODE = {
@@ -194,6 +196,10 @@ def call_tool_status(tool_names: list[str]) -> str | None:
         return "Prepared the chart"
     if "combine_results" in tool_names:
         return "Combined results"
+    if "start_coding_task" in tool_names:
+        return "Started the coding agent"
+    if "open_pull_request" in tool_names:
+        return "Opened a draft pull request"
     sources = sorted({SOURCE_NAMES[tn] for tn in tool_names if tn in SOURCE_NAMES}) #sorted set
     if not sources:
         managed = [label for tool, label in (("manage_notes", "memory"), ("manage_tasks", "the task plan"),
@@ -373,7 +379,8 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
         await live_doc.set({"status": "Thinking...", "thinking_log": []}, merge=True)
 
     # Fetch history, notes and tasks; compact the history if needed
-    memory = await fetch_session_memory(body.conversation_id)
+    memory, coding_task_notifications = await asyncio.gather(
+        fetch_session_memory(body.conversation_id), fetch_open_coding_task_notifications(body.conversation_id))
     stored_history = memory.history_messages
 
     compaction = CompactionResult(stored_history=stored_history)
@@ -408,6 +415,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             notes=memory.notes,
             task_plan=memory.task_plan,
             coding_plan=memory.coding_plan,
+            coding_task_notifications=coding_task_notifications,
             turn_started_at=turn_started_at,
         )
         initial_state["messages"] = rebuild_paused_messages(pending["messages"], pending["tool_calls"])
@@ -434,6 +442,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
             notes=memory.notes,
             task_plan=memory.task_plan,
             coding_plan=memory.coding_plan,
+            coding_task_notifications=coding_task_notifications,
             turn_started_at=turn_started_at,
         )
 

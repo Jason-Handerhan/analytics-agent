@@ -55,6 +55,7 @@ SHAP_FEATURE_DISPLAY_NAMES = {
 # agent_telemetry
 TELEMETRY_DATASET = "telemetry"
 TELEMETRY_TABLE = "agent_telemetry"
+CODING_TASK_TELEMETRY_TABLE = "coding_task_telemetry"
 
 # agent_chat_history -- restorable past conversations, not analytics
 CHAT_HISTORY_DATASET = "agent_chat_history"
@@ -84,6 +85,12 @@ SEARCH_DOCS_MAX_TOP_K = 20
 CODING_AGENT_SA_EMAIL = "coding-agent-sa@instacart-ml-model.iam.gserviceaccount.com"
 CODING_AGENT_DATASETS = ("instacart", "building_blocks", "ml_model_feature_table")
 CODING_AGENT_DEFAULT_BASE_BRANCH = "dev"  # the branch a new coding task starts from
+
+# Coding agent (gateway side): the Cloud Tasks queue that calls the service, and the identity its token carries
+CODING_AGENT_SERVICE_URL = "https://coding-agent-551802026956.us-central1.run.app"  # also the token's audience
+CODING_AGENT_QUEUE = "coding-agent-queue"
+CODING_AGENT_INVOKER_SA_EMAIL = "coding-agent-invoker@instacart-ml-model.iam.gserviceaccount.com"
+CODING_AGENT_LOCATION = "us-central1"  # the queue's region
 
 # GitHub (get_repo_contents, MCP-hosted)
 GITHUB_REPO_OWNER = "Jason-Handerhan"

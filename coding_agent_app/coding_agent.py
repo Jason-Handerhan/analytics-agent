@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 from deepagents import FilesystemMiddleware, HarnessProfile, RubricMiddleware, create_deep_agent, register_harness_profile
 from deepagents.backends import LangSmithSandbox
@@ -10,6 +11,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import LLMResult
 from langsmith.sandbox import CommandTimeoutError
 from pydantic import BaseModel, Field
 
@@ -191,6 +193,21 @@ class PatchCheckMiddleware(AgentMiddleware):
         return None
 
 
+class CountingUsageHandler(UsageMetadataCallbackHandler):
+    """Adds up token usage by model, like its parent, and counts the model calls it sees."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        super().on_llm_end(response, **kwargs)
+        # the parent's lock, as it uses for its own usage update: two model calls can end at the same time when agents run in
+        # parallel (for example parallel subagents). Our loop is not expected to, but the count stays consistent with the parent
+        with self._lock:
+            self.calls += 1
+
+
 def build_coding_agent(sandbox, sandbox_start_commit: str) -> tuple:
     """Build the coding agent for one sandbox. Returns the agent, the patch_check middleware (read afterwards for the
     patch and its violations), the list that collects the reviewer's evaluations, and the token usage of the agent and of
@@ -223,10 +240,10 @@ def build_coding_agent(sandbox, sandbox_start_commit: str) -> tuple:
     read_only_tools = [t for t in FilesystemMiddleware(backend=TimeLimitedSandbox(sandbox)).tools if t.name in ("ls", "read_file", "glob", "grep")]
     rubric_evaluations = []
 
-    # UsageMetadataCallbackHandler: adds up token usage by model across the model calls it is attached to.
+    # CountingUsageHandler: adds up token usage by model and counts the model calls it is attached to.
     # One for the agent and one for the reviewer, so their usage stays apart.
-    agent_usage = UsageMetadataCallbackHandler()
-    reviewer_usage = UsageMetadataCallbackHandler()
+    agent_usage = CountingUsageHandler()
+    reviewer_usage = CountingUsageHandler()
 
     # PatchCheckMiddleware (ours): after the agent finishes, builds the patch from the sandbox and checks it.
     patch_check = PatchCheckMiddleware(sandbox, sandbox_start_commit)

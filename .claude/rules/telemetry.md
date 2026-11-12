@@ -1,9 +1,11 @@
 ---
 paths:
   - 'app/telemetry/**'
+  - 'coding_agent_app/telemetry/**'
   - 'scripts/run_judge.py'
   - 'scripts/run_golden_tests.py'
   - 'tests/test_telemetry.py'
+  - 'tests/test_coding_task_telemetry.py'
   - 'tests/test_judge_e2e.py'
 ---
 

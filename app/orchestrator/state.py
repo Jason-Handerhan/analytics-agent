@@ -12,6 +12,8 @@ from typing import Annotated, Any, Literal, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+from app.coding_task_models import CodingTaskNotification
+
 
 class ToolCallRecord(TypedDict):
     id: str
@@ -108,6 +110,7 @@ class AgentState(TypedDict):
     notes: list[Note]   # standing notes for this conversation, read from the sessions document
     task_plan: TaskPlan   # this conversation's task plan, read from the sessions document
     coding_plan: CodingPlanDraft   # this conversation's draft coding plan, read from the sessions document
+    coding_task_notifications: list[CodingTaskNotification]   # coding task information needed for main agent background task notifications in agent node 
     history_verified_numbers: list[float]   # verified_numbers of the stored turns, read with the history
 
     # Accumulated during the tool loop

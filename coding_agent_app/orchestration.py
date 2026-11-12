@@ -1,10 +1,12 @@
 import asyncio
 import logging
+import uuid
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
-from langchain_core.callbacks import UsageMetadataCallbackHandler
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from langsmith.sandbox import SandboxClient, SandboxClientError
 
@@ -14,8 +16,9 @@ from app.coding_task_store import complete_coding_task, mark_coding_task_running
 from app.config import CODING_AGENT_DEFAULT_BASE_BRANCH, REPO_URL
 from coding_agent_app.apply_and_verify import (ApplyPatchResult, FinalChecks, apply_patch_and_push, build_final_checks,
                                                verify_patch_in_clean_sandbox)
-from coding_agent_app.coding_agent import PatchCheckMiddleware, StructuredCodingAgentResponse, build_coding_agent
+from coding_agent_app.coding_agent import CountingUsageHandler, PatchCheckMiddleware, StructuredCodingAgentResponse, build_coding_agent
 from coding_agent_app.patch import RESTORE_ENDINGS, WORK_DIR, PatchFile, read_patch
+from coding_agent_app.telemetry.writer import RunDetails, write_coding_task_row
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +58,8 @@ class AgentRun:
     stop_reason: str | None                        # why it stopped before finishing (recursion_limit, timeout); None if it finished
     patch_check: PatchCheckMiddleware              # holds the agent's last patch and its problems
     rubric_evaluations: list                       # the reviewer's evaluation of each grading round
-    agent_usage: UsageMetadataCallbackHandler      # the agent's token usage, by model
-    reviewer_usage: UsageMetadataCallbackHandler   # the reviewer's token usage, by model
+    agent_usage: CountingUsageHandler              # the agent's token usage by model, and its model-call count
+    reviewer_usage: CountingUsageHandler           # the reviewer's token usage by model, and its model-call count
     sandbox_start_commit: str                      # the commit the sandbox's clone started from
 
 
@@ -111,6 +114,28 @@ def build_coding_result(agent_run: AgentRun, patch_files: list[PatchFile], apply
                              branch=branch, commit=commit, started_from_commit=agent_run.sandbox_start_commit, dev_moved=dev_moved)
 
 
+def count_tool_calls(messages: list[BaseMessage]) -> list[dict]:
+    """How many times the agent called each tool, and how many of those calls errored."""
+    errored_call_ids = {message.tool_call_id for message in messages if isinstance(message, ToolMessage) and message.status == "error"}
+    calls = [call for message in messages if isinstance(message, AIMessage) for call in message.tool_calls]
+    called, failed = Counter(), Counter()     # tool name -> number of calls, and number of those that errored
+    for call in calls:
+        called[call["name"]] += 1
+        failed[call["name"]] += call["id"] in errored_call_ids     # True adds 1, False adds 0
+    return [{"name": name, "count": count, "failed": failed[name]} for name, count in called.items()]
+
+
+def build_run_details(agent_run: AgentRun, patch_bytes: bytes | None, langsmith_run_id: str, sandbox_snapshot_id: str) -> RunDetails:
+    """What the telemetry row needs from a run besides its stored result."""
+    return RunDetails(patch_bytes=patch_bytes,
+                      tool_calls=count_tool_calls(agent_run.final_state.get("messages", [])),
+                      agent_llm_calls=agent_run.agent_usage.calls,
+                      reviewer_llm_calls=agent_run.reviewer_usage.calls or None,     # None when the reviewer did not run
+                      agent_models=list(agent_run.agent_usage.usage_metadata),
+                      reviewer_models=list(agent_run.reviewer_usage.usage_metadata),
+                      langsmith_run_id=langsmith_run_id, sandbox_snapshot_id=sandbox_snapshot_id)
+
+
 def prepare_sandbox(sandbox, base_branch: str) -> str:
     """Clone the base branch into the sandbox and upload the line-ending script and the skills. Returns the commit the clone
     started from, which every later comparison is made against."""
@@ -128,8 +153,8 @@ def prepare_sandbox(sandbox, base_branch: str) -> str:
 
 
 async def execute_coding_run(task_id: str, task_text: str, review: bool, base_branch: str, new_branch: str | None,
-                             is_revision: bool, commit_message: str) -> CodingAgentResult:
-    """Run the coding agent on a task and return its result. The agent works in a sandbox; a patch that passes validation is
+                             is_revision: bool, commit_message: str) -> tuple[CodingAgentResult, RunDetails]:
+    """Run the coding agent on a task and return its result and the details of the run for telemetry. The agent works in a sandbox; a patch that passes validation is
     applied to the base branch and pushed (to new_branch for a first task, onto base_branch for a revision), then verified in a
     second, clean sandbox. review turns the grader on. Each step writes its stage to the task's progress, and both sandboxes are
     deleted before this returns."""
@@ -147,12 +172,17 @@ async def execute_coding_run(task_id: str, task_text: str, review: bool, base_br
         await update_progress(task_id, "The agent is working...")
         final_state = {}
         stop_reason = None
+        langsmith_run_id = uuid.uuid4()     # the id of this run's trace in LangSmith, so the telemetry row can point to it
         try:
             async with asyncio.timeout(AGENT_TIMEOUT_SECONDS):
                 # stream_mode="values" yields the whole state after every step, so final_state is always the latest
                 # an empty rubric turns the grader off
-                async for state in agent.astream({"messages": [{"role": "user", "content": task_text}], "rubric": CODING_RUBRIC if review else ""},
-                                                 config={"recursion_limit": RECURSION_LIMIT}, stream_mode="values"):
+                async for state in agent.astream(
+                        {"messages": [{"role": "user", "content": task_text}], "rubric": CODING_RUBRIC if review else ""},
+                        config={"recursion_limit": RECURSION_LIMIT,     # the most steps the agent may take before GraphRecursionError
+                                "run_id": langsmith_run_id,             # makes this id the root run of the trace in LangSmith
+                                "metadata": {"task_id": task_id}},      # tags the whole trace, so it can be found by task id
+                        stream_mode="values"):
                     final_state = state
         except GraphRecursionError:
             stop_reason = "recursion_limit"
@@ -171,6 +201,7 @@ async def execute_coding_run(task_id: str, task_text: str, review: bool, base_br
     # and no checks to run.
     if answer.blocking_questions:
         patch_files, apply_patch_result, final_checks = [], None, None
+        patch_bytes = None
     else:
         patch_bytes = patch_check.patch_bytes
         patch_problems = patch_check.fixable_violations + patch_check.unfixable_violations
@@ -180,16 +211,17 @@ async def execute_coding_run(task_id: str, task_text: str, review: bool, base_br
 
         # only a patch that passed validation goes on
         if not patch_problems:
+            # verify first: a revision is pushed onto its own base branch, so a clone made after the push would already hold the patch
+            await update_progress(task_id, "Checking the patch in a clean sandbox...")
+            clean_sandbox_verification = await asyncio.to_thread(verify_patch_in_clean_sandbox, client, snapshot_id, patch_bytes,
+                                                                 [file.path for file in patch_files], sandbox_start_commit, base_branch)
             await update_progress(task_id, "Applying the patch to the base branch...")
             apply_patch_result = await asyncio.to_thread(apply_patch_and_push, patch_bytes, sandbox_start_commit, base_branch,
                                                          new_branch=new_branch, is_revision=is_revision, commit_message=commit_message)
-            await update_progress(task_id, "Checking the patch in a clean sandbox...")
-            clean_sandbox_verification = await asyncio.to_thread(verify_patch_in_clean_sandbox, client, snapshot_id, patch_bytes,
-                                                                 [file.path for file in patch_files], apply_patch_result.dev_moved,
-                                                                 sandbox_start_commit, base_branch)
         final_checks = build_final_checks(patch_problems, apply_patch_result, clean_sandbox_verification)
 
-    return build_coding_result(agent_run, patch_files, apply_patch_result, final_checks)
+    result = build_coding_result(agent_run, patch_files, apply_patch_result, final_checks)
+    return result, build_run_details(agent_run, patch_bytes, str(langsmith_run_id), snapshot_id)
 
 
 async def run_coding_task(task_id: str) -> None:
@@ -202,6 +234,7 @@ async def run_coding_task(task_id: str) -> None:
     # What the finally writes if the request is cut off before a real result exists
     result = CodingAgentResult(outcome="stopped", review=ReviewEvaluation(ran=False), token_usage=TokenUsage(agent=TokenCounts()),
                                stop_reason="cancelled", report="The service stopped before this task finished. Run the task again.")
+    run_details = RunDetails()     # empty, for the same case
     try:
         plan = CodingAgentPlan.model_validate(task["plan"])
 
@@ -219,7 +252,7 @@ async def run_coding_task(task_id: str) -> None:
         task_text = f"{TASK_PREAMBLE}\n\n{plan.model_dump_json(indent=2, exclude={'review', 'base_branch'})}"
         commit_message = f"agent: {plan.name} (task {task_id})\n\n{plan.goal}"
 
-        result = await execute_coding_run(task_id=task_id, task_text=task_text, review=plan.review, base_branch=plan.base_branch,
+        result, run_details = await execute_coding_run(task_id=task_id, task_text=task_text, review=plan.review, base_branch=plan.base_branch,
                                           new_branch=new_branch, is_revision=is_revision, commit_message=commit_message)
     #Exception Handling
     except Exception as error:
@@ -236,3 +269,4 @@ async def run_coding_task(task_id: str) -> None:
         #Always write the result and mark the task completed
         await complete_coding_task(task_id, result)
         logger.info("coding task %s completed: %s", task_id, result.outcome)
+        await write_coding_task_row(task_id, run_details)     # after the result is stored, since the row is built from the stored task

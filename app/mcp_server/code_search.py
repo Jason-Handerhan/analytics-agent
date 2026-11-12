@@ -15,6 +15,8 @@ def _github_headers(access_token: str | None) -> dict[str, str]:
 
 
 def _github_tree(owner: str, repo: str, branch: str, access_token: str | None) -> list[str]:
+    """Every file path in the repo on one branch. Fails if GitHub truncates the tree for being too large."""
+    # one call returns every level of the tree
     resp = requests.get(
         f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}",
         params={"recursive": "1"},
@@ -23,8 +25,10 @@ def _github_tree(owner: str, repo: str, branch: str, access_token: str | None) -
     if not resp.ok:
         raise ToolError(f"GitHub Trees API failed: {resp.text}")
     data = resp.json()
+    # GitHub cuts a recursive tree off past its size limit
     if data.get("truncated"):
         raise ToolError("Repo tree was truncated by GitHub's API -- too many files for one recursive call.")
+    # files only; folders are dropped
     return [item["path"] for item in data["tree"] if item["type"] == "blob"]
 
 
@@ -63,6 +67,38 @@ class GetRepoContentsArgs(BaseModel):
                     "since a guessed path that doesn't exist fails. A file with no "
                     "description can still be read directly once you know its path, "
                     "e.g. from a folder listing.")
+    alternate_branch: str | None = Field(
+        default=None,
+        description="Read this branch instead of the default one: the branch from a coding task's result "
+                    "(get_coding_task), copied exactly. Omit to read the default branch. The whole-repo listing "
+                    "(no path) only shows files with a known description, so a file a coding task added isn't in "
+                    "it: list its folder instead.")
+
+
+def _list_branches(owner: str, repo: str, access_token: str | None) -> list[str]:
+    names: list[str] = []
+    page = 1
+    while True:
+        # one page of branches
+        resp = requests.get(f"https://api.github.com/repos/{owner}/{repo}/branches", params={"per_page": 100, "page": page},
+                            headers=_github_headers(access_token), timeout=15)
+        if not resp.ok:
+            raise ToolError(f"GitHub Branches API failed: {resp.text}")
+        batch = [branch["name"] for branch in resp.json()]
+        names += batch
+        # GitHub pages at 100; a short page is the last one
+        if len(batch) < 100:
+            return names
+        page += 1
+
+
+def _check_branch_exists(owner: str, repo: str, alternate_branch: str, access_token: str | None) -> None:
+    # the single-branch endpoint, which returns 404 when the branch doesn't exist
+    resp = requests.get(f"https://api.github.com/repos/{owner}/{repo}/branches/{alternate_branch}",
+                        headers=_github_headers(access_token), timeout=15)
+    # only a 404 means no such branch; any other failure is left for the read's own error
+    if resp.status_code == 404:
+        raise ToolError(f"Branch '{alternate_branch}' not found. Existing branches: {_list_branches(owner, repo, access_token)}")
 
 
 def _fetch_repo_contents(
@@ -72,8 +108,14 @@ def _fetch_repo_contents(
     file_descriptions: dict[str, str],
 ) -> dict:
     """Fetches a file's content, or lists a folder or the whole repo, from GitHub."""
+    # check the alternate branch first, so a wrong name gets the list of branches instead of a bare 404
+    if args.alternate_branch:
+        _check_branch_exists(owner, repo, args.alternate_branch, access_token)
+    # the branch this read comes from
+    read_branch = args.alternate_branch or branch
+    # no path: list the whole repo
     if not args.path:
-        paths = _github_tree(owner, repo, branch, access_token)
+        paths = _github_tree(owner, repo, read_branch, access_token)
         if file_descriptions:
             # Narrows a big repo to a useful starting point instead of every
             # file -- a deployer with no descriptions yet gets everything,
@@ -81,21 +123,23 @@ def _fetch_repo_contents(
             paths = [p for p in paths if p in file_descriptions]
         return {"type": "files", "entries": [_describe(p, file_descriptions) for p in paths]}
 
+    # a folder's entries, or a file's metadata with its inline content
     resp = requests.get(
         f"https://api.github.com/repos/{owner}/{repo}/contents/{args.path}",
-        params={"ref": branch},
+        params={"ref": read_branch},
         headers=_github_headers(access_token),
     )
     if not resp.ok:
         raise ToolError(f"GitHub Contents API failed for '{args.path}': {resp.text}")
+    # the Contents API returns a list for a folder and an object for a file
     data = resp.json()
     if isinstance(data, list):
         return {"type": "files", "entries": [_describe(e["path"], file_descriptions) for e in data]}
 
     try:
         if args.path.endswith(".ipynb"):
-            # Files over GitHub's 1MB inline-content limit come back with no content
-            # Notebooks get a download retry and are stripped of outputs.
+            # fetch the notebook from download_url (its inline content is empty over 1MB), then strip its outputs
+            # the file's raw bytes, for a notebook too big for the inline content
             raw = requests.get(data["download_url"], headers=_github_headers(access_token))
             if not raw.ok:
                 raise ToolError(f"Failed to fetch '{args.path}' raw content: {raw.text}")
@@ -107,6 +151,7 @@ def _fetch_repo_contents(
                 raise ToolError(f"'{args.path}' isn't valid notebook JSON -- the fetch may be incomplete.")
 
         elif data.get("content"):
+            # any other file: the inline base64 content, empty over 1MB
             content = base64.b64decode(data["content"]).decode("utf-8")
         else:
             raise ToolError(
@@ -116,6 +161,7 @@ def _fetch_repo_contents(
     except UnicodeDecodeError:
         raise ToolError(f"'{args.path}' isn't a text file -- this tool only supports text/code files.")
 
+    # the limit applies to the text after notebook outputs are stripped
     if len(content) > MAX_REPO_FILE_CONTENT_CHARS:
         raise ToolError(
             f"'{args.path}' is {len(content):,} characters after processing, over the "

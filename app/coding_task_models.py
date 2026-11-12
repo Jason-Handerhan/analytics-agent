@@ -1,7 +1,7 @@
 """Shared by the coding-agent service (writes) and the gateway (reads): the plan the main agent writes, and the stored task and result."""
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -91,7 +91,7 @@ class CodingAgentPlan(BaseModel):
 # --- the stored task and its result: only our own code writes and reads them, so they are plain dataclasses ---
 
 Outcome = Literal["succeeded", "failed", "needs_input", "stopped"]
-# queued, running and completed are written by the service; the main agent's node moves completed to notified when it first shows the task
+# queued, running and completed are written by the coding agent app; the main agent's node moves completed to notified when it first shows the task
 TaskStatus = Literal["queued", "running", "completed", "notified"]
 
 
@@ -189,3 +189,15 @@ class CodingAgentTask:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     expires_at: datetime | None = None   # Firestore's TTL policy deletes the document at this time
+
+
+# --- what the main agent keeps of a task while it follows it: not stored, built from the task and read only by the main agent ---
+
+class CodingTaskNotification(TypedDict):
+    """Enough of a task to show it while it runs and to announce it once it finishes."""
+    task_id: str
+    name: str
+    status: TaskStatus
+    progress: str             # the stage line the coding agent app overwrites while the task runs
+    outcome: Outcome | None   # set once completed
+    branch: str | None        # set once completed, when a branch was pushed

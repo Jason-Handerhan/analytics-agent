@@ -928,6 +928,9 @@ SOURCE_LABELS = {
     "manage_tasks": "Managed task plan",
     "manage_notes": "Managed memory",
     "save_coding_plan": "Drafted coding plan",
+    "start_coding_task": "Started coding task",
+    "get_coding_task": "Checked coding task",
+    "open_pull_request": "Opened pull request",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -1645,8 +1648,8 @@ turn's `AskRequest` arrives; none of the three pass `api_key=`/
 - **Cost gating is not a node** — it lives inside `call_tool_node`, which
   dry-runs every BigQuery call in the batch before dispatching anything
   (`docs/approval-workflow.md`). `call_tool` routes on what that decision
-  produces. Planned to become its own `cost_gate` node after the coding agent is
-  wired in (`docs/build-order.md`, Phase 6 item 2a).
+  produces. The gate is a function, `check_cost_gate`, returning a `CostGateResult`;
+  `cost_pause_update` builds the pause's state update, and `call_tool_node` calls both.
 - `check_length` before `verify` — cheap check first; no point walking the
   answer's numbers against tool data if it can't be displayed regardless.
 - `finalize` is the **single exit** — full breakdown below.

@@ -9,7 +9,7 @@ import asyncio
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from itertools import groupby
@@ -65,7 +65,9 @@ from app.config import (
 from app.orchestrator.context import build_static_context, get_static_context
 from app.orchestrator.conversation_memory.writer import build_findings_row, write_findings_row
 from app.shared_helpers import is_cancelled, label_chartable_result
-from app.orchestrator.coding_tools import save_coding_plan
+from app.coding_task_models import CodingTaskNotification
+from app.coding_task_store import build_coding_task_notification, get_coding_agent_task, mark_coding_task_notified
+from app.orchestrator.coding_tools import get_coding_task, open_pull_request, save_coding_plan, start_coding_task
 from app.orchestrator.state import AgentState, CodingPlanDraft, Note, TaskPlan, ToolCallRecord, TurnError
 from app.shared_chart import CHART_REF_RE, replace_chart_refs, shorten_chart_urls, sign_chart_url
 from app.orchestrator.tools import (
@@ -98,7 +100,11 @@ CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 
 # Bound outside Anthropic's strict mode (the compiled grammar of all strict schemas has a size limit);
 # still validated at dispatch.
-ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "save_coding_plan"}
+ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "save_coding_plan",
+                              "start_coding_task", "get_coding_task", "open_pull_request"}
+
+# The two tools the one-per-round guard in dispatch_other_call applies to
+CODING_PLAN_GUARD_TOOLS = {"save_coding_plan", "start_coding_task"}
 
 # finalize_node's canned messages -- one per terminal state with no real answer yet.
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
@@ -142,6 +148,9 @@ async def init_orchestrator(mcp_server_url: str = MCP_SERVER_URL) -> None:
         "manage_tasks": manage_tasks,
         "manage_notes": manage_notes,
         "save_coding_plan": save_coding_plan,
+        "start_coding_task": start_coding_task,
+        "get_coding_task": get_coding_task,
+        "open_pull_request": open_pull_request,
         "generate_beeswarm": generate_beeswarm,
     }
     get_static_context()  # warms the @lru_cache at startup, not on the first real turn
@@ -423,17 +432,33 @@ def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> 
     return BatchResult(records, display_messages, errors, ref_counter)
 
 
-async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
-                               filter_context: list[dict], conversation_id: str, user_id: str) -> ToolMessage:
-    """Dispatches one non-BigQuery tool call, injecting hidden args first."""
+async def dispatch_other_call(tc: dict, batch_calls: list[dict], prior_tool_calls: list[ToolCallRecord],
+                               filter_context: list[dict], conversation_id: str, user_id: str,
+                               turn_started_at: datetime) -> ToolMessage:
+    """Dispatches one non-BigQuery tool call, injecting hidden args first. batch_calls is every non-BigQuery call in
+    the round."""
+
+    # More than one save_coding_plan/start_coding_task in a round: every one of them errors
+    if tc["name"] in CODING_PLAN_GUARD_TOOLS and sum(call["name"] in CODING_PLAN_GUARD_TOOLS for call in batch_calls) > 1:
+        return ToolMessage(
+            content="Not run -- this round has more than one call to save_coding_plan or start_coding_task. "
+                    "Call only one of them per round.",
+            name=tc["name"], tool_call_id=tc["id"], status="error")
     
     # Get page info
     if tc["name"] == "get_page_info":
         full_args = {**tc, "args": {**tc["args"], "filter_context": filter_context}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
-    # Memory tools that only need the conversation id
-    if tc["name"] in ("get_conversation_findings", "manage_tasks", "manage_notes", "save_coding_plan"):
+    # Start a coding task: needs the user and the turn start too
+    if tc["name"] == "start_coding_task":
+        full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id, "user_id": user_id,
+                                     "turn_started_at": turn_started_at}}
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
+    # Tools that only need the conversation id injected
+    if tc["name"] in ("get_conversation_findings", "manage_tasks", "manage_notes", "save_coding_plan", "get_coding_task",
+                      "open_pull_request"):
         full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
@@ -491,6 +516,51 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
             return ToolMessage(content=str(e), name=tc["name"], tool_call_id=tc["id"], status="error")
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
     return await ALL_TOOLS[tc["name"]].ainvoke(tc)
+
+
+@dataclass
+class CostGateResult:
+    """What dry-running a round's BigQuery calls decided."""
+    estimates: list[int] = field(default_factory=list)     # bytes per call, in bq_calls order; empty when there are no calls or the dry-run failed
+    batch_bytes: int = 0
+    cost_cap_exceeded: bool = False
+    needs_approval: bool = False
+    dry_run_error: str | None = None
+
+
+async def check_cost_gate(state: AgentState, bq_calls: list[dict]) -> CostGateResult:
+    """Dry-runs every BigQuery call in the round and decides, on the summed bytes, whether the round runs, needs approval or is declined."""
+    if not bq_calls:
+        return CostGateResult()
+    try:
+        estimates = await asyncio.gather(*[dry_run(tc["args"]["query"]) for tc in bq_calls])
+    except ToolError as e:
+        return CostGateResult(dry_run_error=str(e))
+    batch_bytes = sum(estimates)
+    cost_cap_exceeded = state["bytes_consumed"] + batch_bytes >= ABSOLUTE_CAP
+    # TABLESAMPLE's dry-run estimate has repeatedly underestimated actual
+    # billed bytes -- never trust it under the threshold, force a pause.
+    uses_tablesample = any("TABLESAMPLE" in tc["args"]["query"].upper() for tc in bq_calls)
+    needs_approval = ((batch_bytes > PENDING_APPROVAL_THRESHOLD or uses_tablesample)
+                      and not cost_cap_exceeded and not state["approved_batch"])
+    return CostGateResult(estimates, batch_bytes, cost_cap_exceeded, needs_approval)
+
+
+def cost_pause_update(bq_calls: list[dict], cost_gate_result: CostGateResult) -> dict:
+    """State update that pauses the turn for approval of the round's BigQuery calls. Iteration count is not incremented."""
+    pending = [
+        {"id": tc["id"], "query": tc["args"]["query"], "estimated_bytes": estimated_bytes}
+        for tc, estimated_bytes in zip(bq_calls, cost_gate_result.estimates)
+    ]
+    largest_index = cost_gate_result.estimates.index(max(cost_gate_result.estimates))
+    largest_pending_query = bq_calls[largest_index]["args"]["query"]
+    return {
+        "needs_approval": True,
+        "pending_queries": pending,
+        "largest_pending_query": largest_pending_query,
+        "estimated_cost": format_cost(cost_gate_result.batch_bytes),
+        "paused_at": datetime.now(timezone.utc),
+    }
 
 
 def iteration_cap_update(tool_calls: list[dict], iteration_count: int) -> dict:
@@ -744,6 +814,9 @@ SOURCE_LABELS = {
     "manage_tasks": "Managed task plan",
     "manage_notes": "Managed memory",
     "save_coding_plan": "Drafted coding plan",
+    "start_coding_task": "Started coding task",
+    "get_coding_task": "Checked coding task",
+    "open_pull_request": "Opened pull request",
     "generate_chart":   "Create chart",
     "generate_beeswarm": "Create chart",
     "combine_results":  "Combine results",
@@ -862,18 +935,56 @@ def render_task_plan(task_plan: TaskPlan) -> str:
 
 def render_coding_plan(coding_plan: CodingPlanDraft) -> str:
     """The saved draft coding plan as text for the model."""
-    plan = {key: value for key, value in coding_plan["plan"].items() if key != "review"}
     return (f"Draft coding plan, version {coding_plan['version']}, as last saved with save_coding_plan as of this "
             "message. Earlier save_coding_plan calls in the conversation are already reflected here, so ignore "
             "them. The user has not approved it unless they said so after you showed them this version. If you "
             "save it again after this message, your latest save_coding_plan call takes precedence.\n"
-            + json.dumps(plan, indent=2))
+            + json.dumps(coding_plan["plan"], indent=2))
+
+
+def render_running_notifications(notifications: list[CodingTaskNotification]) -> str:
+    """The coding tasks still running, as text for the model."""
+    lines = ["Coding tasks still running for this conversation, current as of this message."]
+    lines += [f'- "{notification["name"]}" (task {notification["task_id"]}): {notification["status"]}. {notification["progress"]}'
+              for notification in notifications]
+    return "\n".join(lines)
+
+
+def render_finished_notification(notification: CodingTaskNotification) -> str:
+    """The message saved to history when a coding task finishes."""
+    branch = f", branch {notification['branch']}" if notification["branch"] else ""
+    return (f'Coding task {notification["task_id"]} "{notification["name"]}" finished: outcome {notification["outcome"]}{branch}. New: finish '
+            "the user's current question first, then tell them it finished and offer to review it. Get the details with "
+            "get_coding_task using this task id.")
+
+
+async def get_background_task_notifications(
+    notifications: list[CodingTaskNotification],
+) -> tuple[list[CodingTaskNotification], list[HumanMessage]]:
+    """Re-reads the background tasks the agent is following. Returns the notifications of the tasks still running, and one
+    message per task that finished, each of which it marks as notified."""
+    # The notifications in state are a snapshot from the start of the turn, so read the tasks again for their current status
+    stored_tasks = await asyncio.gather(*[get_coding_agent_task(notification["task_id"]) for notification in notifications])
+    latest_notifications = [build_coding_task_notification(stored_task) for stored_task in stored_tasks]
+
+    running_notifications = [
+        notification for notification in latest_notifications if notification["status"] in ("queued", "running")]
+    finished_notifications = [
+        notification for notification in latest_notifications if notification["status"] == "completed"]
+
+    # Each finished task is announced once: it becomes a message in this turn's history and is marked notified
+    finished_messages = [
+        HumanMessage(content=render_finished_notification(notification)) for notification in finished_notifications]
+    await asyncio.gather(*[mark_coding_task_notified(notification["task_id"]) for notification in finished_notifications])
+
+    return running_notifications, finished_messages
 
 
 def attach_context(messages: list[BaseMessage], notes: list[Note], task_plan: TaskPlan,
-                   coding_plan: CodingPlanDraft) -> list[BaseMessage]:
-    """Returns messages with the saved notes, task plan and draft coding plan ahead of the turn's first message, on a copy and new
-    list so state (and thus the saved history) never contains them."""
+                   coding_plan: CodingPlanDraft, coding_task_notifications: list[CodingTaskNotification]) -> list[BaseMessage]:
+    """Returns messages with whatever is saved (notes, task plan, draft coding plan, running coding tasks) ahead of the
+    turn's first message, on a copy and new list so state (and thus the saved history) never contains them. Returns the
+    messages as they are when nothing is saved."""
     parts = []
     if notes:
         parts.append(render_notes(notes))
@@ -881,6 +992,10 @@ def attach_context(messages: list[BaseMessage], notes: list[Note], task_plan: Ta
         parts.append(render_task_plan(task_plan))
     if coding_plan:
         parts.append(render_coding_plan(coding_plan))
+    if coding_task_notifications:
+        parts.append(render_running_notifications(coding_task_notifications))
+    if not parts:
+        return messages
     context_text = "\n\n".join(parts)
     first = messages[0]
     content = (f"{context_text}\n\n{first.content}" if isinstance(first.content, str)
@@ -893,11 +1008,12 @@ def attach_context(messages: list[BaseMessage], notes: list[Note], task_plan: Ta
 async def agent_node(state: AgentState) -> dict:
     """Calls the LLM with tools bound. Emits tool calls -- the final answer
     only ever arrives via submit_answer, never plain text (gauranteed by verify node).
-    Marking caches for history messages and attaching notes, the task plan and timeout checks are done
-    on object copies and create new lists to avoid altering state["messages"] and state["history_messages"].
-    state["messages"] is saved to history; the notes, task plan and time check stay out of it so they aren't
-    repeated (and billed) every turn."""
+    Marking caches for history messages and attaching notes, the task plan, the draft coding plan, running coding
+    tasks and timeout checks are done on object copies and create new lists to avoid altering state["messages"] and
+    state["history_messages"]. state["messages"] is saved to history, together with the message announcing each coding
+    task that finished; the attached context and time check stay out of it so they aren't repeated (and billed) every turn."""
     
+    #Build the model and tools list
     model = build_model(state["model"], state["model_provider"]).bind_tools(
         build_tools_list(state["model_provider"]), strict=True)
     
@@ -907,9 +1023,14 @@ async def agent_node(state: AgentState) -> dict:
     if state["model_provider"] == "anthropic":
         history = mark_anthropic_history_cache(history)
 
-    messages = state["messages"]
-    if state["notes"] or state["task_plan"].get("tasks") or state["coding_plan"]:
-        messages = attach_context(messages, state["notes"], state["task_plan"], state["coding_plan"])
+    #Get notifications and messages for background tasks.
+    running_notifications, finished_messages = await get_background_task_notifications(state["coding_task_notifications"])
+
+    messages = [*state["messages"], *finished_messages]
+
+    # Attach notes, task plan, and coding plan to the first messages without updating state["messages"].
+    # As a result, they are not repeated in the next turn.
+    messages = attach_context(messages, state["notes"], state["task_plan"], state["coding_plan"], running_notifications)
 
     seconds_left = GATEWAY_TURN_TIMEOUT_SECONDS - (datetime.now(timezone.utc) - state["turn_started_at"]).total_seconds()
     if seconds_left <= TURN_WARNING_SECONDS_REMAINING:
@@ -925,7 +1046,8 @@ async def agent_node(state: AgentState) -> dict:
         messages = [*messages, HumanMessage(content=time_check)]
         
     response = await model.ainvoke([system_message, *history, *messages])
-    return {"messages": [response], "llm_calls": state["llm_calls"] + 1}
+    return {"messages": [*finished_messages, response], "coding_task_notifications": running_notifications,
+            "llm_calls": state["llm_calls"] + 1}
 
 
 async def call_tool_node(state: AgentState) -> dict:
@@ -962,63 +1084,41 @@ async def call_tool_node(state: AgentState) -> dict:
     bq_calls = [tc for tc in tool_calls if tc["name"] == "run_bigquery_sql"]
     other_calls = [tc for tc in tool_calls if tc["name"] != "run_bigquery_sql"]
 
-    batch_bytes = 0
-    estimates: list[int] = []
-    cost_cap_exceeded = False
-    needs_approval = False
-    dry_run_error: str | None = None
-
-    #Dry Run and Needs Approval Check
-    if bq_calls:
-        try:
-            estimates = await asyncio.gather(*[dry_run(tc["args"]["query"]) for tc in bq_calls])
-            batch_bytes = sum(estimates)
-            cost_cap_exceeded = state["bytes_consumed"] + batch_bytes >= ABSOLUTE_CAP
-            # TABLESAMPLE's dry-run estimate has repeatedly underestimated actual
-            # billed bytes -- never trust it under the threshold, force a pause.
-            uses_tablesample = any("TABLESAMPLE" in tc["args"]["query"].upper() for tc in bq_calls)
-            needs_approval = ((batch_bytes > PENDING_APPROVAL_THRESHOLD or uses_tablesample)
-                              and not cost_cap_exceeded and not state["approved_batch"])
-        except ToolError as e:
-            dry_run_error = str(e)
+    cost_gate_result = await check_cost_gate(state, bq_calls)
 
     # Pause before any tool runs, so the whole batch waits for approval. Iteration count is not incremented.
-    if needs_approval:
-        pending = [
-            {"id": tc["id"], "query": tc["args"]["query"], "estimated_bytes": est}
-            for tc, est in zip(bq_calls, estimates)
-        ]
-        largest_index = estimates.index(max(estimates))
-        largest_pending_query = bq_calls[largest_index]["args"]["query"]
-        return {
-            "needs_approval": True,
-            "pending_queries": pending,
-            "largest_pending_query": largest_pending_query,
-            "estimated_cost": format_cost(batch_bytes),
-            "paused_at": datetime.now(timezone.utc),
-        }
+    if cost_gate_result.needs_approval:
+        return cost_pause_update(bq_calls, cost_gate_result)
 
     other_started_at = datetime.now(timezone.utc)
     other_messages = await asyncio.gather(*[
-        dispatch_other_call(tc, state["tool_calls"], state["filter_context"], state["conversation_id"], state["user_id"])
+        dispatch_other_call(
+            tc=tc,
+            batch_calls=other_calls,
+            prior_tool_calls=state["tool_calls"],
+            filter_context=state["filter_context"],
+            conversation_id=state["conversation_id"],
+            user_id=state["user_id"],
+            turn_started_at=state["turn_started_at"],
+        )
         for tc in other_calls
     ])
     other_completed_at = datetime.now(timezone.utc)
 
     bq_started_at = datetime.now(timezone.utc)
-    if dry_run_error is not None:
+    if cost_gate_result.dry_run_error is not None:
         bq_messages = [
             ToolMessage(
                 content=(
                     f"Not executed -- a query in this batch failed to price (dry-run): "
-                    f"{dry_run_error} All run_bigquery_sql calls in the same round are "
+                    f"{cost_gate_result.dry_run_error} All run_bigquery_sql calls in the same round are "
                     "declined together when this happens, so this error may describe a "
                     "different query than this one. Check each query in the batch, fix "
                     "the one it describes, and retry."),
                 name=tc["name"], tool_call_id=tc["id"], status="error")
             for tc in bq_calls
         ]
-    elif cost_cap_exceeded:
+    elif cost_gate_result.cost_cap_exceeded:
         bq_messages = [
             ToolMessage(
                 content=(
@@ -1038,9 +1138,9 @@ async def call_tool_node(state: AgentState) -> dict:
     bq_completed_at = datetime.now(timezone.utc)
 
     ref_counter = sum(1 for r in state["tool_calls"] if r.get("ref_id")) + 1
-    if dry_run_error is not None:
+    if cost_gate_result.dry_run_error is not None:
         bq_error_type = "dry_run_failed"
-    elif cost_cap_exceeded:
+    elif cost_gate_result.cost_cap_exceeded:
         bq_error_type = "cost_cap_exceeded"
     else:
         bq_error_type = "tool_error"
@@ -1064,8 +1164,8 @@ async def call_tool_node(state: AgentState) -> dict:
         "approved_batch": False,
         "iteration_count": state["iteration_count"] + 1,
         "bytes_consumed": state["bytes_consumed"] + total_billed_bytes,
-        "cost_cap_exceeded": cost_cap_exceeded,
-        "estimated_cost": format_cost(batch_bytes) if cost_cap_exceeded else state["estimated_cost"],
+        "cost_cap_exceeded": cost_gate_result.cost_cap_exceeded,
+        "estimated_cost": format_cost(cost_gate_result.batch_bytes) if cost_gate_result.cost_cap_exceeded else state["estimated_cost"],
         "tool_calls": bq_result.records + other_result.records,
         "errors": bq_result.errors + other_result.errors,
         "cancelled": cancelled,

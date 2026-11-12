@@ -31,6 +31,7 @@ from app.config import (
     ANSWER_TABLE_HEADER_TEXT,
     NUMERIC_SOURCE_TOOLS,
 )
+from app.coding_task_models import CodingTaskNotification
 from app.gateway.models import AgentResponse
 from app.shared_helpers import label_chartable_result
 from app.orchestrator.state import AgentState, CodingPlanDraft, Note, PendingApproval, StoredTurn, TaskPlan, ToolCallRecord
@@ -53,6 +54,7 @@ def build_initial_state(
     filter_context: list[dict], active_page: str | None, image_base64: str | None,
     history_messages: list[BaseMessage], history_verified_numbers: list[float],
     notes: list[Note], task_plan: TaskPlan, coding_plan: CodingPlanDraft,
+    coding_task_notifications: list[CodingTaskNotification],
     turn_started_at: datetime,
 ) -> AgentState:
     """Initializes every AgentState field for a fresh turn."""
@@ -71,6 +73,7 @@ def build_initial_state(
         notes=notes,
         task_plan=task_plan,
         coding_plan=coding_plan,
+        coding_task_notifications=coding_task_notifications,
         messages=[build_human_message(question, filter_context, active_page)],
         tool_calls=[],
         iteration_count=0,

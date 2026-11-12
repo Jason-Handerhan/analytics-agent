@@ -12,10 +12,14 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --only-group coding-agent --no-install-project
 
-COPY app ./app
+# Only the app modules coding_agent_app imports; the build fails below if one is missing
+COPY app/__init__.py app/config.py app/coding_task_models.py app/coding_task_store.py app/shared_helpers.py ./app/
 COPY coding_agent_app ./coding_agent_app
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+# Fails the build, not the first request, if an app module the service imports was not copied
+RUN python -c "import coding_agent_app.main"
 
 # Shell form (no brackets), so the shell fills in $PORT, the port Cloud Run says to listen on.
 # exec makes uvicorn replace the shell, so uvicorn gets Cloud Run's shutdown signal itself and can stop cleanly.

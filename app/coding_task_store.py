@@ -1,12 +1,13 @@
-"""Firestore reads and writes of the coding tasks (background_tasks/{task_id}), shared by the gateway, which creates and reads them,
-and the coding agent service, which runs them."""
+"""Firestore reads and writes of the coding tasks (background_tasks/{task_id}), shared by the gateway and main agent, which create
+and follow them, and the coding agent app (coding_agent_app/), which runs them."""
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
-from app.coding_task_models import CodingAgentPlan, CodingAgentResult, CodingAgentTask
+from app.coding_task_models import CodingAgentPlan, CodingAgentResult, CodingAgentTask, CodingTaskNotification
 from app.shared_helpers import get_firestore_client
 
 TASK_TTL_DAYS = 30  # Firestore's TTL policy deletes a task this long after it was created or completed
@@ -25,6 +26,8 @@ def background_task_doc(task_id: str):
     return get_firestore_client().collection("background_tasks").document(task_id)
 
 
+# --- Used by the gateway and main agent: create the task, follow it, announce it ---
+
 async def write_coding_agent_task(conversation_id: str, user_id: str, plan: CodingAgentPlan) -> str:
     """Write a new task, queued, and return its id."""
     now = datetime.now(timezone.utc)
@@ -39,6 +42,41 @@ async def get_coding_agent_task(task_id: str) -> dict | None:
     snapshot = await background_task_doc(task_id).get()
     return snapshot.to_dict() if snapshot.exists else None
 
+
+async def list_coding_agent_tasks(conversation_id: str, limit: int = 10) -> list[dict]:
+    """This conversation's task documents as stored, most recent first."""
+    query = (get_firestore_client().collection("background_tasks")
+             .where(filter=FieldFilter("conversation_id", "==", conversation_id))
+             .order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit))
+    return [doc.to_dict() for doc in await query.get()]
+
+
+def build_coding_task_notification(task: dict) -> CodingTaskNotification:
+    """The notification for a stored task document."""
+    result = task.get("coding_agent_result") or {}
+    return CodingTaskNotification(task_id=task["task_id"], name=task["plan"]["name"], status=task["status"],
+                                  progress=task["progress"], outcome=result.get("outcome"), branch=result.get("branch"))
+
+
+async def fetch_open_coding_task_notifications(conversation_id: str) -> list[CodingTaskNotification]:
+    """This conversation's tasks the main agent has not announced yet: queued, running, or completed."""
+    query = (get_firestore_client().collection("background_tasks")
+             .where(filter=FieldFilter("conversation_id", "==", conversation_id))
+             .where(filter=FieldFilter("status", "in", ["queued", "running", "completed"])))
+    return [build_coding_task_notification(doc.to_dict()) for doc in await query.get()]
+
+
+async def mark_coding_task_notified(task_id: str) -> None:
+    """Mark a completed task as shown to the main agent."""
+    await background_task_doc(task_id).update({"status": "notified"})
+
+
+async def set_coding_task_pr_url(task_id: str, pr_url: str) -> None:
+    """Record the draft pull request opened for a task."""
+    await background_task_doc(task_id).update({"pr_url": pr_url})
+
+
+# --- Used by the coding agent app (coding_agent_app/): run the task, in order ---
 
 # The decorator makes this function a Firestore transaction. The read below and the update at the end commit together or not at
 # all, and if the document changed after the read, Firestore throws the attempt away and runs the whole function again.
@@ -74,8 +112,3 @@ async def complete_coding_task(task_id: str, result: CodingAgentResult) -> None:
     now = datetime.now(timezone.utc)
     await background_task_doc(task_id).update({"status": "completed", "coding_agent_result": asdict(result), "completed_at": now,
                                                "expires_at": now + timedelta(days=TASK_TTL_DAYS)})
-
-
-async def mark_coding_task_notified(task_id: str) -> None:
-    """Mark a completed task as shown to the main agent."""
-    await background_task_doc(task_id).update({"status": "notified"})

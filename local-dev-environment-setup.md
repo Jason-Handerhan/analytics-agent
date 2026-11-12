@@ -1117,7 +1117,7 @@ risk of forgetting to change something before deploying.
    ```
    Ten `OK` lines and you're done. This proves *your* access; `agent-sa`'s
    comes from the same loop in item 2, so a failure there means re-running it.
-   (`github-agent-push-token`, created in Step 19, is deliberately not in these loops: only `coding-agent-sa` may read it.)
+   (`github-agent-push-token`, created in Step 19, is deliberately not in these loops: only `coding-agent-sa` may read it. `github-pr-token`, created in Step 22, is not either: it gets its own grant to `agent-sa` there.)
 4. Read it from Python — a small helper you'll reuse everywhere you need a secret:
    ```python
    from google.cloud import secretmanager
@@ -1724,6 +1724,46 @@ builder), and Token Creator on `turn-writer-sa`, which waits for the telemetry s
 - *The task ends `stopped` with `sandbox_error` or `internal_error`:* the report holds the error; check that `coding-agent-sa` has the secret
   and Firestore grants from Step 19.
 - *Slow first request:* a cold start loads the secrets and the image; later requests are faster.
+
+## Step 22 — Main agent: the pull-request token
+
+**When:** before the first `open_pull_request` call (the main agent opens the draft pull request after the user approves it). Run in one
+PowerShell window.
+
+The main agent signs in to GitHub with its own token, separate from the push token in Step 19: the coding agent app can push branches but
+not open pull requests, and the main agent can open pull requests but not push code.
+
+1. **Create it.** The same path as Step 19, part a. Token name `analytics-agent-pr`. Repository access: **Only select repositories**, then
+   the ML repo. Under **Permissions**, add **Pull requests** and set it to **Read and write**; GitHub adds **Metadata** (read-only) by
+   itself. Give it nothing that writes code: leave **Contents** off, or read-only. Copy the value (it starts with `github_pat_`).
+
+2. **Store it in Secret Manager**, the same way as Step 19, part b, with the name `github-pr-token`.
+   ```powershell
+   $project = "instacart-ml-model"
+   $secure = Read-Host "GitHub token" -AsSecureString
+   $file = New-TemporaryFile
+   Set-Content -Path $file -Value ([System.Net.NetworkCredential]::new("", $secure).Password) -NoNewline
+   gcloud secrets create github-pr-token --project=$project --replication-policy=automatic --data-file=$file
+   Remove-Item $file
+   ```
+
+3. **Let the main agent read it.** `agent-sa` is the account the gateway runs as; your own account is for the notebooks.
+   ```powershell
+   $me = gcloud config get-value account
+   gcloud secrets add-iam-policy-binding github-pr-token --project=$project --member="serviceAccount:agent-sa@$project.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+   gcloud secrets add-iam-policy-binding github-pr-token --project=$project --member="user:$me" --role="roles/secretmanager.secretAccessor"
+   gcloud secrets versions list github-pr-token --project=$project
+   ```
+   The list should show version 1 as `enabled`. Rotating it later is a new secret version
+   (`gcloud secrets versions add github-pr-token --data-file=...`); each call reads the latest.
+
+**If something fails**
+- *"Failed to get secret" or permission denied:* the `agent-sa` grant (or your own, in a notebook) is missing, or it has not applied yet; wait a
+  minute and retry.
+- *GitHub answers 403 or 404 when opening:* the token lacks **Pull requests: Read and write**, or the ML repo is not among its selected
+  repositories.
+- *GitHub answers 422 with "No commits between":* the task's branch has nothing new against `dev`, for example because it is already merged.
+- *GitHub answers 422 about draft pull requests:* the repo's plan does not allow drafts on a private repo.
 
 ---
 

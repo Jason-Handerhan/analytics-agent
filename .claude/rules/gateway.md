@@ -689,7 +689,7 @@ the initial state. `consume_graph`'s first write replaces the status with
   show only entries it hasn't seen. Adaptive thinking means some rounds have none.
 - **`call_tool`:** `call_tool_status(names)`, from the tools the batch dispatched.
   `submit_answer` is ignored. A chart in the batch (`generate_chart` or `generate_beeswarm` -- `CHART_TOOLS`, `app/config.py`) gives `"Prepared the chart"`, a combine
-  gives `"Combined results"`, and a batch with only `manage_tasks`, `manage_notes` and/or `save_coding_plan` gives `"Managed the task plan"`,
+  gives `"Combined results"`, `start_coding_task` gives `"Started the coding agent"`, `open_pull_request` gives `"Opened a draft pull request"`, and a batch with only `manage_tasks`, `manage_notes` and/or `save_coding_plan` gives `"Managed the task plan"`,
   `"Managed memory"`, or `"Managed memory and the task plan"`. Otherwise it names up to `STATUS_MAX_NAMED_SOURCES` (3,
   `app/config.py`) distinct sources, such as `"Gathered results from BigQuery, project
   documentation, and semantic model"`, or `"Gathered results from {n} sources"` above that.
