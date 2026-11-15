@@ -8,6 +8,7 @@ import google.auth.impersonated_credentials
 from google.cloud import bigquery, firestore
 from langchain_core.messages import ToolMessage
 
+from app.coding_task_models import CodingPlanDraft
 from app.config import GCP_PROJECT_ID, TURN_WRITER_SA_EMAIL
 
 
@@ -41,6 +42,12 @@ def live_turn_doc(conversation_id: str):
 def session_doc(conversation_id: str):
     """The sessions document for a conversation."""
     return get_firestore_client().collection("sessions").document(conversation_id)
+
+
+async def get_plan_draft(conversation_id: str) -> CodingPlanDraft | None:
+    """The conversation's saved coding plan draft, or None."""
+    session = (await session_doc(conversation_id).get()).to_dict() or {}
+    return session.get("coding_plan")
 
 
 async def is_cancelled(conversation_id: str) -> bool:

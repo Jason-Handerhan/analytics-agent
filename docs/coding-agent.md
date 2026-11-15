@@ -40,44 +40,86 @@ Options not taken:
 2. **Gather.** The main agent pulls what it needs from `conversation_findings` (`get_conversation_findings`,
    `search_conversation_findings`) and reads the relevant repo files (`get_repo_contents`), and summarizes it.
 3. **Draft the plan with the user.** The main agent saves the plan with `save_coding_plan`, shows it in chat, and
-   the user edits it; each edit replaces the saved plan. A line in the system prompt and the tool's description
-   steer this ("show the plan to the user before starting a task"), and a rule in code backs it (step 4). Showing the
-   plan is still a conversation habit, not a guarantee.
-4. **Start.** `start_coding_task()` starts exactly the conversation's active plan and returns the task id. The plan id is minted by
-   code on the first `save_coding_plan` and kept as the session's `active_plan_id`; later saves replace that plan, and
-   the model never types an id (decided 2026-11-07). So the main agent cannot start a task without having saved a plan first
+   the user changes it; each save replaces the draft and counts as a new version. The tool's result and descriptions steer how it is
+   shown and when to start, and a rule in code backs it (step 4); the approval pause is the last gate (`docs/approval-workflow.md`).
+   Showing the plan is still a conversation habit, not a guarantee.
+4. **Start.** `start_coding_task()` starts exactly the conversation's saved draft plan and returns the task id. The draft is the
+   `coding_plan` field of the conversation's `sessions` document, replaced by each `save_coding_plan`, and the model never types a
+   plan id (decided 2026-11-07). So the main agent cannot start a task without having saved a plan first
    (decided 2026-11-04). The user knows a plan by its name. **Also refused if the
-   plan was last saved in the current turn** (every plan, revisions included): at least one user message
-   must come between the last save and the start, so the user gets a turn to see and answer it. The plan
-   records the turn it was saved in; the refusal tells the agent to show the plan and wait for the user. This makes it likelier that
+   plan was first saved in the current turn** (`first_saved_at`): at least one user message
+   must come between the first save and the start, so the user gets a turn to see and answer it. A plan the user saw in an earlier
+   turn can be changed and started in the same turn; the refusal tells the agent to show the plan and wait for the user. This makes it likelier that
    the user sees the plan; it cannot prove they read it.
 5. **Follow.** A running task is attached to the prompt each turn (the way notes and the task plan are). A task in status
-   `completed` is attached once, with a note to finish the user's question first, then tell them and offer a review. `agent_node` does
+   `completed` is attached once, with a note to finish the user's question first, then tell them and offer to go through the result. `agent_node` does
    this before it builds each request, not only at the start of the turn, so a task that finishes mid-turn is caught on the next
    model call: it reads the conversation's running tasks (known from the start of the turn, so there is no query when none is
    running), sets any that finished to `notified`, and keeps the note in the turn's state for the rest of the turn (decided
    2026-11-07: the status is the marker, no timestamp or flag; a turn that then fails does not re-announce it, which
-   `get_coding_task()` and the system prompt line cover); after that it falls out of the prompt, and `get_coding_task()` with no id lists the conversation's tasks (summary rows),
-   so an id is never lost (decided 2026-11-07). The system prompt says to call it when the user refers to
-   earlier coding work. The Power Apps client can poll `GET /tasks/{id}`. The chat can't push, so "complete" is seen on the next
+   `get_coding_task()` covers); after that it falls out of the prompt, and `get_coding_task()` with no id lists the conversation's tasks (summary rows),
+   so an id is never lost (decided 2026-11-07). Its description says to call it when the user refers to
+   earlier coding work. The Power Apps client polls the conversation's coding tasks and starts the announcing turn itself ("Telling the user when a task finishes", below). The chat can't push, so "complete" is seen on the next
    turn or by the badge; `completed` and `notified` both mean finished.
 6. **Review.** `get_coding_task(task_id)` returns the result; with `diff=True` it also returns the branch's full diff from
-   GitHub ("The port"). The main agent summarizes for the user and gives them the compare link to review the code.
-7. **Revise or open the PR.** A change request becomes a new plan built on the last run (below), which starts a
-   child task on the same branch; a yes opens the draft PR.
+   GitHub ("The port"). The main agent summarizes for the user, gives them the compare link to review the code, and offers to open a pull request.
+7. **Revise or open the PR.** A change request becomes a revision, a new plan built on the last run's branch (below), which starts
+   another task on that branch; a yes opens the draft PR, after the user approves it.
+
+## Telling the user when a task finishes (planned)
+
+Decided 2026-11-14: **the app starts the follow-up turn,** the way Claude Code's own client starts a turn when a background task ends. The
+model API is request and response, so the long-lived client decides to call; here that client is the Power Apps app, and the gateway is
+stateless and driven by requests. A server-started turn (a Cloud Task from the coding agent app to a new gateway endpoint) was considered
+and not chosen: a canvas app cannot receive a push, so the app would still have to poll, and the server would gain an internal endpoint, a
+Google ID token check and a claim on the conversation for nothing. Build order: the three views, then this.
+
+- **The views are all by conversation.** The saved coding plan and the to-do list are direct reads of `sessions.coding_plan` and
+  `sessions.task_plan`. The coding tasks read returns this conversation's tasks that are queued, running, or finished and not yet
+  announced (status `notified` is left out), with name, status, `progress` and outcome. The app never learns a task id, because the agent
+  does not quote it, so this is a read by conversation and not `GET /tasks/{id}`. Routes, beside `GET /conversations/{id}/history` (the tasks read is built, 2026-11-14, and returns `CodingTasksResponse`, a list of
+  `CodingTaskNotification`; the plan and to-do reads are built, 2026-11-15, and return html):
+  `/conversations/{id}/coding-plan`, `/conversations/{id}/task-plan` and `/conversations/{id}/coding-tasks`, each checked with
+  `assert_owns_conversation`. One poll of the tasks read feeds both the status display (the `progress` line) and the trigger.
+- **Watching.** The app reads the tasks once when a conversation opens, and starts a slow watcher Timer when it finds an open task or when
+  a response's `sources` starts with "Started coding task" (`sources` lists only successful calls, and consecutive repeats collapse to
+  "... (2)", so the check is "starts with"). The Timer stops when no task is open. No polling while nothing is running.
+- **Trigger.** A task is finished, no turn is in flight and no approval card is pending. The app does not remember what it watched: opening
+  an old conversation with an unannounced finished task starts the turn too, which is acceptable and simpler.
+- **The message (the gateway side is built, 2026-11-14).** `AskRequest.app_message_is_synthetic: bool = False`. The app sends `question: "Retrieving coding task result..."` with
+  the flag true. For the agent, the gateway replaces the question with "The coding task finished. What was the result?" (a constant in
+  `gateway.py`); the chat history keeps the app's text, as it keeps "Approved" for an approval. The existing exactly-one validator needs no
+  change. The flag says only that the app wrote the message; a second kind of synthetic message would need it to say which.
+- **The app side.** The Send button's `OnSelect` gets a branch on `varPendingTrigger`: blank means the text box, set means the fixed text
+  and the flag, with the text box neither read nor cleared (a half-typed draft survives) and the variable cleared afterward. The watcher
+  sets `varPendingTrigger` and `Select`s the Send button, so the long formula is not copied. It is a normal turn from there: the status
+  popup shows, and Send stays disabled until the response returns, as for any turn.
+- **The look.** The row's Question label can lose its outline when its text is the fixed text (`BorderThickness` or `BorderColor`, which
+  take formulas), keyed on `ThisItem.Question` so restored rows match, with the text defined once in the app. If that is not easy, the
+  outline stays: the text already reads as a system line.
+- **Announcing and retrying.** `agent_node` marks a task `notified` before the model call, so a task is never announced twice. A turn that
+  fails before that point leaves the task finished, and the next poll sends again; no guard is added. A failure after it loses the
+  announcement, and the user asks, which `get_coding_task` serves. Several finished tasks are announced in one turn
+  (`get_background_task_notifications`).
+- **Prompts to revisit when this is built.** The agent is told it will hear about a finished task "at the start of a later turn" (the start result, the CODE CHANGES paragraph, and the finished-task message). Once the app starts the turn, it should know that, while the app is open, it will be asked about the result as soon as the task finishes, and can tell the user so. The start result and the CODE CHANGES paragraph are the places to check first, then the `get_coding_task` description and `render_finished_notification`.
+- **To verify in Studio before building.** `Select(SendButton)` from a Timer's `OnTimerEnd` (the reference says `Select` is for behavior
+  formulas and `OnTimerEnd` is one; no example found), and with a disabled button; a formula-driven Timer `Duration`; the Timer in a hidden
+  tab and in the Power BI embed (a community report says Timers stop in a hidden tab, which would only pause the polling); connector call
+  limits at one poll every 5 to 10 seconds. If `Select` fails, the send logic is repeated in `OnTimerEnd`; behavior user-defined functions
+  might avoid the copy, but that is unconfirmed (connector calls inside one, access to controls, and the setting that enables them).
 
 ## Components
 
 | Piece | What it is |
 |---|---|
-| `save_coding_plan(plan)` | Saves or replaces the draft plan (the plan below; its `base_branch` is `dev` for a new task, or the branch of an earlier task's result for a revision) in `coding_plans/{plan_id}`, replacing the whole plan each call, like `manage_tasks`; only the latest plan is kept (a `version` number and the turn it was saved in), and earlier versions can be recovered from the chat or from `get_conversation_findings` with `include_tool_calls` (the ledger keeps every successful `save_coding_plan` call with its full plan) |
-| `start_coding_task()` | Takes no arguments; starts the active plan. Snapshots the plan into `background_tasks/{task_id}` (so later edits can't change a running task), creates a Cloud Tasks task for the coding-agent service with the task id, returns the id. Refused if the plan was last saved in the current turn A plan whose `base_branch` is not `dev` continues that branch: refused unless the branch is one a completed task of this user pushed, and while another task is running on it (the main agent types the branch, so a wrong or someone else's must be caught here; the conversation does not matter, a user can revise an earlier conversation's task; the service trusts the task document and does not check) |
-| `get_coding_task(task_id=None, diff=False, include_plan=False)` | With no id, lists this conversation's tasks, most recent first (about 10), as summary rows (a dict built in the tool from each stored task, not a class): id, name, goal, status, outcome, parent task, PR link, completion time, the changed file paths, and the questions of a `needs_input` task, enough to match a task to what the user is asking about (the findings tools help with that match; they do not find tasks). With an id, returns the task's `status` and `progress` and, once completed, the `CodingAgentResult` below. With `diff=True`, also the branch's diff from GitHub ("The port"); with `include_plan=True`, the plan snapshot, which a revision needs |
-| `coding_plans/{plan_id}` (Firestore) | `conversation_id`, `user_id`, the latest plan with its `version` and `saved_in_turn`, status (`draft` or `started`), with a TTL; the session document holds an `active_plan_id` |
-| `open_pull_request(task_id)` | Takes only the id. Opens a **draft** PR into `dev` from the task's pushed branch, signed in with `github-pr-token` (setup guide, Step 22). The title (the plan name) and body are built in code from the stored plan and result (`build_pull_request_body`), never from text the main agent writes. A `failed` task is allowed. Returns the existing PR if the task has one or the branch has an open one, and stores `pr_url` on the task |
+| `save_coding_plan(plan)` | Saves or replaces the draft plan (the plan below; its `base_branch` is `dev` for a new task, or the branch of an earlier task's result for a revision) as the `coding_plan` field of the conversation's `sessions` document, replacing the whole plan each call, like `manage_tasks`; only the latest plan is kept (a `version` number, `saved_at` and `first_saved_at`), and earlier versions can be recovered from the chat or from `get_conversation_findings` with `include_tool_calls` (the ledger keeps every successful `save_coding_plan` call with its full plan) |
+| `start_coding_task()` | Takes no arguments; starts the saved draft plan. Snapshots the plan into `background_tasks/{task_id}` (so later edits can't change a running task), creates a Cloud Tasks task for the coding-agent service with the task id, returns the id. Refused if the plan was first saved in the current turn. A plan whose `base_branch` is not `dev` is a revision: refused unless the branch exists on the repo (listed from GitHub, not `main`; a branch a person made by hand counts), the same check `save_coding_plan` runs; the main agent types the branch, so a wrong one must be caught in code. Not yet checked: that a completed task pushed the branch, or that no other task is running on it ("one running task at a time", below). Pauses for the user's approval before it runs (`docs/approval-workflow.md`) |
+| `get_coding_task(task_id=None, diff=False, include_plan=False)` | With no id, lists this conversation's tasks, most recent first (about 10), as summary rows (a dict built in the tool from each stored task, not a class): id, name, goal, status, outcome, branch, PR link, completion time, the changed file paths, and the questions of a `needs_input` task, enough to match a task to what the user is asking about (the findings tools help with that match; they do not find tasks). With an id, returns the task's `status` and `progress` and, once completed, the `CodingAgentResult` below. With `diff=True`, also the branch's diff from GitHub ("The port"); with `include_plan=True`, the plan snapshot, which a revision needs |
+| `coding_plan` field of `sessions/{conversation_id}` (Firestore) | The latest plan with its `version`, `saved_at` and `first_saved_at`; deleted when the task starts, or by `save_coding_plan` with `discard`; it lives and expires with the session document |
+| `open_pull_request(task_id)` | Takes only the id. Opens a **draft** PR into `dev` from the task's pushed branch, signed in with `github-pr-token` (setup guide, Step 22). The title (the plan name) and body are built in code from the stored plan and result (`build_pull_request_body` in `app/markdown_display_formatting.py`: the plan's goal and requirements, then what the task did), never from text the main agent writes. A `failed` task is allowed. Refused, with the link, if the branch already has an open PR (GitHub is asked, not the stored `pr_url`, so a PR a person opened or closed by hand counts), or has no commits ahead of `dev`; stores `pr_url` on the task |
 | `background_tasks/{task_id}` (Firestore) | `conversation_id`, `user_id`, the plan snapshot, `status` (`queued`, `running`, `completed`, `notified`), `progress` (a stage line the job overwrites), the `CodingAgentResult` (which holds the outcome), `cancel_requested`, timestamps, with a TTL |
 | Coding-agent service (Cloud Run) | Private; `POST /run/{task_id}`, called by Cloud Tasks. Reads its task from Firestore, runs the deep agent, writes progress and the result back |
-| `GET /tasks/{id}` | Ownership-checked read of the task document, for the client's poll |
+| Conversation reads (proposed) | `/conversations/{id}/coding-plan`, `/task-plan` and `/coding-tasks`: the saved plan, the to-do list, and the tasks not yet announced; ownership-checked by conversation ("Telling the user when a task finishes") |
 
 Ownership works like conversations: every tool and endpoint checks the task belongs to the caller's
 conversation and `oid`. 404, not 403.
@@ -87,7 +129,7 @@ conversation and `oid`. 404, not 403.
 The job knows only what the plan says; only the main agent has the conversation. A plan is a saved
 object, not an argument passed once at start: it survives across turns (tool results are redacted from history,
 a stored plan is not), and while it is a draft it is attached to the prompt each turn through the same
-`attach_context` mechanism as notes and the task plan, read only when `active_plan_id` is set; once the task starts it is no longer
+`attach_context` mechanism as notes and the task plan, read only when the session has a draft plan; once the task starts it is no longer
 attached (the snapshot is in the task, and `get_coding_task(include_plan=True)` returns it). The models are in
 `app/coding_task_models.py` (built 2026-11-07); the field descriptions there are the guidance the main agent reads. `CodingAgentPlan` is
 Pydantic because the model writes it; the stored task (`CodingAgentTask`) and its result (`CodingAgentResult`, in the task's `coding_agent_result` field) are plain dataclasses, since only our own code reads and writes them
@@ -180,16 +222,17 @@ plan (the user's requested changes). LangSmith traces are tagged with the task i
 through its revisions.
 
 **Revision or new task.** Nothing in the data says whether a new request continues an earlier task, so the main agent decides when it
-drafts the plan: it sets the plan's `base_branch` to the `branch` of the earlier task's result (the task attachment and
-`get_coding_task()` show it), or leaves it at `dev`. Code derives the label the user sees: `save_coding_plan` returns "REVISION:
-continues branch X, from task Y" or "NEW TASK: new branch from dev" as the first line of its result, which the agent relays; the agent
-supplies no revision flag. The branch is the link: there is no parent task id, and the service reads the base branch from the plan. A new
-task pushes `agent/<plan name as lowercase words joined by hyphens>-<first six characters of the task id>`; a revision adds its commit to
-the branch it continues. `start_coding_task` validates the choice (the branch is one a completed task of this user pushed, and no other task is
-running on it). The rule in the `base_branch` field description: continue an earlier task when the new work needs, fixes or extends its
-changes; independent work stays on `dev`, because a new task does not see an unmerged branch; ask the user when unclear. Branches are not
-deleted automatically (decided 2026-11-09; the user can see branch history), so nothing yet stops continuing a branch whose PR is merged:
-open, refuse it once `open_pull_request` stores the PR and the PR's state can be checked.
+drafts the plan: it sets the plan's `base_branch` to the `branch` of the earlier task's result (`get_coding_task()` shows it), or leaves
+it at `dev`. Code derives the label the user sees: `save_coding_plan` returns "REVISION: continues branch X." or "NEW TASK: a new
+branch from dev." in its result, which the agent relays; the agent supplies no revision flag. The branch is the link: there is no parent
+task id, and the service reads the base branch from the plan. A new task pushes `agent/<plan name as lowercase words joined by
+hyphens>-<first six characters of the task id>`; a revision adds its commit to the branch it continues, so an open pull request for
+that branch already includes it. `check_base_branch` validates the choice when the plan is saved and again when the task starts (the
+branch exists on the repo, listed from GitHub, not `main`). The rule in the `base_branch` field description: make a revision when the
+new work needs, fixes or extends that task's changes; independent work stays on `dev`, because a new task does not see an unmerged
+branch; ask the user when unclear. Branches are not deleted automatically (decided 2026-11-09; the user can see branch history), so
+nothing stops a revision on a branch whose PR is merged; `open_pull_request` asks GitHub for the branch's open pull request and its
+commits ahead of `dev`, so a merged branch with nothing new gets no PR.
 
 **Base branch.** Each run fetches the latest `dev` first, and the result records the `dev` commit it started
 from. A revision merges or rebases the agent's branch onto `dev` before changing anything and reports any
@@ -206,8 +249,8 @@ from `main`'s code could be wrong for `dev`. The intent is to point the main age
   `agent_safe` boundary is untouched; it can read the three ML pipeline datasets (the dry-run tool needs that, decided
   2026-11-06), and the tools return no rows.
 - **Always a draft PR into `dev`; never merged by the agent.** Branch protection on `dev` and `main` (humans
-  merge into `dev` and promote `dev` to `main`), and agent branches prefixed `agent/`. The chat "yes" is a courtesy; the real gate is review in GitHub. An in-app hard gate is planned:
-  `start_coding_task` and `open_pull_request` go through the approval pause (`docs/approval-workflow.md`, "Planned").
+  merge into `dev` and promote `dev` to `main`), and agent branches prefixed `agent/`. The chat "yes" is a courtesy; the real gate is review in GitHub. An in-app hard gate is built:
+  `start_coding_task` and `open_pull_request` go through the approval pause (`docs/approval-workflow.md`).
 - **The PR title and body come from the stored result,** not free text from the main agent. The verification
   contract only covers `answer_markdown`, so a PR description is a route for ungrounded claims otherwise.
 - **Path policy: a blocked list, not a `definitions/` allowlist (decided 2026-11-04).** The agent may change any
@@ -826,12 +869,17 @@ would push the branch twice); the task name is the task id, which makes a duplic
 the queue's max concurrent dispatches 1, which is the one-running-task cap; min instances 0. Every shell command in the agent's sandbox is stopped after `EXECUTE_TIMEOUT_SECONDS` (120, `coding_agent.py`): `TimeLimitedSandbox` cuts any timeout the agent sets to that limit and returns a timed-out command as its output, with guidance, instead of raising (the library's default is 30 minutes, which let a whole-suite `pytest` run for four minutes in the 2026-11-09 revision run); the `execute` tool's description says so. To confirm: the service's maximum
 request timeout (believed 60 minutes), CPU being allocated for the whole request, and a cold start of the real image.
 
-**Telemetry and long-term storage.** One row per task in a new BigQuery table in the `telemetry` dataset (name not chosen): the flattened
-metrics from `CodingAgentResult`, plus the plan, the result and the task document as JSON columns, so BigQuery is the long-term record of
-everything (decided 2026-11-07) and Firestore holds only the live state under its TTL. `get_coding_task` does not read BigQuery for now.
-written by impersonating `turn-writer-sa` as the gateway does (`coding-agent-sa` needs Token Creator on it, `turn-writer-sa` write access
-to the table). Our job code holds the identity, never the sandbox or the agent. Read `.claude/rules/telemetry.md` first.
-The row holds nothing about the PR: `open_pull_request` is a main-agent tool call, recorded in the main agent's telemetry
+**Telemetry and long-term storage.** One row per task in `telemetry.coding_task_telemetry` (`coding_agent_app/telemetry/`, written 2026-11-11 and
+live-checked), so BigQuery is the long-term record and Firestore holds only the live state under its TTL (decided 2026-11-07). The row
+holds the task, the plan (flattened, plus `plan_json`), the outcome and the agent's report, the patch as text, the checks, the reviewer's
+verdict and last-round criteria, tokens and model-call counts for the agent and the reviewer, per-tool call counts, and three links:
+`langsmith_run_id`, `cloud_run_revision` and `sandbox_snapshot_id`. Tool calls are counts only (name, count, failed), with no
+arguments or results; the full detail is the LangSmith trace, which the row points to because the run's id is generated before the run
+and passed in its config. The app writes it when the task completes, awaited in the request (Cloud Run throttles CPU after the
+response), with the task id as the insert row id, and a failure is logged and never fails the task. The identity is `coding-agent-sa` with
+BigQuery Data Editor on this one table (setup guide, Step 23), not impersonation of `turn-writer-sa`: narrower, and the credentials stay
+in the job process. `get_coding_task` does not read BigQuery. Schema and the full account: `.claude/rules/telemetry.md`. The row
+holds nothing about the PR: `open_pull_request` is a main-agent tool call, recorded in the main agent's telemetry
 (`tool_calls`); a PR field becomes a top-level column there only if it is wanted for querying (decided 2026-11-10).
 
 **Seeing the code.** `get_coding_task` builds the compare link from the repo constants and the branch
@@ -873,8 +921,8 @@ scratch harnesses used while building are not ported.
 4. The task store and the push.
 5. The coding-agent service, the Cloud Tasks queue and the IAM (`google-cloud-tasks` approved), after a cold-start check of the real image.
 6. The telemetry table.
-7. The main-agent tools, `GET /tasks/{id}`, the `ref` change, the prompt attachment and the numbers rule; then the approval pause for
-   `start_coding_task` and `open_pull_request` (`docs/approval-workflow.md`, "Planned").
+7. The main-agent tools, the conversation reads, the `ref` change, the prompt attachment and the numbers rule; then the approval pause for
+   `start_coding_task` and `open_pull_request` (built; `docs/approval-workflow.md`).
 8. Later: the snapshot GitHub Action, live progress, cancellation, the one-task cap.
 
 **Revisit later: run memory for very large tasks (noted 2026-11-09, after the coding agent works end to end).** Deep Agents'
@@ -910,7 +958,7 @@ Notebook-first, one step at a time, reviewed after each.
    comparison notebook for a feature change.
 2. **Containerize.** The same agent as a private Cloud Run service (Cloud Tasks calls it), with its own service account. The modules
    are decided ("The port"); the shared plan and result models in `app/` need approval first.
-3. **Tools and state.** The Firestore task document, the three task tools, `GET /tasks/{id}`, the prompt
+3. **Tools and state.** The Firestore task document, the three task tools, the conversation reads, the prompt
    attachment, and the schema, `run_check` and `dry_run_sql` tools. Needs the Cloud Tasks client library (`google-cloud-tasks`, approved 2026-11-07).
 4. **The PR step.** The service pushes the task's branch; the main agent's `open_pull_request` opens the draft PR
    after the user confirms.
@@ -991,7 +1039,7 @@ are the long form of items 7 and 8.
    cleanup task below.
 8. **Port and integrate** (each needing approval first): the modules ("The port"), the coding-agent service and its Cloud Tasks queue,
    the Firestore task document and tools, the plan model (with `review`, false by default) and result model, the
-   `start_coding_task` rules (needs a saved plan, refused if saved in the current turn), the PR step, and the snapshot
+   `start_coding_task` rules (needs a saved plan, refused if first saved in the current turn), the PR step, and the snapshot
    build script.
 9. **Not ours to decide** (`pytest` is now in the ML repo's `requirements.txt`, added 2026-11-05, so the tests the agent
    writes run from the repo's own requirements and the agent never needs to touch that file): `gcsfs` in it; its conventions as `AGENTS.md` or skills; its
@@ -1039,7 +1087,7 @@ transaction that creates the task only if no task is running), since check-then-
 `running` after a crash must not block everyone forever, so it expires (a start time older than the maximum run, or a
 stale `progress.updated_at`) and is treated as dead. Open: whether a refused user is queued or just told to wait, and
 how a waiting user finds out the slot is free. A revision also needs its parent task finished. Later, a "running task and
-its status" control in the Power Apps panel can poll `GET /tasks/{id}`.
+its status" control in the Power Apps panel can poll the conversation's coding tasks read.
 
 **Parked: letting the user cancel a running task (noted 2026-11-06; not built, revisit with the bounds in item 6).** Today
 nothing but an admin cancelling the Cloud Run execution, Cloud Run's own task timeout (a termination signal with a short

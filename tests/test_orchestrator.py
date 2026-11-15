@@ -24,27 +24,24 @@ from app.config import (
     TURN_WARNING_SECONDS_REMAINING,
 )
 import app.orchestrator.orchestrator as orchestrator
+from app.coding_task_models import CodingAgentPlan, FileToImitate, SuggestedCode
+from app.markdown_display_formatting import (
+    HEADING_CHAR_WEIGHT, HEIGHT_PER_CHAR, HEIGHT_PER_CHART, HEIGHT_PER_CODE_LINE, HEIGHT_PER_TABLE_ROW,
+    MAX_ANSWER_HEIGHT, PENDING_APPROVAL_MESSAGE, answer_height, check_table_rows, render_plan_markdown,
+    render_task_plan_markdown, split_answer_into_sections)
 from app.orchestrator.orchestrator import (
-    HEADING_CHAR_WEIGHT,
-    HEIGHT_PER_CHAR,
-    HEIGHT_PER_CHART,
-    HEIGHT_PER_CODE_LINE,
-    HEIGHT_PER_TABLE_ROW,
-    MAX_ANSWER_HEIGHT,
     ToolBatch,
     attach_context,
     build_tool_call_records_and_messages,
     call_tool_node,
-    answer_height,
     check_length_node,
-    check_table_rows,
     extract_table_values,
     expand_chart_refs,
     finalize_node,
     iteration_cap_update,
     resolve_chart_data,
     resolve_combine_data,
-    split_answer_into_sections,
+    split_conflicting_coding_calls,
     route_after_agent,
     route_after_call_tool,
     route_after_check_length,
@@ -266,6 +263,25 @@ async def test_call_tool_node_pauses_over_threshold(monkeypatch):
     assert executed == []  # the pause runs no tool
 
 
+def test_split_conflicting_coding_calls():
+    """Two of save/start/PR in a round conflict with each other, and a start or PR conflicts with a BigQuery call; each
+    conflicting call comes back with an error message and everything else is kept."""
+    def call(call_id, name):
+        return {"id": call_id, "name": name, "args": {}}
+
+    def split_ids(*calls):
+        kept, conflicting, messages = split_conflicting_coding_calls(list(calls))
+        assert [m.tool_call_id for m in messages] == [tc["id"] for tc in conflicting]
+        assert all(m.status == "error" for m in messages)
+        return [tc["id"] for tc in kept], [tc["id"] for tc in conflicting]
+
+    assert split_ids(call("a", "save_coding_plan"), call("b", "start_coding_task")) == ([], ["a", "b"])
+    assert split_ids(call("a", "start_coding_task"), call("b", "open_pull_request"), call("c", "get_coding_task")) == (["c"], ["a", "b"])
+    assert split_ids(call("a", "start_coding_task"), call("b", "run_bigquery_sql")) == (["b"], ["a"])
+    assert split_ids(call("a", "save_coding_plan"), call("b", "run_bigquery_sql")) == (["a", "b"], [])
+    assert split_ids(call("a", "open_pull_request"), call("b", "search_docs")) == (["a", "b"], [])
+
+
 def test_iteration_cap_update():
     """Every call in the batch is declined, with matching records/errors."""
     tool_calls = [
@@ -485,6 +501,32 @@ def test_resolve_chart_and_combine_data():
 
 # --- Answer checks: tables and verification --------------------------------------------------
 # The table and numeric checks applied to a submitted answer.
+
+
+def test_render_plan_markdown():
+    """A minimal plan renders only its title, goal, branch line and requirements; each optional part appears under its label when
+    the plan has it."""
+    minimal = CodingAgentPlan(name="Aisle pacing", goal="Add a feature.", requirements=["Add the column"])
+    assert render_plan_markdown(minimal) == (
+        "### Aisle pacing\n\n**Goal:** Add a feature.\n\n**Base branch:** `dev`, **Reviewer:** off\n\n**Requirements**\n\n1. Add the column")
+
+    full = CodingAgentPlan(
+        name="Aisle pacing", goal="Add a feature.", requirements=["Add the column"], constraints=["Leave main alone"],
+        tests=["Pins it"], decisions=["Use dev"], files_to_imitate=[FileToImitate(path="a.sqlx", what="its docs")],
+        suggested_code=[SuggestedCode(purpose="Start here", file="b.py", code="x = 1")], review=True)
+    markdown = render_plan_markdown(full)
+    assert "**Reviewer:** on" in markdown and "**Constraints**\n\n- Leave main alone" in markdown
+    assert "- `a.sqlx`: its docs" in markdown and "Start here (`b.py`)\n\n```\nx = 1\n```" in markdown
+
+
+def test_render_task_plan_markdown():
+    """Each task is numbered with its status symbol, after the scope when there is one."""
+    tasks = [{"text": "Reorder rate by department", "status": "done"}, {"text": "Chart it", "status": "in_progress"},
+             {"text": "Summarize", "status": "todo"}]
+    markdown = render_task_plan_markdown({"scope": "Use the last 90 days", "tasks": tasks})
+    assert markdown.startswith("### Task plan\n\n**Scope:** Use the last 90 days\n\n1. ✅ Reorder rate by department")
+    assert "2. 🔄 Chart it" in markdown and "3. ⬜ Summarize" in markdown
+    assert "**Scope:**" not in render_task_plan_markdown({"tasks": tasks})
 
 
 def test_answer_height():
@@ -812,7 +854,7 @@ async def test_finalize_node_message_selection(monkeypatch):
         **base, "verified": False, "needs_approval": True,
         "estimated_cost": "$1.25", "largest_pending_query": "SELECT * FROM big_table",
     })
-    assert pending["answer_markdown"].startswith(orchestrator.PENDING_APPROVAL_MESSAGE)
+    assert pending["answer_markdown"].startswith(PENDING_APPROVAL_MESSAGE)
     assert "$1.25" in pending["answer_markdown"]
     assert "```sql\nSELECT * FROM big_table\n```" in pending["answer_markdown"]
     assert "too long to display" not in pending["answer_markdown"]

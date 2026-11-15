@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-from app.coding_task_models import CodingTaskNotification
+from app.coding_task_models import CodingPlanDraft, CodingTaskNotification
 
 
 class ToolCallRecord(TypedDict):
@@ -42,7 +42,7 @@ class PendingApproval(TypedDict):
     tool_calls: list[ToolCallRecord]
     iteration_count: int
     bytes_consumed: int
-    estimated_cost: str
+    estimated_cost: str | None
     paused_at: datetime
 
 
@@ -73,13 +73,6 @@ class TaskPlan(TypedDict, total=False):
     """The conversation's saved plan; empty once cleared. scope is absent until one is set."""
     scope: str
     tasks: list[Task]
-
-
-class CodingPlanDraft(TypedDict, total=False):
-    """The conversation's draft coding plan; empty when none is saved or after it is started."""
-    plan: dict   # a CodingAgentPlan, as saved by save_coding_plan
-    version: int
-    saved_at: datetime
 
 
 class TurnError(TypedDict):

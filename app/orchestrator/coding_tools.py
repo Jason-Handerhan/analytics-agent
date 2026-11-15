@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated
@@ -10,7 +9,7 @@ from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import firestore, tasks_v2
 from google.protobuf import duration_pb2
 from langchain_core.tools import tool, InjectedToolArg
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
 from app.coding_task_models import CodingAgentPlan
 from app.coding_task_store import (
@@ -28,8 +27,9 @@ from app.config import (
     MAX_REPO_FILE_CONTENT_CHARS,
     get_secret,
 )
-from app.orchestrator.tools import ToolError
-from app.shared_helpers import session_doc
+from app.markdown_display_formatting import build_pull_request_body
+from app.orchestrator.tools import FlatToolArgs, ToolError
+from app.shared_helpers import get_plan_draft, session_doc
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +37,15 @@ logger = logging.getLogger(__name__)
 # --- save_coding_plan -------------------------------------------------------------
 
 SAVE_CODING_PLAN_DESCRIPTION = (
-    "Saves a draft of a coding task's plan, to build and revise with the user. The user must approve the plan "
-    "before you can start the coding subagent with start_coding_task. "
-    "Call it when the user wants a change made to the ML repo's code, and again each time the plan changes: "
-    "every save replaces the draft and counts as a new version, and the user must approve each new version. "
+    "Saves a draft of a coding task's plan, to build and change with the user, and start with start_coding_task once the "
+    "user has approved it. Call it when the user wants a change made to the ML repo's code, and again each time the plan "
+    "changes: every save replaces the draft and counts as a new version. "
     "Set discard to true instead of a plan to delete the draft. "
-    "Call it only once per round, and never in the same round as start_coding_task."
+    "Call it only once per round, and never in the same round as start_coding_task or open_pull_request."
 )
 
 
-class SaveCodingPlanArgs(BaseModel):
+class SaveCodingPlanArgs(FlatToolArgs):
     plan: CodingAgentPlan | None = Field(
         None, description="The full plan. Every save replaces the previous draft. Leave out when discarding.")
     discard: bool = Field(
@@ -84,7 +83,7 @@ def list_candidate_branches() -> list[str]:
 
 
 async def check_base_branch(base_branch: str) -> str:
-    """The plan's kind line for this base branch: a new task from dev, or a revision of an existing branch."""
+    """The plan's task type line for this base branch: a new task from dev, or a revision of an existing branch."""
     if base_branch == CODING_AGENT_DEFAULT_BASE_BRANCH:
         return f"NEW TASK: a new branch from {CODING_AGENT_DEFAULT_BASE_BRANCH}."
     try:
@@ -111,19 +110,23 @@ async def save_coding_plan(
         except GoogleAPICallError as e:
             raise ToolError(f"Could not discard the plan ({e}). Retry once, or tell the user.") from e
         return "Discarded the saved coding plan."
-    kind = await check_base_branch(plan.base_branch)
+    task_type = await check_base_branch(plan.base_branch)
     try:
         doc = session_doc(conversation_id)
         previous = ((await doc.get()).to_dict() or {}).get("coding_plan") or {}
         version = previous.get("version", 0) + 1
-        await doc.update({"coding_plan": {"plan": plan.model_dump(), "version": version, "saved_at": datetime.now(UTC)}})
+        saved_at = datetime.now(UTC)
+        await doc.update({"coding_plan": {"plan": plan.model_dump(), "version": version, "saved_at": saved_at,
+                                          "first_saved_at": previous.get("first_saved_at", saved_at)}})
     except GoogleAPICallError as e:
         raise ToolError(f"Could not save the plan ({e}). Retry once, or tell the user.") from e
     return (
-        f'{kind} Reviewer: {"on" if plan.review else "off"}.\nSaved "{plan.name}" as version {version}. The user has NOT approved this plan yet. '
-        "Show it to the user, starting with the line above, and get their explicit approval before calling "
-        "start_coding_task. Every time the plan is saved again it must be shown to the user again for approval; "
-        "an earlier approval does not carry over."
+        f'Saved "{plan.name}" as version {version}. '
+        "If the user's latest message explicitly approved the plan as it was last shown and asked for only the changes you "
+        "just saved, call start_coding_task next. Otherwise the "
+        "user has not seen this version. Show it to them, beginning with this line: "
+        f'"{task_type} Reviewer: {"on" if plan.review else "off"}." Then wait for their reply before calling start_coding_task. '
+        "An answer to a question you asked, such as turning the reviewer on, is not approval of the plan."
     )
 
 save_coding_plan.handle_tool_error = True
@@ -133,16 +136,30 @@ save_coding_plan.handle_validation_error = str
 # --- start_coding_task ------------------------------------------------------------
 
 START_CODING_TASK_DESCRIPTION = (
-    "Kicks off a background coding agent that builds the requirements in the saved coding plan and pushes the "
-    "result to a branch. The latest version of the plan must have been approved by the user: shown to them after "
-    "the last save_coding_plan call, with their approval given in a later message. Call it only once per round, "
-    "and never in the same round as save_coding_plan. The result gives the task id."
+    "Kicks off a background coding agent that builds the requirements in the saved coding plan and pushes the result to a "
+    "branch. Call it when the user has explicitly approved the plan, either as last shown to them or with the changes you "
+    "just saved at their request. Never call it in the same round as save_coding_plan, open_pull_request or "
+    "run_bigquery_sql. The result gives the task id, which you use in later calls and don't quote to the user."
 )
 
 
 @lru_cache
 def get_tasks_client() -> tasks_v2.CloudTasksAsyncClient:
     return tasks_v2.CloudTasksAsyncClient()
+
+
+async def check_start_coding_task(conversation_id: str, turn_started_at: datetime) -> tuple[CodingAgentPlan, str]:
+    """The saved plan and its task type line, or a ToolError saying why no task can start."""
+    draft = await get_plan_draft(conversation_id)
+    if not draft:
+        raise ToolError("There is no saved coding plan. Draft one with save_coding_plan, show it to the user, and get "
+                        "their approval first.")
+    if draft.get("first_saved_at", draft["saved_at"]) >= turn_started_at:
+        raise ToolError("This plan was first saved this turn, so the user has not seen any version of it. Show it to "
+                        "the user and wait for their reply; start it in a later turn.")
+    plan = CodingAgentPlan.model_validate(draft["plan"])
+    task_type = await check_base_branch(plan.base_branch)
+    return plan, task_type
 
 
 @tool(description=START_CODING_TASK_DESCRIPTION)
@@ -152,15 +169,7 @@ async def start_coding_task(
     turn_started_at: Annotated[datetime, InjectedToolArg],
 ) -> str:
     doc = session_doc(conversation_id)
-    draft = ((await doc.get()).to_dict() or {}).get("coding_plan")
-    if not draft:
-        raise ToolError("There is no saved coding plan. Draft one with save_coding_plan, show it to the user, and get "
-                        "their approval first.")
-    if draft["saved_at"] >= turn_started_at:
-        raise ToolError(f"Version {draft['version']} was saved this turn, so the user has not approved it. Show it to "
-                        "the user and wait for their reply; start it in a later turn.")
-    plan = CodingAgentPlan.model_validate(draft["plan"])
-    kind = await check_base_branch(plan.base_branch)
+    plan, task_type = await check_start_coding_task(conversation_id, turn_started_at)
 
     task_id = await write_coding_agent_task(conversation_id, user_id, plan)
     client = get_tasks_client()
@@ -168,13 +177,17 @@ async def start_coding_task(
         await client.create_task(
             parent=client.queue_path(GCP_PROJECT_ID, CODING_AGENT_LOCATION, CODING_AGENT_QUEUE),
             task=tasks_v2.Task(
+                # named by the task id, so Cloud Tasks refuses a second task with the same name
                 name=client.task_path(GCP_PROJECT_ID, CODING_AGENT_LOCATION, CODING_AGENT_QUEUE, task_id),
+                # Cloud Tasks POSTs to the coding agent app's run endpoint for this task
                 http_request=tasks_v2.HttpRequest(
                     http_method=tasks_v2.HttpMethod.POST,
                     url=f"{CODING_AGENT_SERVICE_URL}/run/{task_id}",
+                    # the request is signed as the invoker service account, the only caller the private app accepts
                     oidc_token=tasks_v2.OidcToken(service_account_email=CODING_AGENT_INVOKER_SA_EMAIL,
                                                   audience=CODING_AGENT_SERVICE_URL),
                 ),
+                # how long Cloud Tasks waits for the app to answer: 30 minutes, the maximum for an HTTP task
                 dispatch_deadline=duration_pb2.Duration(seconds=1800),
             ),
         )
@@ -187,10 +200,10 @@ async def start_coding_task(
     try:
         await doc.update({"coding_plan": firestore.DELETE_FIELD})
     except GoogleAPICallError as e:
-        return (f"Started coding task {task_id} ({kind}). The saved draft could not be cleared ({e}). Do not start it "
+        return (f"Started coding task {task_id} ({task_type}). The saved draft could not be cleared ({e}). Do not start it "
                 "again: call save_coding_plan with discard=true to delete it, and tell the user the task started. "
                 + check_text)
-    return f"Started coding task {task_id} ({kind}). Tell the user it has started. " + check_text
+    return f"Started coding task {task_id} ({task_type}). Tell the user it has started. " + check_text
 
 start_coding_task.handle_tool_error = True
 start_coding_task.handle_validation_error = str
@@ -199,7 +212,8 @@ start_coding_task.handle_validation_error = str
 # --- get_coding_task --------------------------------------------------------------
 
 GET_CODING_TASK_DESCRIPTION = (
-    "Reads the background coding agent's tasks for this conversation. With no task_id, returns a summary list of the "
+    "Reads the background coding agent's tasks for this conversation. Call it when a message says a coding task "
+    "finished, or when the user asks about earlier coding work. With no task_id, returns a summary list of the "
     "conversation's tasks, most recent first (up to 10): task_id, name, goal, status, outcome, branch, pr_url, "
     "completed_at, the changed file paths, and the blocking questions of a task that needs input. With a task_id, "
     "returns that task: its status and progress, and once it has finished, the result.\n\n"
@@ -212,7 +226,8 @@ GET_CODING_TASK_DESCRIPTION = (
     "criterion as something to look at, not proof. The coding agent's claims, not verified: "
     "report, assumptions, blocking_questions and follow_up_questions.\n\n"
     "By outcome. needs_input: relay the blocking_questions and ask the user to answer them. succeeded: tell the user "
-    "what changed from the report and files, give the compare_url, relay the follow_up_questions, and offer a review. "
+    "what changed from the report and files, give the compare_url (and the pr_url if a pull request is open), relay "
+    "the follow_up_questions, and offer to open a pull request unless one is already open. "
     "failed: show the failed checks and offer a revision. stopped: explain the stop_reason.\n\n"
     "Options, each only with a task_id: diff returns the branch's full diff from GitHub; include_plan returns the plan "
     "the task was started from; include_todos returns the coding agent's own to-do list.\n\n"
@@ -220,7 +235,7 @@ GET_CODING_TASK_DESCRIPTION = (
 )
 
 
-class GetCodingTaskArgs(BaseModel):
+class GetCodingTaskArgs(FlatToolArgs):
     task_id: str | None = Field(
         None, description="The task to read. Leave out to get a summary list of this conversation's coding tasks, "
                           "most recent first.")
@@ -353,76 +368,71 @@ get_coding_task.handle_validation_error = str
 
 OPEN_PULL_REQUEST_DESCRIPTION = (
     "Opens a draft pull request into dev from the branch a finished coding task pushed, and returns its link. Call it "
-    "only after the user has asked for a pull request or said yes to your offer of one."
+    "only after the user has asked for a pull request or said yes to your offer of one. Never call it in the same round "
+    "as save_coding_plan, start_coding_task or run_bigquery_sql."
 )
 
 
-class OpenPullRequestArgs(BaseModel):
+class OpenPullRequestArgs(FlatToolArgs):
     task_id: str = Field(description="The coding task to open the pull request for.")
 
 
-@dataclass
-class PullRequestBody:
-    """Every part of the pull request description, in the order it displays. A part left empty is left out."""
-    summary: str = ""
-    changes: str = ""
-    checks: str = ""
-    reviewer_agent: str = ""
-    coding_agent_report: str = ""
-    assumptions: str = ""
-    follow_up_questions: str = ""
-    footer: str = ""
-
-    def render(self) -> str:
-        headed_sections = {"Changes": self.changes, "Checks": self.checks, "Reviewer agent": self.reviewer_agent,
-                           "Coding agent's report": self.coding_agent_report, "Assumptions": self.assumptions,
-                           "Follow-up questions": self.follow_up_questions}
-        parts = [self.summary, *[f"## {heading}\n{text}" for heading, text in headed_sections.items() if text], self.footer]
-        return "\n\n".join(parts)
+def find_open_pull_request(branch: str) -> str | None:
+    """The link of the open pull request from this branch, or None. GitHub is asked, not the stored task, since a person can open or close one by hand."""
+    response = requests.get(
+        f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/pulls",
+        headers={"Authorization": f"Bearer {get_secret('github-pr-token', GCP_PROJECT_ID)}"}, timeout=30,
+        params={"head": f"{GITHUB_REPO_OWNER}:{branch}", "state": "open"})
+    response.raise_for_status()     # an HTTP error raises, so a failed lookup is not read as "no open pull request"
+    open_pulls = response.json()
+    return open_pulls[0]["html_url"] if open_pulls else None
 
 
-def build_pull_request_body(task: dict) -> str:
-    """The description of the pull request, built only from the task's stored plan and result."""
-    result = task["coding_agent_result"]
-    review = result["review"]
-    passed_checks = sum(check["passed"] for check in result["checks"])
-    body = PullRequestBody()
+def count_commits_ahead(branch: str) -> int:
+    """How many commits the branch has that dev does not."""
+    response = requests.get(
+        f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/compare/"
+        f"{CODING_AGENT_DEFAULT_BASE_BRANCH}...{branch}",
+        headers={"Authorization": f"Bearer {get_secret('github-read-token', GCP_PROJECT_ID)}"}, timeout=30,
+        params={"per_page": 1})
+    response.raise_for_status()     # an HTTP error raises, so a failed lookup is not read as "no commits"
+    return response.json()["ahead_by"]
 
-    # Summary: the goal and the outcome, with no heading
-    body.summary = (f"**Goal:** {task['plan']['goal']}\n\n"
-                    f"**Outcome:** {result['outcome']}, {passed_checks} of {len(result['checks'])} checks passed")
 
-    # Changes: one line per changed file
-    body.changes = "\n".join(f"- `{change['path']}` (+{change['added']} -{change['removed']})" for change in result["files"])
+async def get_finished_task(conversation_id: str, task_id: str) -> dict:
+    """The coding task, or a ToolError saying why a pull request can't be opened from it: it doesn't exist in this
+    conversation, hasn't finished, or pushed no branch."""
+    task = await get_coding_agent_task(task_id)
+    if task is None or task["conversation_id"] != conversation_id:
+        raise ToolError(f"There is no coding task {task_id} in this conversation. Call get_coding_task with no task_id "
+                        "to list them.")
+    result = task.get("coding_agent_result")
+    if result is None:
+        raise ToolError(f"Coding task {task_id} is {task['status']}. A pull request can be opened once it has finished.")
+    if not result["branch"]:
+        raise ToolError(f"Coding task {task_id} ended {result['outcome']} and pushed no branch, so there is nothing to "
+                        "open a pull request from.")
+    return task
 
-    # Checks: passed or failed for each, with the output of a failed one
-    check_lines = []
-    for check in result["checks"]:
-        check_lines.append(f"- {'passed' if check['passed'] else 'FAILED'}: {check['name']}")
-        if check["detail"]:
-            check_lines.append(f"```\n{check['detail']}\n```")
-    body.checks = "\n".join(check_lines)
 
-    # Reviewer agent: its verdict and the criteria it failed, only when it ran
-    if review["ran"]:
-        failed_criteria = [f"- {criterion['criterion']}: {criterion['gap']}"
-                           for criterion in review["criteria"] if not criterion["passed"]]
-        body.reviewer_agent = "\n".join([f"Verdict: {review['verdict']}. {review['explanation']}", *failed_criteria])
-
-    # Coding agent's report
-    body.coding_agent_report = result["report"]
-
-    # Assumptions and follow-up questions: empty, and so left out, when there are none
-    body.assumptions = "\n".join(f"- {item}" for item in result["assumptions"])
-    body.follow_up_questions = "\n".join(f"- {item}" for item in result["follow_up_questions"])
-
-    # Footer
-    body.footer = f"---\nOpened from coding task `{task['task_id']}`."
-    return body.render()
+async def check_can_open_pull_request(branch: str) -> None:
+    """Raises a ToolError saying why a pull request can't be opened from the branch: GitHub is unreachable, one is
+    already open, or the branch has nothing new."""
+    try:
+        open_pr_url, commits_ahead = await asyncio.gather(
+            asyncio.to_thread(find_open_pull_request, branch), asyncio.to_thread(count_commits_ahead, branch))
+    except requests.RequestException as e:
+        raise ToolError(f"Could not reach GitHub ({e}). Retry once, or tell the user.") from e
+    if open_pr_url:
+        raise ToolError(f"Branch {branch} already has an open pull request: {open_pr_url}. If this task was a revision, "
+                        "its commit is on that branch, so the pull request already includes it. Give the user the link.")
+    if commits_ahead == 0:
+        raise ToolError(f"Branch {branch} has no commits ahead of {CODING_AGENT_DEFAULT_BASE_BRANCH}, so there is "
+                        "nothing to open a pull request for. It may already be merged.")
 
 
 def create_draft_pull_request(branch: str, title: str, body: str) -> str:
-    """Opens the draft pull request and returns its link, or the link of the one already open for the branch."""
+    """Opens the draft pull request and returns its link."""
     # the PR token, not the read token: it is the only one allowed to open pull requests
     headers = {"Authorization": f"Bearer {get_secret('github-pr-token', GCP_PROJECT_ID)}"}
     pulls_url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/pulls"
@@ -431,16 +441,7 @@ def create_draft_pull_request(branch: str, title: str, body: str) -> str:
     response = requests.post(pulls_url, headers=headers, timeout=30, json={
         "title": title, "head": branch, "base": CODING_AGENT_DEFAULT_BASE_BRANCH, "body": body, "draft": True})
 
-    # GitHub refuses a second pull request for the same branch with a 422, so the branch already has an open one
-    if response.status_code == 422 and "already exists" in response.text:
-        
-        # find that open pull request by its branch and return its link
-        open_pulls = requests.get(pulls_url, headers=headers, timeout=30,
-                                  params={"head": f"{GITHUB_REPO_OWNER}:{branch}", "state": "open"})
-        open_pulls.raise_for_status()
-        return open_pulls.json()[0]["html_url"]
-
-    # any other issue goes back to the agent with GitHub's message.
+    # an error goes back to the agent with GitHub's message.
     if not response.ok:
         raise ToolError(f"GitHub did not open the pull request ({response.status_code}): {response.text}. "
                         "Tell the user what it said.")
@@ -449,28 +450,15 @@ def create_draft_pull_request(branch: str, title: str, body: str) -> str:
 
 @tool(args_schema=OpenPullRequestArgs, description=OPEN_PULL_REQUEST_DESCRIPTION)
 async def open_pull_request(conversation_id: Annotated[str, InjectedToolArg], task_id: str) -> str:
-    task = await get_coding_agent_task(task_id)
-    
-    if task is None or task["conversation_id"] != conversation_id:
-        raise ToolError(f"There is no coding task {task_id} in this conversation. Call get_coding_task with no task_id "
-                        "to list them.")
-    
-    if task.get("pr_url"):
-        return f"Coding task {task_id} already has a pull request: {task['pr_url']}"
-    
-    result = task.get("coding_agent_result")
-    if result is None:
-        raise ToolError(f"Coding task {task_id} is {task['status']}. A pull request can be opened once it has finished.")
-    
-    if not result["branch"]:
-        raise ToolError(f"Coding task {task_id} ended {result['outcome']} and pushed no branch, so there is nothing to "
-                        "open a pull request from.")
+    task = await get_finished_task(conversation_id, task_id)
+    branch = task["coding_agent_result"]["branch"]
+    await check_can_open_pull_request(branch)
+
     try:
-        pr_url = await asyncio.to_thread(create_draft_pull_request, result["branch"], task["plan"]["name"],
-                                         build_pull_request_body(task))
+        pr_url = await asyncio.to_thread(create_draft_pull_request, branch, task["plan"]["name"], build_pull_request_body(task))
     except requests.RequestException as e:
         raise ToolError(f"Could not reach GitHub ({e}). Retry once, or tell the user.") from e
-    
+
     await set_coding_task_pr_url(task_id, pr_url)
     return f"Opened a draft pull request into {CODING_AGENT_DEFAULT_BASE_BRANCH}: {pr_url}. Give the user the link."
 

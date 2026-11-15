@@ -2,6 +2,7 @@
 paths:
   - 'app/orchestrator/**'
   - 'app/shared_helpers.py'
+  - 'app/markdown_display_formatting.py'
   - 'app/model_schema.py'
   - 'app/exceptions.py'
   - 'tests/test_guardrails.py'
@@ -164,7 +165,7 @@ class AgentState(TypedDict):
                                  # attached with the task plan to the turn's first message at
                                  # request time, never in `messages`
     task_plan: TaskPlan          # {"scope", "tasks"}, read with the history; attached the same way
-    coding_plan: CodingPlanDraft # the draft coding plan {plan, version, saved_at}, {} if none; attached the same way
+    coding_plan: CodingPlanDraft # the draft coding plan {plan, version, saved_at, first_saved_at}, {} if none; attached the same way
 
     # Seeded at invocation with just the question, then accumulated during
     # the loop. Plain BaseMessage, not a wrapper — passes straight to
@@ -481,8 +482,8 @@ own Layer-1 test — see `docs/testing.md`):
   `approx_tokens`, `distance`, decoded `args`) can reach the pool; a dict result (the
   overview or tags view) returns `[]`.
 - `extract_table_values(answer_markdown) -> list[float]` — **called by
-  `verify_response`.** Shares `_markdown_ast` (mistune's GFM table parser, an
-  AST walk) with `check_table_rows` above — not duplicated, per the
+  `verify_response`.** Shares `markdown_ast` (mistune's GFM table parser, an
+  AST walk, in `app/markdown_display_formatting.py`) with `check_table_rows` above — not duplicated, per the
   no-pass-through-helpers rule (`CLAUDE.md`), since both need the identical
   "find every real table block" walk. Replaced an earlier hand-rolled regex
   scan after it silently dropped bold-formatted cells (`**66.8%**`) —
@@ -1015,7 +1016,8 @@ to heights read from the app (`notebooks/phase3_answer_height_calibration.ipynb`
 over-estimating); the chart cost sits between a standard chart (about 613) and a beeswarm (about 1,000), so a
 beeswarm answer is under-estimated. `MAX_ANSWER_HEIGHT = 4000` is well under the cap on purpose: the gallery
 row also holds the question, thinking log, sources and follow-ups, and an answer measured at 6,674 was already
-cut at the bottom. The constants live in `orchestrator.py` beside the estimator, not in `config.py`.
+cut at the bottom. The estimate, the split, the table check and the approval card live in `app/markdown_display_formatting.py`, with
+the constants beside the estimator, not in `config.py`.
 
 An answer over the limit is split, not shortened. `split_answer_into_sections` cuts it into consecutive
 sections that each fit, before a heading where one is available, and the retry note names where parts 2 onward
@@ -1048,15 +1050,15 @@ MAX_ANSWER_TABLE_ROWS = 25     # a table this size is still fine as generate_cha
 MAX_LENGTH_RETRIES = 2
 MAX_VERIFY_RETRIES = 2
 
-# Shared GFM table parser (mistune, AST walk) -- used by check_table_rows
-# here and by extract_table_values below. Replaced an earlier hand-rolled
+# In app/markdown_display_formatting.py. Shared GFM table parser (mistune, AST walk) -- used by
+# check_table_rows here and by extract_table_values below. Replaced an earlier hand-rolled
 # regex scan, see that section for why.
-_markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
+markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
 
 def check_table_rows(answer_markdown: str) -> bool:
     """True if every markdown table in the answer has at most
     MAX_ANSWER_TABLE_ROWS data rows."""
-    for block in _markdown_ast(answer_markdown):
+    for block in markdown_ast(answer_markdown):
         if block.get("type") != "table":
             continue
         body = next((c for c in block["children"] if c["type"] == "table_body"), None)
@@ -1128,7 +1130,9 @@ Answer-length is bounded here; the incoming `question` is bounded as
 
 Three tiers, the byte-vs-dollar decision rule, and the full pause/resume
 design are in `docs/approval-workflow.md` — single source, read it before
-touching `call_tool_node`'s cost logic.
+touching `call_tool_node`'s cost logic. The coding tools pause the same way: `start_coding_task` and `open_pull_request` pause
+once their checks pass (`needs_coding_approval`), with `approved_batch` checked once around both pauses, after
+`split_conflicting_coding_calls` has applied the round rules (`docs/approval-workflow.md`).
 
 **Three things that are easy to get wrong — full design in
 `docs/approval-workflow.md`, read it before building this:**
@@ -1648,7 +1652,7 @@ turn's `AskRequest` arrives; none of the three pass `api_key=`/
 - **Cost gating is not a node** — it lives inside `call_tool_node`, which
   dry-runs every BigQuery call in the batch before dispatching anything
   (`docs/approval-workflow.md`). `call_tool` routes on what that decision
-  produces. The gate is a function, `check_cost_gate`, returning a `CostGateResult`;
+  produces. The gate is a function, `assess_query_costs`, returning a `QueryCostAssessment`;
   `cost_pause_update` builds the pause's state update, and `call_tool_node` calls both.
 - `check_length` before `verify` — cheap check first; no point walking the
   answer's numbers against tool data if it can't be displayed regardless.
@@ -1685,7 +1689,7 @@ this table and the code ever disagree.
 | From | Condition | Outcome | `AgentResponse` fields `finalize` sets | Telemetry |
 |---|---|---|---|---|
 | any routing function | `is_cancelled` (live Firestore read, not `state["cancelled"]` -- nothing sets that until Layer 2 lands) | Cancelled | `answer_markdown` = `CANCELLED_MESSAGE` always, even if `verify_node` already confirmed an answer (a cancelled turn is discarded, never written to history); `needs_approval` forced to `False` regardless of what `call_tool` last set it to | Normal row, `cancelled: True`, `needs_approval: False` |
-| `call_tool` | `needs_approval` (only reached if not also cancelled) | Approval pause | `answer_markdown` = `approval_message(...)` (`PENDING_APPROVAL_MESSAGE`, the cost, the query cut to fit); `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
+| `call_tool` | `needs_approval` (only reached if not also cancelled) | Approval pause | `answer_markdown` = `approval_message(...)` (`PENDING_APPROVAL_MESSAGE`, the cost, the query cut to fit) for a query pause, or `coding_approval_message(state)` (the plan's name and goal, or the task's name and branch) for a coding pause, chosen by `largest_pending_query`; `needs_approval: True`, `pending_query` (the largest), `estimated_cost` | **Pause row**, `approval_decision: null` (`.claude/rules/telemetry.md`) |
 | `check_length` | too long, `length_retry_count` exhausted | Length decline | Fixed decline: couldn't produce a short enough answer, suggests breaking up the question | Normal row |
 | `verify` | `verified: True` | Success | Full assembly: `answer_markdown`, `sources` (`build_sources`), `suggested_follow_ups`; `iteration_cap_hit`/`cost_cap_exceeded` set `True` if either is how this turn got here | Normal row |
 | `verify` | failed, `verification_retry_count` exhausted | Honest decline | `VERIFICATION_FAILURE_MESSAGE` — no unverified number emitted | Normal row |

@@ -552,7 +552,8 @@ section once was. The pause itself (the gate deciding `needs_approval`) is a
 guardrail test, covered under §8:
 `test_call_tool_node_pauses_over_threshold` (`tests/test_orchestrator.py`) —
 a batch over `PENDING_APPROVAL_THRESHOLD` pauses before any tool runs, and
-the card's query is the one with the largest estimate. This section is
+the card's query is the one with the largest estimate. The coding pause is checked live in `notebooks/phase3_graph.ipynb`;
+Layer 1 pins its round rule (`test_split_conflicting_coding_calls`). This section is
 everything *after* the pause.
 
 ```python
@@ -582,6 +583,10 @@ async def test_write_telemetry_row_success(...):
     proves a resumed turn's response row doesn't double-count what its pause
     row already reported."""
 ```
+
+**Coding task telemetry, Layer 1** (`tests/test_coding_task_telemetry.py`): the row builder matches the table schema and flattens a
+completed task, with and without a reviewer, a patch or a revision base, and `count_tool_calls` counts calls and failures per tool. The
+BigQuery write itself is Layer 2, checked live against the real table.
 
 **Live-verified in `notebooks/phase3_graph.ipynb`, `phase3_orchestrator_e2e.ipynb`,
 and `phase3_gateway_e2e.ipynb`** (the last one through real HTTP routes, no

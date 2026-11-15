@@ -17,7 +17,6 @@ from operator import itemgetter
 
 import google.auth
 import google.auth.transport.requests
-import mistune
 import msal
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -35,6 +34,7 @@ from app.config import (
     AGENT_SA_EMAIL,
     BIGQUERY_PRICE_PER_TIB,
     CHART_TOOLS,
+    CODING_APPROVAL_CARD_TOOLS,
     CHART_URL_EXPIRATION_HOURS,
     CONTEXT_DIR,
     DAX_ROW_CAP,
@@ -67,7 +67,12 @@ from app.orchestrator.conversation_memory.writer import build_findings_row, writ
 from app.shared_helpers import is_cancelled, label_chartable_result
 from app.coding_task_models import CodingTaskNotification
 from app.coding_task_store import build_coding_task_notification, get_coding_agent_task, mark_coding_task_notified
-from app.orchestrator.coding_tools import get_coding_task, open_pull_request, save_coding_plan, start_coding_task
+from app.markdown_display_formatting import (
+    MAX_ANSWER_HEIGHT, answer_height, approval_message, check_table_rows, coding_approval_message, markdown_ast,
+    split_answer_into_sections)
+from app.orchestrator.coding_tools import (
+    OpenPullRequestArgs, check_can_open_pull_request, check_start_coding_task, get_coding_task, get_finished_task,
+    open_pull_request, save_coding_plan, start_coding_task)
 from app.orchestrator.state import AgentState, CodingPlanDraft, Note, TaskPlan, ToolCallRecord, TurnError
 from app.shared_chart import CHART_REF_RE, replace_chart_refs, shorten_chart_urls, sign_chart_url
 from app.orchestrator.tools import (
@@ -103,14 +108,12 @@ CHARTABLE_TOOLS = {"run_bigquery_sql", "run_dax_query", "combine_results"}
 ANTHROPIC_NON_STRICT_TOOLS = {"get_conversation_findings", "search_conversation_findings", "save_coding_plan",
                               "start_coding_task", "get_coding_task", "open_pull_request"}
 
-# The two tools the one-per-round guard in dispatch_other_call applies to
-CODING_PLAN_GUARD_TOOLS = {"save_coding_plan", "start_coding_task"}
+# The coding flow's tools: at most one call among them per round
+CODING_FLOW_TOOLS = {"save_coding_plan", "start_coding_task", "open_pull_request"}
 
 # finalize_node's canned messages -- one per terminal state with no real answer yet.
 VERIFICATION_FAILURE_MESSAGE = ("I wasn't able to verify a confident answer to this "
                                  "question. Please try rephrasing or asking again.")
-PENDING_APPROVAL_MESSAGE = ("This question requires running a large query. "
-                            "Approve or reject it to continue.")
 CANCELLED_MESSAGE = "This turn was cancelled."
 
 
@@ -432,19 +435,11 @@ def build_tool_call_records_and_messages(batch: ToolBatch, ref_counter: int) -> 
     return BatchResult(records, display_messages, errors, ref_counter)
 
 
-async def dispatch_other_call(tc: dict, batch_calls: list[dict], prior_tool_calls: list[ToolCallRecord],
+async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
                                filter_context: list[dict], conversation_id: str, user_id: str,
                                turn_started_at: datetime) -> ToolMessage:
-    """Dispatches one non-BigQuery tool call, injecting hidden args first. batch_calls is every non-BigQuery call in
-    the round."""
+    """Dispatches one non-BigQuery tool call, injecting hidden args first."""
 
-    # More than one save_coding_plan/start_coding_task in a round: every one of them errors
-    if tc["name"] in CODING_PLAN_GUARD_TOOLS and sum(call["name"] in CODING_PLAN_GUARD_TOOLS for call in batch_calls) > 1:
-        return ToolMessage(
-            content="Not run -- this round has more than one call to save_coding_plan or start_coding_task. "
-                    "Call only one of them per round.",
-            name=tc["name"], tool_call_id=tc["id"], status="error")
-    
     # Get page info
     if tc["name"] == "get_page_info":
         full_args = {**tc, "args": {**tc["args"], "filter_context": filter_context}}
@@ -519,8 +514,9 @@ async def dispatch_other_call(tc: dict, batch_calls: list[dict], prior_tool_call
 
 
 @dataclass
-class CostGateResult:
-    """What dry-running a round's BigQuery calls decided."""
+class QueryCostAssessment:
+    """The dry-run estimates for a round's BigQuery calls, judged against the turn's cost cap and the approval
+    threshold."""
     estimates: list[int] = field(default_factory=list)     # bytes per call, in bq_calls order; empty when there are no calls or the dry-run failed
     batch_bytes: int = 0
     cost_cap_exceeded: bool = False
@@ -528,38 +524,152 @@ class CostGateResult:
     dry_run_error: str | None = None
 
 
-async def check_cost_gate(state: AgentState, bq_calls: list[dict]) -> CostGateResult:
-    """Dry-runs every BigQuery call in the round and decides, on the summed bytes, whether the round runs, needs approval or is declined."""
+async def assess_query_costs(state: AgentState, bq_calls: list[dict]) -> QueryCostAssessment:
+    """Dry-runs every BigQuery call in the round and judges the summed bytes against the turn's cost cap and the
+    approval threshold."""
     if not bq_calls:
-        return CostGateResult()
+        return QueryCostAssessment()
     try:
         estimates = await asyncio.gather(*[dry_run(tc["args"]["query"]) for tc in bq_calls])
     except ToolError as e:
-        return CostGateResult(dry_run_error=str(e))
+        return QueryCostAssessment(dry_run_error=str(e))
     batch_bytes = sum(estimates)
     cost_cap_exceeded = state["bytes_consumed"] + batch_bytes >= ABSOLUTE_CAP
     # TABLESAMPLE's dry-run estimate has repeatedly underestimated actual
     # billed bytes -- never trust it under the threshold, force a pause.
     uses_tablesample = any("TABLESAMPLE" in tc["args"]["query"].upper() for tc in bq_calls)
-    needs_approval = ((batch_bytes > PENDING_APPROVAL_THRESHOLD or uses_tablesample)
-                      and not cost_cap_exceeded and not state["approved_batch"])
-    return CostGateResult(estimates, batch_bytes, cost_cap_exceeded, needs_approval)
+    needs_approval = (batch_bytes > PENDING_APPROVAL_THRESHOLD or uses_tablesample) and not cost_cap_exceeded
+    return QueryCostAssessment(estimates, batch_bytes, cost_cap_exceeded, needs_approval)
 
 
-def cost_pause_update(bq_calls: list[dict], cost_gate_result: CostGateResult) -> dict:
+def cost_pause_update(bq_calls: list[dict], cost_assessment: QueryCostAssessment) -> dict:
     """State update that pauses the turn for approval of the round's BigQuery calls. Iteration count is not incremented."""
     pending = [
         {"id": tc["id"], "query": tc["args"]["query"], "estimated_bytes": estimated_bytes}
-        for tc, estimated_bytes in zip(bq_calls, cost_gate_result.estimates)
+        for tc, estimated_bytes in zip(bq_calls, cost_assessment.estimates)
     ]
-    largest_index = cost_gate_result.estimates.index(max(cost_gate_result.estimates))
+    largest_index = cost_assessment.estimates.index(max(cost_assessment.estimates))
     largest_pending_query = bq_calls[largest_index]["args"]["query"]
     return {
         "needs_approval": True,
         "pending_queries": pending,
         "largest_pending_query": largest_pending_query,
-        "estimated_cost": format_cost(cost_gate_result.batch_bytes),
+        "estimated_cost": format_cost(cost_assessment.batch_bytes),
         "paused_at": datetime.now(timezone.utc),
+    }
+
+
+async def needs_coding_approval(state: AgentState, other_calls: list[dict]) -> bool:
+    """True when the round holds a start_coding_task or open_pull_request call that passes its checks. A call that fails
+    a check is not paused: it runs, and the tool reports the error to the agent."""
+    
+    approval_card_call = next((tc for tc in other_calls if tc["name"] in CODING_APPROVAL_CARD_TOOLS), None)
+    
+    if approval_card_call is None:
+        return False
+
+    try:
+        # Start a coding task: a plan the user has seen, on a valid base branch
+        if approval_card_call["name"] == "start_coding_task":
+            await check_start_coding_task(state["conversation_id"], state["turn_started_at"])
+
+        # Open a pull request: a finished task whose branch has new commits and no open pull request
+        elif approval_card_call["name"] == "open_pull_request":
+            args = OpenPullRequestArgs.model_validate(approval_card_call["args"])
+            task = await get_finished_task(state["conversation_id"], args.task_id)
+            await check_can_open_pull_request(task["coding_agent_result"]["branch"])
+    except (ToolError, ValidationError):
+        return False     # the tool runs the same checks and reports the error to the agent
+    return True
+
+
+async def dispatch_bq_calls(bq_calls: list[dict], cost_assessment: QueryCostAssessment, conversation_id: str) -> ToolBatch:
+    """Runs the round's BigQuery calls, or declines all of them when the dry-run failed or the cost cap would be exceeded."""
+    started_at = datetime.now(timezone.utc)
+    if cost_assessment.dry_run_error is not None:
+        # A query failed to price: decline every call
+        error_type = "dry_run_failed"
+        messages = [
+            ToolMessage(
+                content=(
+                    f"Not executed -- a query in this batch failed to price (dry-run): "
+                    f"{cost_assessment.dry_run_error} All run_bigquery_sql calls in the same round are "
+                    "declined together when this happens, so this error may describe a "
+                    "different query than this one. Check each query in the batch, fix "
+                    "the one it describes, and retry."),
+                name=tc["name"], tool_call_id=tc["id"], status="error")
+            for tc in bq_calls
+        ]
+    elif cost_assessment.cost_cap_exceeded:
+        # The round would exceed the turn's cost cap: decline every call
+        error_type = "cost_cap_exceeded"
+        messages = [
+            ToolMessage(
+                content=(
+                    f"Not executed -- this query would push the turn's total scanned "
+                    f"data over the {ABSOLUTE_CAP / 1024**3:.0f} GiB limit. Try a "
+                    "cheaper query, or provide the best answer you can with what you "
+                    "already have and tell the user you hit the turn's cost limit."),
+                name=tc["name"], tool_call_id=tc["id"], status="error")
+            for tc in bq_calls
+        ]
+    else:
+        # Run the queries; one that fails while running is recorded as tool_error
+        error_type = "tool_error"
+        full_bq_calls = [
+            {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
+            for tc in bq_calls
+        ]
+        messages = await asyncio.gather(*[ALL_TOOLS[tc["name"]].ainvoke(tc) for tc in full_bq_calls])
+    return ToolBatch(bq_calls, messages, started_at, datetime.now(timezone.utc), error_type)
+
+
+def split_conflicting_coding_calls(tool_calls: list[dict]) -> tuple[list[dict], list[dict], list[ToolMessage]]:
+    """Splits a round's calls into (kept_calls, conflicting_calls, conflict_messages). Two coding-flow calls in one round
+    conflict with each other; a coding approval card call conflicts with a BigQuery call."""
+    coding_calls = [tc for tc in tool_calls if tc["name"] in CODING_FLOW_TOOLS]
+    coding_approval_card_calls = [tc for tc in coding_calls if tc["name"] in CODING_APPROVAL_CARD_TOOLS]
+    has_query_call = any(tc["name"] == "run_bigquery_sql" for tc in tool_calls)
+
+    if len(coding_calls) > 1:
+        conflicting_calls = coding_calls
+        reason = ("Not run -- a round can hold only one of save_coding_plan, start_coding_task and open_pull_request. "
+                  "Call only one of them per round.")
+
+    elif coding_approval_card_calls and has_query_call:
+        conflicting_calls = coding_approval_card_calls
+        reason = "Not run -- start_coding_task and open_pull_request can't share a round with run_bigquery_sql."
+
+    else:
+        return tool_calls, [], []
+
+    conflict_messages = [ToolMessage(content=reason, name=tc["name"], tool_call_id=tc["id"], status="error")
+                         for tc in conflicting_calls]
+    kept_calls = [tc for tc in tool_calls if tc not in conflicting_calls]
+    return kept_calls, conflicting_calls, conflict_messages
+
+
+async def answer_submitted_update(tc: dict) -> dict:
+    """State update for a round whose only call is submit_answer: the submitted answer, or the error when the call is malformed."""
+    msg = await submit_answer.ainvoke(tc)
+    if msg.status == "error":
+        # Malformed call -- let the model see the error and retry.
+        return {"messages": [msg], "answer_submitted": False}
+
+    #Validate Args and get SubmitAnswerArgs object
+    args = SubmitAnswerArgs.model_validate(tc["args"])
+    is_question = bool(args.clarifying_question.strip())
+
+    return {
+        "messages": [msg],
+        "answer_submitted": True,
+        "answer_markdown": args.clarifying_question if is_question else args.answer_markdown,
+        "clarifying_question": args.clarifying_question,
+        "all_prose_numeric_claims": args.all_prose_numeric_claims,
+        "suggested_follow_ups": [] if is_question else args.suggested_follow_ups,
+        "title": args.title,
+        "topics": args.topics,
+        "entities": args.entities,
     }
 
 
@@ -591,114 +701,6 @@ def iteration_cap_update(tool_calls: list[dict], iteration_count: int) -> dict:
             for r in records
         ],
     }
-
-
-# Shared GFM table parser -- used by check_table_rows & extract_table_values
-_markdown_ast = mistune.create_markdown(renderer="ast", plugins=["table"])
-
-
-# check_length_node: answer-length guardrail
-
-def check_table_rows(answer_markdown: str) -> bool:
-    """True if every markdown table in the answer has at most
-    MAX_ANSWER_TABLE_ROWS data rows."""
-    for block in _markdown_ast(answer_markdown):
-        if block.get("type") != "table":
-            continue
-        body = next((c for c in block["children"] if c["type"] == "table_body"), None)
-        if body is None:
-            continue
-        if len(body["children"]) > MAX_ANSWER_TABLE_ROWS:
-            return False
-    return True
-
-
-# Answer height estimate, fitted to heights read from the app (app units).
-MAX_ANSWER_HEIGHT = 4000
-HEIGHT_PER_CHAR = 0.6
-HEIGHT_PER_TABLE_ROW = 42
-HEIGHT_PER_CHART = 700
-HEIGHT_PER_CODE_LINE = 30
-HEADING_CHAR_WEIGHT = 1.33     # headings are 32px against 24px body text
-
-
-def inline_text_and_images(nodes: list[dict]) -> tuple[str, int]:
-    """Visible text and image count of inline nodes."""
-    text, images = "", 0
-    for node in nodes:
-        if node["type"] == "image":
-            images += 1
-        elif "children" in node:
-            inner_text, inner_images = inline_text_and_images(node["children"])
-            text, images = text + inner_text, images + inner_images
-        else:
-            text += node.get("raw", "")
-    return text, images
-
-
-def block_height(node: dict) -> float:
-    kind = node["type"]
-    if kind in ("paragraph", "block_text", "heading"):
-        text, images = inline_text_and_images(node["children"])
-        weight = HEADING_CHAR_WEIGHT if kind == "heading" else 1
-        return HEIGHT_PER_CHAR * weight * len(text) + HEIGHT_PER_CHART * images
-    if kind == "block_code":
-        return HEIGHT_PER_CODE_LINE * (node["raw"].rstrip("\n").count("\n") + 1)
-    if kind == "table":
-        body = next((c for c in node["children"] if c["type"] == "table_body"), None)
-        return HEIGHT_PER_TABLE_ROW * (1 + (len(body["children"]) if body else 0))
-    return sum(block_height(child) for child in node.get("children", []))
-
-
-def answer_height(answer_markdown: str) -> float:
-    return sum(block_height(node) for node in _markdown_ast(answer_markdown))
-
-
-def block_label(node: dict) -> str:
-    """What a block starts with, for naming where an answer is cut."""
-    if node["type"] in ("heading", "paragraph", "block_text"):
-        return inline_text_and_images(node["children"])[0][:60] or "a chart"
-    return {"list": "a list", "table": "a table", "block_code": "a code block"}.get(node["type"], node["type"])
-
-
-def split_answer_into_sections(answer_markdown: str) -> list[dict]:
-    """Splits the answer into consecutive sections that each fit MAX_ANSWER_HEIGHT, cutting before a
-    heading when one is available. Each section is {"starts_with": its first block, "height": its estimated height}."""
-    block_list = []
-    for markdown_node in _markdown_ast(answer_markdown):
-        if markdown_node["type"] == "blank_line":
-            continue
-        block_list.append({
-            "label": block_label(markdown_node),
-            "is_heading": markdown_node["type"] == "heading",
-            "height": block_height(markdown_node),
-        })
-
-    answer_sections = []
-    height_left = sum(block["height"] for block in block_list)
-    while len(block_list) > 1 and height_left > MAX_ANSWER_HEIGHT:
-        # index of the first block where the running height passes the limit
-        running_height = 0
-        for first_over_limit_index, block in enumerate(block_list):
-            running_height += block["height"]
-            if running_height > MAX_ANSWER_HEIGHT:
-                break
-        first_over_limit_index = max(first_over_limit_index, 1)    # a block taller than the limit gets a section to itself
-
-        # index where the next section begins: the last heading before that block, else the block itself
-        cut_index = first_over_limit_index
-        for index in range(1, first_over_limit_index):
-            if block_list[index]["is_heading"]:
-                cut_index = index
-
-        section_blocks = block_list[:cut_index]
-        section_height = sum(block["height"] for block in section_blocks)
-        answer_sections.append({"starts_with": section_blocks[0]["label"], "height": section_height})
-        block_list = block_list[cut_index:]
-        height_left -= section_height
-    answer_sections.append({"starts_with": block_list[0]["label"], "height": height_left})
-
-    return answer_sections
 
 
 # verify_node: pooled numeric-claim verification
@@ -740,7 +742,7 @@ def _cell_text(node: dict) -> str:
 def extract_table_values(answer_markdown: str) -> list[float]:
     """Pulls every numeric cell out of every markdown table in answer_markdown."""
     values: list[float] = []
-    for block in _markdown_ast(answer_markdown):
+    for block in markdown_ast(answer_markdown):
         if block.get("type") != "table":
             continue
         body = next((c for c in block["children"] if c["type"] == "table_body"), None)
@@ -954,7 +956,7 @@ def render_finished_notification(notification: CodingTaskNotification) -> str:
     """The message saved to history when a coding task finishes."""
     branch = f", branch {notification['branch']}" if notification["branch"] else ""
     return (f'Coding task {notification["task_id"]} "{notification["name"]}" finished: outcome {notification["outcome"]}{branch}. New: finish '
-            "the user's current question first, then tell them it finished and offer to review it. Get the details with "
+            "the user's current question first, then tell them it finished and offer to go through the result. Get the details with "
             "get_coding_task using this task id.")
 
 
@@ -1019,6 +1021,7 @@ async def agent_node(state: AgentState) -> dict:
     
     system_message = SystemMessage(content=build_static_context(state["model_provider"], get_static_context()))
 
+    # Anthropic only: mark the history for prompt caching (OpenAI and Gemini cache automatically)
     history = state["history_messages"]
     if state["model_provider"] == "anthropic":
         history = mark_anthropic_history_cache(history)
@@ -1053,48 +1056,47 @@ async def agent_node(state: AgentState) -> dict:
 async def call_tool_node(state: AgentState) -> dict:
     """Dispatches tool calls under the iteration/cost-cap guardrails;
     records a ToolCallRecord and, for any declined/failed call, a TurnError."""
+
     tool_calls = state["messages"][-1].tool_calls
 
     # Submit Answer Branch: Only triggered when submit_answer is the sole tool call, ignores iteration/cost caps.
-    answer_submitted = len(tool_calls) == 1 and tool_calls[0]["name"] == "submit_answer"
-    if answer_submitted:
-        tc = tool_calls[0]
-        msg = await submit_answer.ainvoke(tc)
-        if msg.status == "error":
-            # Malformed call -- let the model see the error and retry.
-            return {"messages": [msg], "answer_submitted": False}
-        #Validate Args
-        args = SubmitAnswerArgs.model_validate(tc["args"])
-        is_question = bool(args.clarifying_question.strip())
-        return {
-            "messages": [msg],
-            "answer_submitted": True,
-            "answer_markdown": args.clarifying_question if is_question else args.answer_markdown,
-            "clarifying_question": args.clarifying_question,
-            "all_prose_numeric_claims": args.all_prose_numeric_claims,
-            "suggested_follow_ups": [] if is_question else args.suggested_follow_ups,
-            "title": args.title,
-            "topics": args.topics,
-            "entities": args.entities,
-        }
+    if len(tool_calls) == 1 and tool_calls[0]["name"] == "submit_answer":
+        return await answer_submitted_update(tool_calls[0])
+
     # Exceeds iteration cap Branch: Declines and builds error messages for every tool call in the batch.
     if state["iteration_count"] >= MAX_ITERATIONS:
         return iteration_cap_update(tool_calls, state["iteration_count"])
 
-    bq_calls = [tc for tc in tool_calls if tc["name"] == "run_bigquery_sql"]
-    other_calls = [tc for tc in tool_calls if tc["name"] != "run_bigquery_sql"]
+    # Set aside conflicting coding calls (with their error messages), then split the rest into BigQuery and other calls
+    kept_calls, conflicting_calls, conflict_messages = split_conflicting_coding_calls(tool_calls)
+    bq_calls = [tc for tc in kept_calls if tc["name"] == "run_bigquery_sql"]
+    other_calls = [tc for tc in kept_calls if tc["name"] != "run_bigquery_sql"]
 
-    cost_gate_result = await check_cost_gate(state, bq_calls)
+    # Dry-run the round's BigQuery queries. The assessment holds the estimated bytes, whether the turn's cost cap
+    # would be exceeded, whether the batch needs approval, and any dry-run error.
+    cost_assessment = await assess_query_costs(state, bq_calls)
 
     # Pause before any tool runs, so the whole batch waits for approval. Iteration count is not incremented.
-    if cost_gate_result.needs_approval:
-        return cost_pause_update(bq_calls, cost_gate_result)
+    # A resumed batch has the user's approval already.
+    if not state["approved_batch"]:
+        if cost_assessment.needs_approval:
+            return cost_pause_update(bq_calls, cost_assessment)
 
+        # Pause for the user's approval card before a coding task starts or a pull request opens
+        if await needs_coding_approval(state, other_calls):
+            return {
+                "needs_approval": True,
+                "pending_queries": [],
+                "largest_pending_query": None,
+                "estimated_cost": None,
+                "paused_at": datetime.now(timezone.utc),
+            }
+
+    #Dispatch non-big query tool calls
     other_started_at = datetime.now(timezone.utc)
     other_messages = await asyncio.gather(*[
         dispatch_other_call(
             tc=tc,
-            batch_calls=other_calls,
             prior_tool_calls=state["tool_calls"],
             filter_context=state["filter_context"],
             conversation_id=state["conversation_id"],
@@ -1105,50 +1107,15 @@ async def call_tool_node(state: AgentState) -> dict:
     ])
     other_completed_at = datetime.now(timezone.utc)
 
-    bq_started_at = datetime.now(timezone.utc)
-    if cost_gate_result.dry_run_error is not None:
-        bq_messages = [
-            ToolMessage(
-                content=(
-                    f"Not executed -- a query in this batch failed to price (dry-run): "
-                    f"{cost_gate_result.dry_run_error} All run_bigquery_sql calls in the same round are "
-                    "declined together when this happens, so this error may describe a "
-                    "different query than this one. Check each query in the batch, fix "
-                    "the one it describes, and retry."),
-                name=tc["name"], tool_call_id=tc["id"], status="error")
-            for tc in bq_calls
-        ]
-    elif cost_gate_result.cost_cap_exceeded:
-        bq_messages = [
-            ToolMessage(
-                content=(
-                    f"Not executed -- this query would push the turn's total scanned "
-                    f"data over the {ABSOLUTE_CAP / 1024**3:.0f} GiB limit. Try a "
-                    "cheaper query, or provide the best answer you can with what you "
-                    "already have and tell the user you hit the turn's cost limit."),
-                name=tc["name"], tool_call_id=tc["id"], status="error")
-            for tc in bq_calls
-        ]
-    else:
-        full_bq_calls = [
-            {**tc, "args": {**tc["args"], "conversation_id": state["conversation_id"]}}
-            for tc in bq_calls
-        ]
-        bq_messages = await asyncio.gather(*[ALL_TOOLS[tc["name"]].ainvoke(tc) for tc in full_bq_calls])
-    bq_completed_at = datetime.now(timezone.utc)
+    #Dispatch BigQuery tool calls, or decline them on a dry-run failure or when the cost cap is exceeded
+    bq_batch = await dispatch_bq_calls(bq_calls, cost_assessment, state["conversation_id"])
 
+    #Build ToolCallRecords and ToolMessages (including errors)
     ref_counter = sum(1 for r in state["tool_calls"] if r.get("ref_id")) + 1
-    if cost_gate_result.dry_run_error is not None:
-        bq_error_type = "dry_run_failed"
-    elif cost_gate_result.cost_cap_exceeded:
-        bq_error_type = "cost_cap_exceeded"
-    else:
-        bq_error_type = "tool_error"
-
-    bq_batch = ToolBatch(bq_calls, bq_messages, bq_started_at, bq_completed_at, bq_error_type)
     bq_result = build_tool_call_records_and_messages(bq_batch, ref_counter)
 
-    other_batch = ToolBatch(other_calls, other_messages, other_started_at, other_completed_at, "tool_error")
+    other_batch = ToolBatch(conflicting_calls + other_calls, conflict_messages + other_messages,
+                            other_started_at, other_completed_at, "tool_error")
     other_result = build_tool_call_records_and_messages(other_batch, bq_result.ref_counter)
 
     # Only successful queries count -- a failed query was never billed.
@@ -1164,8 +1131,8 @@ async def call_tool_node(state: AgentState) -> dict:
         "approved_batch": False,
         "iteration_count": state["iteration_count"] + 1,
         "bytes_consumed": state["bytes_consumed"] + total_billed_bytes,
-        "cost_cap_exceeded": cost_gate_result.cost_cap_exceeded,
-        "estimated_cost": format_cost(cost_gate_result.batch_bytes) if cost_gate_result.cost_cap_exceeded else state["estimated_cost"],
+        "cost_cap_exceeded": cost_assessment.cost_cap_exceeded,
+        "estimated_cost": format_cost(cost_assessment.batch_bytes) if cost_assessment.cost_cap_exceeded else state["estimated_cost"],
         "tool_calls": bq_result.records + other_result.records,
         "errors": bq_result.errors + other_result.errors,
         "cancelled": cancelled,
@@ -1260,42 +1227,6 @@ async def verify_node(state: AgentState) -> dict:
     }
 
 
-APPROVAL_QUERY_ROW_HEIGHT = 33    # 22px code at line-height 1.5
-APPROVAL_QUERY_ROW_CHARS = 45     # narrow wrap width, so long lines are over-counted rather than under
-
-
-def approval_message(estimated_cost: str, query: str) -> str:
-    """The approval card text. Only as many query lines as fit in half the answer height are shown, so the
-    card's buttons stay on screen."""
-    lines = query.split("\n")
-    row_budget = int(MAX_ANSWER_HEIGHT / 2 // APPROVAL_QUERY_ROW_HEIGHT)
-    shown_lines, rows_used = [], 0
-    is_one_long_line = False
-
-    for line in lines:
-        rows_used += max(1, math.ceil(len(line) / APPROVAL_QUERY_ROW_CHARS))
-        if rows_used > row_budget:
-            break
-        shown_lines.append(line)
-
-    if not shown_lines:     # the first line alone is over the budget
-        is_one_long_line = True
-        shown_lines = [lines[0][:row_budget * APPROVAL_QUERY_ROW_CHARS]]
-
-    shown_query = "\n".join(shown_lines)
-    message = (
-        f"{PENDING_APPROVAL_MESSAGE}\n\n"
-        f"Estimated cost: {estimated_cost}\n\n"
-        f"```sql\n{shown_query}\n```"
-    )
-
-    trimmed = len(shown_lines) < len(lines) or is_one_long_line
-    if trimmed:
-        message += "\n..."
-        message += "\n\nThe query is too long to display in full"
-    return message
-
-
 async def finalize_node(state: AgentState) -> dict:
     """Tallies tokens/sources, builds and writes the telemetry row. Each
     terminal state ships its own canned message if the turn has no real
@@ -1313,7 +1244,12 @@ async def finalize_node(state: AgentState) -> dict:
 
     #Approval Branch: Build approval message for answer markdown
     elif needs_approval:
-        answer_markdown = approval_message(state["estimated_cost"], state["largest_pending_query"])
+        # A query pause: the estimated cost and the query
+        if state["largest_pending_query"]:
+            answer_markdown = approval_message(state["estimated_cost"], state["largest_pending_query"])
+        # A coding pause: the plan to start or the pull request to open
+        else:
+            answer_markdown = await coding_approval_message(state)
 
     #Verification failure branch
     elif not state["verified"]:

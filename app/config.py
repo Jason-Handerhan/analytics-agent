@@ -124,6 +124,9 @@ MEMORY_SOURCE_TOOLS = {"get_conversation_findings", "search_conversation_finding
 # Tools whose results carry a chart_url
 CHART_TOOLS = {"generate_chart", "generate_beeswarm"}
 
+# The coding tools that pause for the user's approval card, as opposed to a BigQuery cost card
+CODING_APPROVAL_CARD_TOOLS = {"start_coding_task", "open_pull_request"}
+
 MAX_ANSWER_TABLE_ROWS = 25  # cap on any single markdown table in an answer -- a display limit, not a fetch limit
 MAX_LENGTH_RETRIES = 2
 MAX_VERIFY_RETRIES = 3

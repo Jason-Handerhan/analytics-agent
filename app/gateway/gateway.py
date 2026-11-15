@@ -25,6 +25,7 @@ from app.config import (
     TENANT_ID,
     get_secret,
 )
+from app.coding_task_models import CodingAgentPlan
 from app.coding_task_store import fetch_open_coding_task_notifications
 from app.gateway.entry_exit import (
     build_agent_response,
@@ -47,12 +48,16 @@ from app.gateway.models import (
     AgentResponse,
     AskRequest,
     CancelResponse,
+    CodingPlanResponse,
+    CodingTasksResponse,
     ConversationHistoryResponse,
     ConversationListResponse,
     ConversationResponse,
     DeleteConversationResponse,
     StatusResponse,
+    TaskPlanResponse,
 )
+from app.markdown_display_formatting import render_plan_markdown, render_task_plan_markdown
 from app.orchestrator.compaction import CompactionResult, compact_history_pipeline, measure_history_size
 from app.orchestrator.conversation_memory.writer import write_summary_row
 from app.orchestrator.orchestrator import graph, init_orchestrator
@@ -62,7 +67,10 @@ from app.orchestrator.state import AgentState, CodingPlanDraft, Note, StoredTurn
 logger = logging.getLogger(__name__)
 
 GENERIC_TURN_ERROR_MESSAGE = "Something went wrong answering this question. Please try again."
-REJECTED_MESSAGE = "You rejected this query. The turn has been cancelled."
+REJECTED_MESSAGE = "You rejected this request. The turn has been cancelled."
+CODING_TASK_FINISHED_QUESTION = "The coding task finished. What was the result?"
+NO_CODING_PLAN_MESSAGE = "No coding plan is saved for this conversation."
+NO_TASK_PLAN_MESSAGE = "No task plan is saved for this conversation."
 
 app = FastAPI()
 _jwks_client = PyJWKClient(
@@ -429,7 +437,7 @@ async def run_agent_turn(body: AskRequest, user_id: str) -> AgentResponse:
     #Build initial state for a normal turn (not an approval resume)
     else:
         initial_state = build_initial_state(
-            question=body.question,
+            question=CODING_TASK_FINISHED_QUESTION if body.app_message_is_synthetic else body.question,
             conversation_id=body.conversation_id,
             user_id=user_id,
             model=body.model,
@@ -557,6 +565,44 @@ async def get_conversation_history_endpoint(
     claims = await asyncio.to_thread(validate_entra_token, authorization)
     await assert_owns_conversation(conversation_id, claims)
     return ConversationHistoryResponse(turns=await get_conversation_history(conversation_id))
+
+
+@app.get("/conversations/{conversation_id}/coding-tasks", response_model=CodingTasksResponse)
+async def get_conversation_coding_tasks(
+    conversation_id: str, authorization: str = Header(...), x_api_key: str = Header(...)
+):
+    """Coding tasks that are queued, running, or finished and not yet announced -- the status display and the finish trigger."""
+    validate_api_key(x_api_key)
+    claims = await asyncio.to_thread(validate_entra_token, authorization)
+    await assert_owns_conversation(conversation_id, claims)
+    return CodingTasksResponse(tasks=await fetch_open_coding_task_notifications(conversation_id))
+
+
+@app.get("/conversations/{conversation_id}/coding-plan", response_model=CodingPlanResponse)
+async def get_conversation_coding_plan(
+    conversation_id: str, authorization: str = Header(...), x_api_key: str = Header(...)
+):
+    """The conversation's saved coding plan in full, as html -- the plan view."""
+    validate_api_key(x_api_key)
+    claims = await asyncio.to_thread(validate_entra_token, authorization)
+    await assert_owns_conversation(conversation_id, claims)
+    memory = await fetch_session_memory(conversation_id)
+    markdown = (render_plan_markdown(CodingAgentPlan.model_validate(memory.coding_plan["plan"]))
+                if memory.coding_plan else NO_CODING_PLAN_MESSAGE)
+    return CodingPlanResponse(plan_html=render_answer_html(markdown))
+
+
+@app.get("/conversations/{conversation_id}/task-plan", response_model=TaskPlanResponse)
+async def get_conversation_task_plan(
+    conversation_id: str, authorization: str = Header(...), x_api_key: str = Header(...)
+):
+    """The conversation's saved task plan (the to-do list) in full, as html -- the to-do list view."""
+    validate_api_key(x_api_key)
+    claims = await asyncio.to_thread(validate_entra_token, authorization)
+    await assert_owns_conversation(conversation_id, claims)
+    memory = await fetch_session_memory(conversation_id)
+    markdown = render_task_plan_markdown(memory.task_plan) if memory.task_plan.get("tasks") else NO_TASK_PLAN_MESSAGE
+    return TaskPlanResponse(task_plan_html=render_answer_html(markdown))
 
 
 @app.delete("/conversations/{conversation_id}", response_model=DeleteConversationResponse)

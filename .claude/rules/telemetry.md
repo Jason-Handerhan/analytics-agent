@@ -194,6 +194,36 @@ with no matching response row for the same `conversation_id` *is* the record
 *when* the user walked away, since there's no completion event; the pause
 row's timestamp and the conversation's TTL bound it, which is enough.
 
+## Coding task telemetry — one row per task, in its own table
+
+`telemetry.coding_task_telemetry` holds one row per coding task, written once by the coding agent app when the task completes. It is
+separate from `agent_telemetry`: a different producer, a different grain (a task, not a turn) and a different identity.
+`conversation_id` joins it to `agent_telemetry`. The PR is not in this row: `open_pull_request` is a main-agent call, recorded in
+`agent_telemetry.tool_calls`.
+
+**One schema definition,** `coding_agent_app/telemetry/schema.py`, imported by the writer and by `create_table.py`.
+`build_coding_task_row` (`writer.py`) flattens the completed task document and the `RunDetails` the run collects as it goes. The row
+holds the task and its times, the plan (flattened fields and `plan_json`), the outcome and the agent's report (and `result_json`), the
+patch as text, the checks, the reviewer's verdict and last-round criteria, tokens and model-call counts for the agent and the reviewer
+(`CountingUsageHandler` counts the calls), per-tool call counts, and three links: `langsmith_run_id`, `cloud_run_revision` and
+`sandbox_snapshot_id`. The reviewer's columns are null when it did not run.
+
+**Tool calls are counts only** (name, how many, how many failed), with no arguments or results. The full detail is the LangSmith trace,
+reached through `langsmith_run_id`: the id is generated before the run and passed as the run's `run_id`, so it is the trace's id (the
+trace also carries the task id as metadata). LangSmith keeps traces for a limited time (believed about two weeks on the base plan;
+unverified), so anything that reads a trace has to run soon after the task.
+
+**Written like the main agent's rows:** awaited inside the request (Cloud Run throttles CPU once the response is sent), with the task id
+as the insert row id so a repeated write adds no second row. A failure is logged and never fails the task, since the result is already
+stored.
+
+**Identity.** `coding-agent-sa` holds BigQuery Data Editor on this table only (setup guide, Step 23), not impersonation of
+`turn-writer-sa`: narrower, and the job's credentials never reach the sandbox. Create the table with
+`uv run python -m coding_agent_app.telemetry.create_table`.
+
+**Tests.** `tests/test_coding_task_telemetry.py` checks that the row matches the schema and flattens the task; the BigQuery write itself
+is checked live.
+
 ## The judge job consumes this — don't couple them
 
 `scripts/run_judge.py` runs as a **Cloud Run Job** (a different product from a

@@ -16,7 +16,8 @@ from matplotlib.colors import to_rgba
 import app.orchestrator.orchestrator as orchestrator_module
 import app.orchestrator.tools as tools_module
 from app.config import SHAP_FEATURE_DISPLAY_NAMES
-from app.orchestrator.tools import PAGE_INFO_DIR, PAGES, ToolError, get_measure_dax, get_page_info, run_bigquery_sql
+from app.orchestrator.tools import (
+    PAGE_INFO_DIR, PAGES, FlatToolArgs, ToolError, get_measure_dax, get_page_info, run_bigquery_sql)
 
 
 # --- run_bigquery_sql: description and the cancellation race ---------------------------------
@@ -326,6 +327,22 @@ def test_search_conversation_findings_args_validator():
 
 
 # --- Task plan: manage_tasks -----------------------------------------------------------------
+
+
+def test_flat_tool_args_unwrap():
+    """A flat tool's arguments nested under "args" validate like the flat call, keeping any key beside the wrapper (the injected
+    ones); a model with its own args field is left alone."""
+    class DemoArgs(FlatToolArgs):
+        task_id: str
+        flag: bool = False
+
+    assert DemoArgs.model_validate({"args": {"task_id": "t1", "flag": True}}) == DemoArgs(task_id="t1", flag=True)
+    assert DemoArgs.model_validate({"args": {"task_id": "t1"}, "flag": True}) == DemoArgs(task_id="t1", flag=True)
+
+    class OwnArgs(FlatToolArgs):
+        args: dict
+
+    assert OwnArgs.model_validate({"args": {"x": 1}}).args == {"x": 1}
 
 
 def test_manage_tasks_args_validator():

@@ -47,7 +47,7 @@ can cite a figure.
 
 ## The cost gate lives in `call_tool_node`, not the tool — dry-run, decide, dispatch
 
-*Built 2026-11-11: the gate is a function, `check_cost_gate`, which dry-runs the round's BigQuery calls and returns a `CostGateResult`;
+*Built 2026-11-11: the gate is a function, `assess_query_costs`, which dry-runs the round's BigQuery calls and returns a `QueryCostAssessment`;
 `cost_pause_update` builds the pause's state update, and `call_tool_node` calls both. It is not a node (decided 2026-11-10).*
 
 **Per-tool gating is unsafe for a batch.** Three BigQuery calls dispatched
@@ -259,36 +259,36 @@ object as a side effect.
 `agent_safe` objects (IAM enforces this before it runs). Rendering is a
 gateway/frontend concern — `.claude/rules/gateway.md`, `docs/frontend.md`.
 
-## Planned: approving `start_coding_task` and `open_pull_request`
+## Approving `start_coding_task` and `open_pull_request`
 
-Decided 2026-11-10 and revised 2026-11-11, not built. The order is: live-test the coding agent changes, the coding task telemetry table,
-then this (`docs/build-order.md`, Phase 6 item 2a). The same pause covers the two tools that spend money or publish something, with no
-new state and no frontend change.
+Built 2026-11-14, after the cost check was extracted from `call_tool_node`. The same pause covers the two tools that spend money or
+publish something. It adds no state field and no frontend control: the card is text in `answer_markdown`.
 
-- **The gate** (the function extracted from `call_tool_node`, not a node) sets `needs_approval` when the round holds a gated tool and
-  `approved_batch` is not set. Resume is unchanged: it replays the dangling batch.
-- **A guard replaces `CODING_PLAN_GUARD_TOOLS`,** at the top of `call_tool_node` before the pause check, not in `dispatch_other_call`.
-  Two rules. First, at most one call among `save_coding_plan`, `start_coding_task` and `open_pull_request` per round: if there are more,
-  every one of those calls gets an error `ToolMessage` and none runs. This also stops a save and a start racing in one `gather`.
-  Second, a `start_coding_task` or `open_pull_request` call in a round with a `run_bigquery_sql` call gets an error `ToolMessage`; the
-  BigQuery calls go on to the cost gate. Any other tool beside a gated one is fine: the pause happens before any call in the batch
-  runs, and resume replays the whole batch.
-- **The tool's own checks run before the card.** The gate checks that the draft was first saved in an earlier turn and the base branch
-  is valid (start), or that the task finished and pushed a branch (PR), and returns the error to the model without pausing if one fails,
-  so the user is never asked to approve a call that will error. The checks are functions the tool and the gate both call.
-- **A plan can be saved and started in one turn.** The draft keeps `first_saved_at`, set on the first save and kept through revisions
-  (an older draft falls back to `saved_at`). `start_coding_task` refuses only when `first_saved_at >= turn_started_at`: the user has
-  not yet had a turn to see any version. A plan the user saw in an earlier turn can be revised and started in the same turn, a round
-  apart: the user says "approved, reviewer on", the agent saves, then starts, and the card shows the final version. The save result
-  and the start description say so, and that an answer to a question (turning the reviewer on) is not approval of the plan.
-- **`finalize` builds the card into `answer_markdown`,** as it does for a query, from what state already holds: the pending tool and its
-  arguments in the last message's `tool_calls`, `state["coding_plan"]` for a plan, and one read of the task for a PR.
-  `pending_queries` is empty and `estimated_cost` is `None` for these pauses.
-- **Cards.** Plan: the whole plan, so the user approves exactly what runs. Within a height budget that leaves room for the buttons
-  (the same approach as the query card), sections are dropped in this order, each with a "not shown" line: `suggested_code`,
-  `decisions`, `files_to_imitate`, `tests`, `constraints`; then requirements are trimmed with "N more not shown". Name, goal, base
-  branch and reviewer always show. PR: the task's name and its `branch` into `dev`; the title and body are not shown, since the PR is
-  a draft a person reviews on GitHub. A UI control to view a saved plan in full at any time comes later.
-- **Chat stays the review surface for a first look.** The agent shows a plan in chat when it first saves one; the card is the hard gate
-  on the exact version that runs. For a PR, the user's request in chat is the intent and the card confirms it.
-- **Reject** returns a neutral message ("You rejected this request. The turn has been cancelled."), and a saved draft plan stays saved.
+- **The pause** is in `call_tool_node`, and `approved_batch` is checked once, around both pauses. When it is not set, a query batch that
+  needs approval pauses (`cost_pause_update`); otherwise a round holding a `start_coding_task` or `open_pull_request` call that passes its
+  checks (`needs_coding_approval`) pauses, with `pending_queries` empty and no cost. Resume is unchanged: it replays the dangling batch.
+  `assess_query_costs` still runs on a resumed batch, so the absolute cap holds after approval.
+- **A round rule** (`split_conflicting_coding_calls`, before any pause): at most one call among `save_coding_plan`, `start_coding_task` and
+  `open_pull_request` per round, else each gets an error `ToolMessage` and none runs; this also stops a save and a start racing in one
+  `gather`. A `start_coding_task` or `open_pull_request` call beside a `run_bigquery_sql` call gets an error `ToolMessage` while the queries
+  go on, because `approved_batch` is one flag: approving a query card would otherwise approve the tool call too. Other tools beside a
+  gated one are fine: nothing in the batch runs until approval, and resume replays the whole batch.
+- **Checks before the card.** `needs_coding_approval` runs the tool's own checks (`check_start_coding_task`; `get_finished_task` and
+  `check_can_open_pull_request`), so the user is never asked to approve a call that will error. A failed check does not pause: the call
+  runs, and the tool, which re-runs the same checks, returns the error to the agent. They run again after approval.
+- **A plan can be saved and started in one turn.** The draft keeps `first_saved_at`, set on the first save and kept through later
+  versions (an older draft falls back to `saved_at`). `start_coding_task` refuses only when `first_saved_at >= turn_started_at`: the user
+  has not yet had a turn to see any version. A plan the user saw in an earlier turn can be changed and started in the same turn, a round
+  apart: the user approves it and asks for changes, the agent saves, then starts. The save result and the start description say so, and
+  that an answer to a question (turning the reviewer on) is not approval of the plan.
+- **The card** is built in `finalize_node` by `coding_approval_message` (`app/markdown_display_formatting.py`), from what is stored and
+  not from state: the saved draft for a start, read from Firestore because a plan saved earlier in the same turn is not in state, or the
+  finished task for a PR. A plan card is the plan's name and goal and a pointer to the coding plan icon; a PR card is the task's name and
+  its branch into `dev`. No height check is needed: the name and goal are bounded by their fields, and the full plan has its own view.
+  `finalize` picks the card by `largest_pending_query`, which only a query pause sets.
+- **The full plan view is not built.** An endpoint and a Power Apps icon (and a to-do list view beside them) show the whole saved plan at
+  any time. The card text and the system prompt both mention the icon, so it must exist before the pause is deployed.
+- **The agent is not told about the card.** From its side a start or PR call ends in a result, or the turn ends. The approval rules it
+  needs are in the tool descriptions (`app/orchestrator/coding_tools.py`) and one flow paragraph in the system prompt.
+- **Reject** returns a neutral message ("You rejected this request. The turn has been cancelled."). A saved draft plan stays saved, and
+  the paused turn writes nothing to the agent's history, so the agent is not told it was rejected.

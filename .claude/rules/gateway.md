@@ -3,6 +3,7 @@ paths:
   - 'app/gateway/**'
   - 'app/config.py'
   - 'app/shared_helpers.py'
+  - 'app/markdown_display_formatting.py'
   - 'tests/test_gateway.py'
   - 'tests/test_static_context.py'
   - 'tests/test_entry_exit.py'
@@ -139,6 +140,9 @@ owner before any turn runs.
 | `POST /ask/cancel/{conversation_id}` | Set the cancel flag | No — returns immediately |
 | `GET /conversations` | List this user's past conversations, most recent first | No — fast BigQuery read |
 | `GET /conversations/{conversation_id}/history` | Every turn for one conversation, oldest first — restores `colChat` | No — fast BigQuery read |
+| `GET /conversations/{conversation_id}/coding-plan` | The conversation's saved coding plan in full, as html, for the plan view | No — one Firestore read |
+| `GET /conversations/{conversation_id}/task-plan` | The conversation's saved task plan (the to-do list) in full, as html, for the to-do list view | No — one Firestore read |
+| `GET /conversations/{conversation_id}/coding-tasks` | This conversation's coding tasks the user has not been told about: the status display and the finish trigger | No — one Firestore query |
 | `DELETE /conversations/{conversation_id}` | Soft-delete a conversation (writes a marker row, never a real `DELETE`) | No — fast BigQuery write |
 
 **Every endpoint except `POST /conversation` and `GET /conversations` takes a
@@ -157,7 +161,7 @@ the ID can't come from `POST /ask`.
   it** — an ID that only arrived with the answer would leave turn one
   unpollable.
 - `POST /ask` — body `{question, image_base64, filter_context, active_page,
-  conversation_id, approval_decision, model}`. **`approval_decision` is
+  conversation_id, approval_decision, model, app_message_is_synthetic}`. **`approval_decision` is
   `"approved" | "rejected" | None`, mutually exclusive with `question` —
   exactly one of the two is set** (`AskRequest`'s own validator). A fresh
   question omits it; resolving a pending approval omits `question` instead.
@@ -166,6 +170,11 @@ the ID can't come from `POST /ask`.
   flow). Returns the `AgentResponse` model **serialized as-is — snake_case,
   no field-name conversion** (`.claude/rules/orchestrator.md` is the schema
   of record).
+
+  **`app_message_is_synthetic` (default `false`) is true when the app wrote the question and the user did not type it** (today only
+  the fixed text that starts the turn announcing a finished coding task, `docs/coding-agent.md`). The agent is given
+  `CODING_TASK_FINISHED_QUESTION` instead; the chat history and the screen keep the app's text, as an approval keeps "Approved". The
+  exactly-one validator is unchanged. A second kind of synthetic message would need the flag to say which.
 
   **`model` is per-request, not read from `app/config.py` directly — proven
   live, including through a pause/resume round trip, 2026-10-20.** Defaults
@@ -207,6 +216,17 @@ the ID can't come from `POST /ask`.
   `ConversationHistoryResponse` — every turn for this conversation, oldest
   first, each already shaped to match `colChat`. Powers "restore this
   conversation" from the picker.
+- `GET /conversations/{conversation_id}/coding-tasks` — no body. Returns
+  `CodingTasksResponse`: a list of `CodingTaskNotification` for this conversation's tasks that are `queued`, `running`,
+  or `completed` and not yet announced (`notified` is left out), from `fetch_open_coding_task_notifications`, the same read a
+  turn does at its start. Powers the coding task status display and the app's finish trigger (`docs/coding-agent.md`,
+  "Telling the user when a task finishes").
+- `GET /conversations/{conversation_id}/coding-plan` — no body. Returns `CodingPlanResponse`: the saved draft plan
+  (read with `fetch_session_memory`) as markdown (`render_plan_markdown`, every section the plan has) rendered to html by `render_answer_html`,
+  or a short "No coding plan is saved" message when there is no draft (never saved, discarded, or cleared when its task started).
+- `GET /conversations/{conversation_id}/task-plan` — no body. Returns `TaskPlanResponse`: the saved task plan from
+  `fetch_session_memory` as markdown (`render_task_plan_markdown`: the scope, then each task numbered with a status emoji)
+  rendered to html by `render_answer_html`, or a short "No task plan is saved" message when there is none.
 - `DELETE /conversations/{conversation_id}` — no body. **Soft-delete, not a
   real `DELETE`** — writes a marker row to
   `agent_chat_history.deleted_conversations` instead. A real `DELETE`
@@ -316,7 +336,7 @@ sessions/{conversation_id}            # spans the whole conversation
   ],                                       # before this field have none)
   "notes": [...],                          # [{id, kind, text}] from manage_notes, read with the history
   "task_plan": {...},                      # {"scope", "tasks"} from manage_tasks, read with the history
-  "coding_plan": {...},                    # {plan, version, saved_at} from save_coding_plan, read with the history; absent once started
+  "coding_plan": {...},                    # {plan, version, saved_at, first_saved_at} from save_coding_plan, read with the history; absent once started
   "last_activity_at": <timestamp>          # updated every turn; TTL target
 }
 ```
@@ -529,7 +549,9 @@ class PendingApproval(TypedDict):
                                              # AIMessage included; rebuild_paused_messages
                                              # restores numeric results on resume
     pending_queries: list[dict]              # BigQuery — {id, query, estimated_bytes},
-                                             # display/telemetry only, not load-bearing
+                                             # display/telemetry only, not load-bearing;
+                                             # empty for a start_coding_task or
+                                             # open_pull_request pause
     deferred_dax: list[dict]                 # vestigial -- never populated; see
                                              # docs/approval-workflow.md
     tool_calls: list[ToolCallRecord]         # same name and shape as
@@ -537,7 +559,7 @@ class PendingApproval(TypedDict):
                                              # directly on resume, no translation
     iteration_count: int                     # carried — see rule below
     bytes_consumed: int                      # carried — see rule below
-    estimated_cost: str
+    estimated_cost: str | None               # None for a coding pause
     paused_at: datetime                      # correlates this object to its
                                              # telemetry pause row, and dates
                                              # the pause when a response arrives

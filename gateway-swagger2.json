@@ -105,6 +105,54 @@
         }
       }
     },
+    "/conversations/{conversation_id}/coding-tasks": {
+      "get": {
+        "summary": "Coding tasks the user has not been told about",
+        "operationId": "GetConversationCodingTasks",
+        "parameters": [
+          { "name": "conversation_id", "in": "path", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/CodingTasksResponse" }
+          }
+        }
+      }
+    },
+    "/conversations/{conversation_id}/coding-plan": {
+      "get": {
+        "summary": "The saved coding plan in full, as html",
+        "operationId": "GetConversationCodingPlan",
+        "parameters": [
+          { "name": "conversation_id", "in": "path", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/CodingPlanResponse" }
+          }
+        }
+      }
+    },
+    "/conversations/{conversation_id}/task-plan": {
+      "get": {
+        "summary": "The saved task plan (the to-do list) in full, as html",
+        "operationId": "GetConversationTaskPlan",
+        "parameters": [
+          { "name": "conversation_id", "in": "path", "required": true, "type": "string" },
+          { "name": "x-api-key", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "schema": { "$ref": "#/definitions/TaskPlanResponse" }
+          }
+        }
+      }
+    },
     "/conversations/{conversation_id}": {
       "delete": {
         "summary": "Soft-delete a conversation",
@@ -133,7 +181,8 @@
         "active_page": { "type": "string" },
         "conversation_id": { "type": "string" },
         "approval_decision": { "type": "string", "enum": ["approved", "rejected"] },
-        "model": { "type": "string" }
+        "model": { "type": "string" },
+        "app_message_is_synthetic": { "type": "boolean" }
       }
     },
     "ConversationResponse": {
@@ -215,6 +264,39 @@
       "required": ["turns"],
       "properties": {
         "turns": { "type": "array", "items": { "$ref": "#/definitions/ConversationTurn" } }
+      }
+    },
+    "CodingTasksResponse": {
+      "type": "object",
+      "required": ["tasks"],
+      "properties": {
+        "tasks": { "type": "array", "items": { "$ref": "#/definitions/CodingTaskNotification" } }
+      }
+    },
+    "CodingTaskNotification": {
+      "type": "object",
+      "required": ["task_id", "name", "status", "progress"],
+      "properties": {
+        "task_id": { "type": "string" },
+        "name": { "type": "string" },
+        "status": { "type": "string", "enum": ["queued", "running", "completed", "notified"] },
+        "progress": { "type": "string" },
+        "outcome": { "type": "string" },
+        "branch": { "type": "string" }
+      }
+    },
+    "CodingPlanResponse": {
+      "type": "object",
+      "required": ["plan_html"],
+      "properties": {
+        "plan_html": { "type": "string" }
+      }
+    },
+    "TaskPlanResponse": {
+      "type": "object",
+      "required": ["task_plan_html"],
+      "properties": {
+        "task_plan_html": { "type": "string" }
       }
     },
     "DeleteConversationResponse": {

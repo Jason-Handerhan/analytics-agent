@@ -489,7 +489,9 @@ not left for later.
 the backend, inside `finalize_node`'s `needs_approval` branch** — appended
 to `answer_markdown` as a fenced SQL block, then rendered through the same
 `answer_html` pipeline as any other answer. No separate frontend display
-work needed for it; `htmlAgentResponse` just shows it like any other answer.
+work needed for it; `htmlAgentResponse` just shows it like any other answer. A `start_coding_task` or `open_pull_request` pause works
+the same way, with a different card text (the plan's name and goal, or the task's name and branch); the Approve and Reject controls
+key on `needs_approval`, so they need no change. The coding plan icon the plan card points to, and its endpoint, are not built.
 
 **A real cosmetic bug, fixed, 2026-10-14:** clicking Approve/Reject could
 briefly show the *previous* turn's leftover thinking-log text on the new
@@ -533,6 +535,18 @@ anything else.
   fresh `conversation_id`, re-seeds `colChat`, resets every loose
   variable) — see `App.OnStart`, below. `DisplayMode: If(varWaitingForAnswer, DisplayMode.Disabled, DisplayMode.Edit)`,
   same as every other action button.
+
+## Planned: the coding task watcher
+
+Not built; the design and the reasons are in `docs/coding-agent.md` ("Telling the user when a task finishes"). What it adds here:
+- A second `Timer`, slow (every 5 to 10 seconds) and separate from the one-second status Timer, that runs only while `varWatchTasks` is true.
+  `varWatchTasks` is set when a conversation opens with an open coding task, or when a response's `sources` starts with "Started coding
+  task", and cleared when none are open.
+- Its `OnTimerEnd` reads the conversation's coding tasks, shows their `progress` in the status display, and, when one has finished with no
+  turn in flight (`varWaitingForAnswer`) and no pending approval, sets `varPendingTrigger` and calls `Select` on the Send button.
+- The Send button's `OnSelect` branches on `varPendingTrigger`: blank sends the text box, set sends the fixed text "Retrieving coding task
+  result..." with `app_message_is_synthetic: true`, leaves the text box alone, and clears the variable.
+- The Question label's outline may be dropped for that text, so the row looks like the agent's own line.
 
 ## `App.OnStart`
 

@@ -1480,7 +1480,7 @@ steps 7 and 8; permission for the gateway to create its tasks comes when the que
 | It can | It can't |
 |---|---|
 | List tables and read table schemas (names, types, descriptions) in `instacart`, `building_blocks` and `ml_model_feature_table` | Write to, create or delete any table or dataset |
-| Create BigQuery query jobs in the project, and dry-run queries on those three datasets (step 6) | Touch `agent_safe`, `telemetry` or any other dataset |
+| Create BigQuery query jobs in the project, and dry-run queries on those three datasets (step 6) | Touch `agent_safe` or any other dataset, or `telemetry` beyond its one table (Step 23) |
 | Be impersonated by you, for testing from a notebook with exactly its permissions | Return rows to the agent: its tools expose none |
 
 The commands below are PowerShell; run them in one window so the variables stay set. Names and the project ID are the
@@ -1560,7 +1560,7 @@ values in `app/config.py`.
    }
    ```
    Firestore has no per-collection IAM, so `roles/datastore.user` covers the whole database, the same as `agent-sa`'s grant. The
-   GitHub token (step 9) gets the same binding, and Token Creator on `turn-writer-sa` is added with the telemetry step.
+   GitHub token (step 9) gets the same binding.
 
 8. **Expire old task documents.** The documents carry an `expires_at` field (30 days); this makes Firestore delete them then.
    ```powershell
@@ -1607,12 +1607,12 @@ values in `app/config.py`.
    Rotating it later is a new secret version (`gcloud secrets versions add github-agent-push-token --data-file=...`); the service reads the
    latest version when it starts.
 
-**Deliberately not granted:** every write role, and anything on `agent_safe`, `telemetry` or the other datasets. Data Viewer
+**Deliberately not granted:** every dataset-level write role, and anything on `agent_safe` or the other datasets; its only telemetry access is Data Editor on the one `coding_task_telemetry` table (Step 23). Data Viewer
 means this account can read rows in those three datasets; the coding agent's tools never execute a query or return rows,
 and the account's credentials exist only in the job process, never in the sandbox. `docs/coding-agent.md` records the decision.
 
-**Added with the service (step 7 above):** `roles/datastore.user` and `secretAccessor` on the Anthropic and LangSmith keys. **Still to add:**
-the queue and invoker permissions (Step 20), and Token Creator on `turn-writer-sa`.
+**Added with the service (step 7 above):** `roles/datastore.user` and `secretAccessor` on the Anthropic and LangSmith keys. **Added later:**
+the queue and invoker permissions (Step 20) and, for telemetry, Data Editor on the `coding_task_telemetry` table only (Step 23).
 
 **If something fails**
 - *Permission denied right after a grant:* IAM changes can take a minute or two to apply; wait and retry before changing
@@ -1678,7 +1678,7 @@ The first two should list you and `agent-sa` (`serviceAccountUser` and `enqueuer
 `roles/datastore.user` for `coding-agent-sa`; its secret and dataset grants are on those resources and do not appear there.
 
 **Not needed:** a grant for Cloud Build to push the image (the gateway's build already pushed to the same repository with the same
-builder), and Token Creator on `turn-writer-sa`, which waits for the telemetry step.
+builder).
 
 **If something fails**
 - *`PERMISSION_DENIED` when creating a task:* the grants above are missing for the account creating it; allow a minute or two after granting.
@@ -1764,6 +1764,33 @@ not open pull requests, and the main agent can open pull requests but not push c
   repositories.
 - *GitHub answers 422 with "No commits between":* the task's branch has nothing new against `dev`, for example because it is already merged.
 - *GitHub answers 422 about draft pull requests:* the repo's plan does not allow drafts on a private repo.
+
+---
+
+## Step 23 — Coding task telemetry: the table and its grant
+
+**When:** before the first coding task you want a row for. Run in one PowerShell window, from the project root.
+
+The coding agent app writes one row per finished task to `telemetry.coding_task_telemetry`. It writes with its own account, with write
+access to that one table and nothing else in `telemetry`.
+
+1. **Create the table.** It is built from the schema in `coding_agent_app/telemetry/schema.py`, and running it again changes nothing.
+   ```powershell
+   uv run python -m coding_agent_app.telemetry.create_table
+   ```
+
+2. **Give the coding agent app write access to this table only.** In the BigQuery console, open the table, then **Share**, **Manage
+   permissions**, **Add principal**. Principal: `coding-agent-sa@YOUR_PROJECT.iam.gserviceaccount.com`. Role: **BigQuery Data Editor**.
+   Grant it on the table and not on the `telemetry` dataset, which would also let it write `agent_telemetry`.
+
+3. **Redeploy the coding agent app** (Step 21's build and deploy) so the code that writes the row is live, run a task, and query the
+   table for its row.
+
+**If something fails**
+- *No row appears:* the service log says why. "telemetry row rejected" carries BigQuery's reason; "telemetry write failed" carries the
+  exception. A permission error means the grant in step 2 is missing, or has not applied yet; wait a minute and retry.
+- *A row has no trace to open:* the trace's id is the row's `langsmith_run_id`, and it is in the trace's address in LangSmith. Older
+  traces are removed after LangSmith's retention period.
 
 ---
 

@@ -241,6 +241,28 @@ def test_post_ask_success(monkeypatch, patch_jwks, auth_headers):
     assert history_args[3].answer_markdown == "There were 551,399 orders."
 
 
+def test_post_ask_synthetic_message_gives_the_agent_its_own_question(monkeypatch, patch_jwks, auth_headers):
+    """A message the app wrote reaches the agent as the coding-task-finished question, while the chat history keeps the app's text."""
+    _patch_gateway(monkeypatch)
+    _patch_docs(monkeypatch)
+    monkeypatch.setattr(gateway, "init_orchestrator", AsyncMock())
+    seen = {}
+
+    class _RecordingGraph(_FakeGraph):
+        async def astream(self, initial_state, stream_mode=None, version=None):
+            seen["question"] = initial_state["question"]
+            async for chunk in super().astream(initial_state, stream_mode, version):
+                yield chunk
+
+    monkeypatch.setattr(gateway, "graph", _RecordingGraph())
+
+    resp = client.post("/ask", headers=auth_headers, json={
+        "question": "Retrieving coding task result...", "conversation_id": "some-id", "app_message_is_synthetic": True})
+    assert resp.status_code == 200
+    assert seen["question"] == gateway.CODING_TASK_FINISHED_QUESTION
+    assert gateway.write_chat_history.await_args.args[2] == "Retrieving coding task result..."
+
+
 def test_question_too_long_rejected(monkeypatch, patch_jwks, auth_headers):
     """Question over MAX_QUESTION_CHARS is rejected before a turn starts."""
     _patch_gateway(monkeypatch)

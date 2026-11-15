@@ -64,6 +64,18 @@ class ToolError(ToolException):
     """ToolException subclass -- handle_tool_error=True converts it to a ToolMessage."""
 
 
+class FlatToolArgs(BaseModel):
+    """Base for the arguments of a tool whose parameters are flat: tolerates the model nesting them under "args", the shape the MCP tools take."""
+    @model_validator(mode="before")
+    @classmethod
+    def _unwrap_args(cls, data):
+        if isinstance(data, dict) and isinstance(data.get("args"), dict) and "args" not in cls.model_fields:
+            unwrapped_args = data["args"]
+            injected_args = {key: value for key, value in data.items() if key != "args"}     # the keys beside the wrapper, normally the injected ones
+            return {**unwrapped_args, **injected_args}
+        return data
+
+
 # --- run_bigquery_sql -----------------------------------------------------
 
 # UNPIVOT list for the waterfall example, labeled with the dashboard names.
@@ -609,7 +621,7 @@ narrow it."""
 OVERVIEW_QUESTION_MAX_CHARS = 150
 
 
-class GetConversationFindingsArgs(BaseModel):
+class GetConversationFindingsArgs(FlatToolArgs):
     view: Literal["overview", "turns"] = Field(
         description="'overview' for a summary of the conversation's verified turns, 'turns' for their full rows.")
     start_turn: int | None = Field(
@@ -760,7 +772,7 @@ Filters hide turns whose tags are worded differently, so add one only when unfil
 product, department or model, etc., and take the wording from mode="tags"."""
 
 
-class SearchConversationFindingsArgs(BaseModel):
+class SearchConversationFindingsArgs(FlatToolArgs):
     mode: Literal["search", "tags"] = Field(
         description="'search' runs a semantic (vector) search for the query. "
                     "'tags' lists the topics and entities available for filtering.")

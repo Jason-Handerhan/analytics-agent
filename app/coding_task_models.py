@@ -47,10 +47,10 @@ class CodingAgentPlan(BaseModel):
                                   "work. No files, steps or limits (those go in requirements and constraints), and no numbers.")
     
     base_branch: str = Field(CODING_AGENT_DEFAULT_BASE_BRANCH, description=(
-        f"`{CODING_AGENT_DEFAULT_BASE_BRANCH}` for a new task: the coding agent starts from it and pushes a new branch. To continue an "
-        "earlier task, set this to the `branch` in that task's result, copied exactly: the coding agent starts from that branch and adds "
-        "its commit to it. Continue an earlier task when the new work needs, fixes or extends its changes; independent work stays on "
-        f"`{CODING_AGENT_DEFAULT_BASE_BRANCH}`. Ask the user if it is unclear which."))
+        f"`{CODING_AGENT_DEFAULT_BASE_BRANCH}` for a new task: the coding agent starts from it and pushes a new branch. To make a "
+        "revision of an earlier task, set this to the `branch` in that task's result, copied exactly: the coding agent starts from "
+        "that branch and adds its commit to it. Make a revision when the new work needs, fixes or extends that task's changes; "
+        f"independent work stays on `{CODING_AGENT_DEFAULT_BASE_BRANCH}`. Ask the user if it is unclear which."))
     
     requirements: list[str] = Field(min_length=1, description=(
         "The deliverables, one item per thing to build or change, each naming the table, file or model it applies to. Split "
@@ -84,8 +84,21 @@ class CodingAgentPlan(BaseModel):
     
     review: bool = Field(False, description=(
         "Whether a reviewer checks the finished work against the criteria below and sends the coding agent back to fix what "
-        "fails. It increases token cost and run time, more for a larger task. Tell the user what it checks when you ask.\n"
+        "fails. It increases token cost and run time, more for a larger task. Set it yourself: on for larger or riskier changes, "
+        "off for small ones. When you show the plan, say whether it is on and why, and what it does. The user approving the plan "
+        "approves this setting for this plan only: keep it through every version of the plan unless they change it, and don't "
+        "raise it again. A different build is a new plan, so choose and state it again. If the user says they want it on or off "
+        "for all plans going forward, record that with manage_notes, then use it for every plan without recommending, until they "
+        "say otherwise.\n"
         "The criteria:\n" + CODING_RUBRIC))
+
+
+class CodingPlanDraft(TypedDict, total=False):
+    """The conversation's draft coding plan; empty when none is saved or after it is started."""
+    plan: dict   # a CodingAgentPlan, as saved by save_coding_plan
+    version: int
+    saved_at: datetime
+    first_saved_at: datetime
 
 
 # --- the stored task and its result: only our own code writes and reads them, so they are plain dataclasses ---

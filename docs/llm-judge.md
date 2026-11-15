@@ -71,3 +71,17 @@ a bug there should never be able to degrade live serving.
 independent QA check on whether the *verification code itself* works, not
 just the agent — same defense-in-depth principle as the budget alert under
 the cost gates (`.claude/rules/orchestrator.md`).
+
+## Judging coding tasks (planned, noted 2026-11-12)
+
+A coding task is judged apart from analytics turns: different evidence and different failure modes. Built with the judge job
+(`docs/build-order.md`, Phase 6 item 2), not before.
+
+- **Two tiers.** A cheap judge reads the task's `coding_task_telemetry` row (plan, patch, checks, report, reviewer criteria) and scores
+  it. Low scorers go to a deeper review agent that reads the LangSmith trace through the row's `langsmith_run_id`. The analytics judge
+  keeps reading `agent_telemetry.tool_calls`.
+- **Trace retention limits the second tier.** LangSmith keeps traces for a limited time (believed about two weeks on the base plan;
+  check the plan), so the deep review has to run soon after the task, or only the row remains.
+- **The main agent has no trace link yet.** To give analytics turns the same escalation, `agent_telemetry` would need a nullable
+  `langsmith_run_id` column and the gateway would pass a generated `run_id` in its `astream` config. A turn that pauses for approval and
+  resumes is two runs, so it has two ids.

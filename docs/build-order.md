@@ -1625,20 +1625,22 @@ XMLA is a documented backup only. REST is the plan.
 2. Judge Cloud Run Job + Cloud Scheduler (`docs/llm-judge.md`) — consumes
    the `agent_telemetry` table already logging since Phase 1. Depends on #1:
    comparing providers' faithfulness scores needs provider-swapping to
-   actually work.
+   actually work. A separate coding task judge is noted in `docs/llm-judge.md`.
 2a. **Coding agent (planned, 2026-11-03; built before #2 on purpose).** A
    LangChain deep agent run as a private Cloud Run service that Cloud Tasks calls (decided 2026-11-07), started by a main-agent tool,
    that drafts SQLX (later ML Python) on a branch; the main agent opens the draft
    PR after the user confirms (`docs/coding-agent.md`). Steps: local notebook, containerize, tools and
    Firestore state, PR step. The agent works in the notebook (live runs 2026-11-06); the port was decided 2026-11-07
    (`docs/coding-agent.md`, "The port") and is not started.
-   **Remaining order (agreed 2026-11-11):** live-test the recent changes (`alternate_branch`, the reviewer prompt, and `open_pull_request`, built and
-   wired 2026-11-10 with `github-pr-token`, setup guide Step 22; the gateway needs a redeploy); the coding task telemetry table (one row per task,
-   written by the coding agent app at completion; PR data goes in the main agent's telemetry, not this row; `docs/coding-agent.md`; in `coding_agent_app/telemetry/`; steps 1-2, the schema, `create_table` and the row builder with its test, written 2026-11-11; steps 3-4, collecting the run's data and the writer, written; next, creating the table and the grant, the `v3` deploy and a live check, then the docs); the approval
-   pause for `start_coding_task` and `open_pull_request` (`docs/approval-workflow.md`, "Planned", revised 2026-11-11: a two-rule guard,
-   `first_saved_at`, a full-plan card); the cost gate extraction is done, and next are the guard, the gate and its pre-card checks, the pause
-   plumbing, the cards, then the prompt and docs; `GET /tasks/{id}`; then item 2, the judge.
-   **Cost gate extraction, done 2026-11-11:** `call_tool_node` calls `check_cost_gate` (returns a `CostGateResult`) and, on a pause,
+   **Status (2026-11-14):** the approval pause for `start_coding_task` and `open_pull_request` is built, ported and checked live in
+   `notebooks/phase3_graph.ipynb` (`docs/approval-workflow.md`): the round rules, `needs_coding_approval`, the name-and-goal and PR cards in
+   `app/markdown_display_formatting.py`, `first_saved_at` so a plan can be saved and started in one turn, and the neutral reject message.
+   The coding agent prompt and tool descriptions were aligned with it: the CODE CHANGES paragraph is now only the order of the four tools,
+   the reviewer policy moved into the plan's `review` field, and "revision" means a plan based on an existing branch. The coding task
+   telemetry table is built and live-checked (`.claude/rules/telemetry.md`; setup guide, Step 23). **Next:** the full plan view (an endpoint, a Power Apps icon,
+   the to-do list view beside it, and the coding task status display; the three gateway reads are built, 2026-11-15, the connector update and the Power Apps controls are not), which must exist before the pause is deployed; deploying the gateway and the coding agent app;
+   then the follow-up turn when a task finishes, started by the app, with a pass over the coding prompts and tool text for it (`docs/coding-agent.md`, "Telling the user when a task finishes"); then item 2, the judge.
+   **Cost gate extraction, done 2026-11-11:** `call_tool_node` calls `assess_query_costs` (returns a `QueryCostAssessment`) and, on a pause,
    `cost_pause_update`; **not a node** (decided 2026-11-10: a node would touch `route_after_agent`, the `path_map`, the status mapping
    and resume for little gain). Behavior is unchanged: a declined gate (cost cap, dry-run failure) marks only the declined BigQuery
    calls and passes the rest of the batch to `call_tool`; only the approval pause skips everything. Built in `phase3_graph.ipynb` and

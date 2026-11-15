@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.coding_task_models import CodingTaskNotification
 from app.config import AVAILABLE_MODELS, MODEL
 
 
@@ -22,6 +23,7 @@ class AskRequest(BaseModel):
     conversation_id: str
     approval_decision: Literal["approved", "rejected"] | None = None
     model: str = MODEL
+    app_message_is_synthetic: bool = False     # the app wrote the question, the user did not type it
 
     @field_validator("model")
     @classmethod
@@ -94,6 +96,27 @@ class ConversationTurn(BaseModel):
 
 class ConversationHistoryResponse(BaseModel):
     turns: list[ConversationTurn]
+
+
+# --- GET /conversations/{conversation_id}/coding-tasks -------------------------
+
+class CodingTasksResponse(BaseModel):
+    """This conversation's coding tasks the user has not been told about: queued, running, or finished and not yet announced."""
+    tasks: list[CodingTaskNotification]
+
+
+# --- GET /conversations/{conversation_id}/coding-plan --------------------------
+
+class CodingPlanResponse(BaseModel):
+    """The saved coding plan in full, as html, for the plan view."""
+    plan_html: str
+
+
+# --- GET /conversations/{conversation_id}/task-plan ----------------------------
+
+class TaskPlanResponse(BaseModel):
+    """The saved task plan (the to-do list) in full, as html, for the to-do list view."""
+    task_plan_html: str
 
 
 # --- DELETE /conversations/{conversation_id} -----------------------------------
