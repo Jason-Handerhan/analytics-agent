@@ -301,11 +301,11 @@ def build_pull_request_body(task: dict) -> str:
 
 
 def render_task_plan_markdown(task_plan: dict) -> str:
-    """The saved task plan as markdown: the scope, then each task numbered with its status symbol."""
-    task_status_symbols = {"todo": "⬜", "in_progress": "🔄", "done": "✅"}
-    tasks = [f"{task_status_symbols[task['status']]} {task['text']}" for task in task_plan["tasks"]]
+    """The saved task plan as markdown: a legend of the status symbols, the scope, then each task numbered with its symbol."""
+    task_status_display = {"todo": ("⬜", "To do"), "in_progress": ("🔄", "In progress"), "done": ("✅", "Done")}
+    tasks = [f"{task_status_display[task['status']][0]} {task['text']}" for task in task_plan["tasks"]]
 
-    parts = ["### Task plan"]
+    parts = [" · ".join(f"{symbol} {label}" for symbol, label in task_status_display.values())]
     if task_plan.get("scope"):
         parts.append(f"**Scope:** {task_plan['scope']}")
     parts.append(numbered_markdown_list(tasks))

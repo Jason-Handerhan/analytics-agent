@@ -22,6 +22,7 @@ from app.config import (
     ANSWER_INLINE_CODE_BG,
     ANSWER_INLINE_CODE_BORDER,
     ANSWER_INLINE_CODE_TEXT,
+    ANSWER_LIST_ITEM_SPACING,
     ANSWER_SUBHEADING_FONT_SIZE,
     ANSWER_TABLE_CELL_BORDER,
     ANSWER_TABLE_CELL_TEXT,
@@ -291,8 +292,8 @@ class _AnswerRenderer(mistune.HTMLRenderer):
         return f'<{tag}{id_attr} style="{style}">{text}</{tag}>\n'
 
     def list_item(self, text: str) -> str:
-        return (f'<li style="font-family: {ANSWER_FONT_FAMILY}; '
-                f'font-size: {ANSWER_BODY_FONT_SIZE};">{text}</li>\n')
+        return (f'<li style="font-family: {ANSWER_FONT_FAMILY}; font-size: {ANSWER_BODY_FONT_SIZE}; '
+                f'margin-bottom: {ANSWER_LIST_ITEM_SPACING};">{text}</li>\n')
 
     def image(self, text: str, url: str, title: str | None = None) -> str:
         src = self.safe_url(url)

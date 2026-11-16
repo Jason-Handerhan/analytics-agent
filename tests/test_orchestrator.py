@@ -520,11 +520,11 @@ def test_render_plan_markdown():
 
 
 def test_render_task_plan_markdown():
-    """Each task is numbered with its status symbol, after the scope when there is one."""
+    """A legend of the symbols comes first, then the scope when there is one, then each task numbered with its symbol."""
     tasks = [{"text": "Reorder rate by department", "status": "done"}, {"text": "Chart it", "status": "in_progress"},
              {"text": "Summarize", "status": "todo"}]
     markdown = render_task_plan_markdown({"scope": "Use the last 90 days", "tasks": tasks})
-    assert markdown.startswith("### Task plan\n\n**Scope:** Use the last 90 days\n\n1. ✅ Reorder rate by department")
+    assert markdown.startswith("⬜ To do · 🔄 In progress · ✅ Done\n\n**Scope:** Use the last 90 days\n\n1. ✅ Reorder rate by department")
     assert "2. 🔄 Chart it" in markdown and "3. ⬜ Summarize" in markdown
     assert "**Scope:**" not in render_task_plan_markdown({"tasks": tasks})
 

@@ -225,7 +225,7 @@ the ID can't come from `POST /ask`.
   (read with `fetch_session_memory`) as markdown (`render_plan_markdown`, every section the plan has) rendered to html by `render_answer_html`,
   or a short "No coding plan is saved" message when there is no draft (never saved, discarded, or cleared when its task started).
 - `GET /conversations/{conversation_id}/task-plan` — no body. Returns `TaskPlanResponse`: the saved task plan from
-  `fetch_session_memory` as markdown (`render_task_plan_markdown`: the scope, then each task numbered with a status emoji)
+  `fetch_session_memory` as markdown (`render_task_plan_markdown`: a legend of the status emoji, the scope, then each task numbered with its emoji)
   rendered to html by `render_answer_html`, or a short "No task plan is saved" message when there is none.
 - `DELETE /conversations/{conversation_id}` — no body. **Soft-delete, not a
   real `DELETE`** — writes a marker row to

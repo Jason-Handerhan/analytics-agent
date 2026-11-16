@@ -594,6 +594,7 @@ ANSWER_HEADING_FONT_SIZE = "32px"
 ANSWER_SUBHEADING_FONT_SIZE = "27px"
 ANSWER_TABLE_FONT_SIZE = "24px"
 ANSWER_CODE_FONT_SIZE = "22px"
+ANSWER_LIST_ITEM_SPACING = "10px"   # margin-bottom on each list item
 ```
 
 **Every element needs its own explicit inline font styling — confirmed
