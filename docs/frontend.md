@@ -568,7 +568,7 @@ stroke, stroke width 6, a 100x100 viewBox, no background square. The approval ca
 
 ## The background tasks window and the coding task watcher
 
-Built 2026-11-17, except the finish trigger (below). The design and the reasons are in `docs/coding-agent.md` ("Telling the user when a
+Built 2026-11-17, including the finish trigger (below). The design and the reasons are in `docs/coding-agent.md` ("Telling the user when a
 task finishes").
 - **The window.** A third icon, a terminal (`>_` in a window, same outline style as the others), sits at the bottom beside the model picker
   button, not in the crowded top bar. It opens a `Container` (title, X icon, a flexible-height `Gallery`) with `Visible: varShowCodingTasks`.
@@ -597,20 +597,29 @@ task finishes").
 - **Flag lifecycle.** `varWatchTasks`, `varHasOpenTasks` and `varShowCodingTasks` are seeded false in `App.OnStart` and reset false in New
   Chat; the picker restore sets `varWatchTasks` to true as above. `colCodingTasks` is re-seeded in all three.
 - **A finished task stays in the list**, as "Finished, reporting the result", until the follow-up turn announces it and marks it `notified`.
-  Until the finish trigger exists, any message sent in the conversation does that (finished tasks are attached at the start of a turn), and
-  the next poll then empties the list and closes the window.
+  The finish trigger (below) starts that turn, and the next poll then empties the list and closes the window. Any message the user sends does
+  the same (finished tasks are attached at the start of a turn).
 - **Seen once in Studio testing (2026-11-17):** after leaving the app mid-task and returning, the watcher had stopped polling, so the row
   stayed on its last stage line and the pulse (which follows `varHasOpenTasks`, updated only by a poll) kept running. New Chat, then restoring
   the conversation, restarted it. Setting `varWatchTasks` false then true in one formula does not restart a timer (`Start` only sees the
   final value). Not checked in the published dashboard (a browser tab switch is the case to try). If it recurs there, bind
   `TaskWatchTimer.Reset` to a variable pulsed true then false at the start of Send and of the tasks icon's `OnSelect`, as `TurnTimer` is.
 
-### The finish trigger (not built)
-- In `OnTimerEnd`, when a task has `Status = "completed"`, `varWaitingForAnswer` is false and no approval card is pending, set
-  `checkCodingAnswerTrigger` and call `Select` on the Send button.
-- The Send button's `OnSelect` branches on `checkCodingAnswerTrigger`: blank sends the text box, set sends the fixed text "Retrieving coding task
-  result..." with `app_message_is_synthetic: true`, leaves the text box alone, and clears the variable.
-- The Question label's outline may be dropped for that text, so the row looks like the agent's own line.
+### The finish trigger (built and working, 2026-11-17)
+- At the end of the watcher's `OnTimerEnd` branch, after the collection is updated: when `!varWaitingForAnswer`, no `colChat` row has
+  `NeedsApproval`, and a task in `colCodingTasks` has `Status = "completed"`, it does `Set(checkCodingAnswerTrigger, true); Select(SendButton)`.
+  The check runs on the refreshed collection, so a task that was just announced is already gone and cannot fire twice; while the turn runs
+  `varWaitingForAnswer` blocks it, and polling continues because a completed task still counts as open.
+- The Send button's `OnSelect`: `varQuestion` is `If(checkCodingAnswerTrigger, "Retrieving coding task result...", TextInput1.Text)`; `varPrefill` and
+  `TextInput1` are reset only `If(!checkCodingAnswerTrigger, ...)`, so the text box is left alone; `PostAsk` gets `app_message_is_synthetic:
+  checkCodingAnswerTrigger`; and `Set(checkCodingAnswerTrigger, false)` is the last statement. The variable is seeded false in `App.OnStart`,
+  New Chat and the picker restore, since a blank would send `null` for a `bool` field.
+- **Send's `DisplayMode`** disables the button for an empty text box only when the flag is not set: `If(varWaitingForAnswer Or CountRows(Filter(colChat,
+  NeedsApproval)) > 0 Or (Trim(TextInput1.Text) = "" And !checkCodingAnswerTrigger), DisplayMode.Disabled, DisplayMode.Edit)`. `Select` did nothing on a disabled
+  button: the trigger only worked once the user typed, because the watcher retried each tick.
+- **The Question label** keys on `ThisItem.Question = "Retrieving coding task result..."` (so restored rows match): `BorderThickness` 0 instead of
+  1, `Color` `RGBA(166, 166, 166, 1)` instead of black, and `Italic` true, so the row reads as a system line.
+- The send follows the finish by up to one poll (about 5 seconds).
 
 ## `App.OnStart`
 

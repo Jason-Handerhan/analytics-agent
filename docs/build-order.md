@@ -1642,7 +1642,8 @@ XMLA is a documented backup only. REST is the plan.
    changed). The task plan and coding plan icons and windows are built and checked in the real control (`docs/frontend.md`, "The plan
    windows"). List items in answer html now carry spacing (`ANSWER_LIST_ITEM_SPACING`).
    The background tasks window, its icon and the watcher Timer are built and checked (2026-11-17; `docs/frontend.md`).
-   **Next:** the finish trigger, which has the app start the follow-up turn when a task finishes, with a pass over the coding prompts and tool text for it (`docs/coding-agent.md`, "Telling the user when a task finishes"); then item 2, the judge.
+   The finish trigger is built and working (2026-11-17): the app starts the follow-up turn when a task finishes (`docs/frontend.md`), and the coding
+   prompts and tool text were aligned with it (`docs/coding-agent.md`). To check live: the save-before-showing fix. **Next:** item 2, the judge.
    **Cost gate extraction, done 2026-11-11:** `call_tool_node` calls `assess_query_costs` (returns a `QueryCostAssessment`) and, on a pause,
    `cost_pause_update`; **not a node** (decided 2026-11-10: a node would touch `route_after_agent`, the `path_map`, the status mapping
    and resume for little gain). Behavior is unchanged: a declined gate (cost cap, dry-run failure) marks only the declined BigQuery

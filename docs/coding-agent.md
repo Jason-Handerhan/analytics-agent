@@ -66,13 +66,13 @@ Options not taken:
 7. **Revise or open the PR.** A change request becomes a revision, a new plan built on the last run's branch (below), which starts
    another task on that branch; a yes opens the draft PR, after the user approves it.
 
-## Telling the user when a task finishes (planned)
+## Telling the user when a task finishes (built 2026-11-17)
 
 Decided 2026-11-14: **the app starts the follow-up turn,** the way Claude Code's own client starts a turn when a background task ends. The
 model API is request and response, so the long-lived client decides to call; here that client is the Power Apps app, and the gateway is
 stateless and driven by requests. A server-started turn (a Cloud Task from the coding agent app to a new gateway endpoint) was considered
 and not chosen: a canvas app cannot receive a push, so the app would still have to poll, and the server would gain an internal endpoint, a
-Google ID token check and a claim on the conversation for nothing. Build order: the three views, then this.
+Google ID token check and a claim on the conversation for nothing. Built in that order: the three views, then this.
 
 - **The views are all by conversation.** The saved coding plan and the to-do list are direct reads of `sessions.coding_plan` and
   `sessions.task_plan`. The coding tasks read returns this conversation's tasks that are queued, running, or finished and not yet
@@ -104,7 +104,7 @@ Google ID token check and a claim on the conversation for nothing. Build order: 
 - **Prompts aligned with this (2026-11-17).** The start result no longer says the agent hears "at the start of a later turn": it says the user can follow the task in the background tasks window and the agent is notified the moment it finishes (`check_text` in `start_coding_task`). The finished-task message (`render_finished_notification`) is unchanged: "finish the user's current question first" already covers the app-started turn, whose question asks for the result. Revisit only if live runs show the agent offering the result when it was asked for it.
 - **Save before showing (2026-11-17).** The agent sometimes described a plan without saving it, so the user's approval came before the first save and `start_coding_task` refused (the plan was first saved this turn). `save_coding_plan`'s description now says to save a plan before showing it and each change before describing it, and the CODE CHANGES paragraph orders the flow as save, then go over it with the user. A prompt change, so it is checked in live runs, not by a test; not yet checked.
 - **Built (2026-11-17): the watcher Timer and the background tasks window** (`docs/frontend.md`, "The background tasks window and the coding task
-  watcher"). Not built: the trigger. In Studio the watcher stopped after the app was left mid-task and re-entered; see that section.
+  watcher"). The trigger is built and working too. In Studio the watcher stopped after the app was left mid-task and re-entered; see that section.
 - **To verify in Studio before building.** `Select(SendButton)` from a Timer's `OnTimerEnd` (the reference says `Select` is for behavior
   formulas and `OnTimerEnd` is one; no example found), and with a disabled button; a formula-driven Timer `Duration`; the Timer in a hidden
   tab and in the Power BI embed (a community report says Timers stop in a hidden tab, which would only pause the polling); connector call
