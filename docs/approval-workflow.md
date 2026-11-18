@@ -286,8 +286,9 @@ publish something. It adds no state field and no frontend control: the card is t
   finished task for a PR. A plan card is the plan's name and goal and a pointer to the coding plan icon; a PR card is the task's name and
   its branch into `dev`. No height check is needed: the name and goal are bounded by their fields, and the full plan has its own view.
   `finalize` picks the card by `largest_pending_query`, which only a query pause sets.
-- **The full plan view is not built.** An endpoint and a Power Apps icon (and a to-do list view beside them) show the whole saved plan at
-  any time. The card text and the system prompt both mention the icon, so it must exist before the pause is deployed.
+- **The full plan view.** `GET /conversations/{id}/coding-plan` and the coding plan icon show the whole saved plan at any time, and a to-do
+  window sits beside it (`docs/frontend.md`, "The plan windows"). The card text and the system prompt both mention the icon. The gateway
+  with the pause was deployed 2026-11-15, before the coding plan icon was finished (one user, building).
 - **The agent is not told about the card.** From its side a start or PR call ends in a result, or the turn ends. The approval rules it
   needs are in the tool descriptions (`app/orchestrator/coding_tools.py`) and one flow paragraph in the system prompt.
 - **Reject** returns a neutral message ("You rejected this request. The turn has been cancelled."). A saved draft plan stays saved, and

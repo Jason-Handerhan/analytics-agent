@@ -491,7 +491,7 @@ to `answer_markdown` as a fenced SQL block, then rendered through the same
 `answer_html` pipeline as any other answer. No separate frontend display
 work needed for it; `htmlAgentResponse` just shows it like any other answer. A `start_coding_task` or `open_pull_request` pause works
 the same way, with a different card text (the plan's name and goal, or the task's name and branch); the Approve and Reject controls
-key on `needs_approval`, so they need no change. The coding plan icon the plan card points to, and its endpoint, are not built.
+key on `needs_approval`, so they need no change. The plan card points to the coding plan icon ("The plan windows", below).
 
 **A real cosmetic bug, fixed, 2026-10-14:** clicking Approve/Reject could
 briefly show the *previous* turn's leftover thinking-log text on the new
@@ -536,15 +536,79 @@ anything else.
   variable) — see `App.OnStart`, below. `DisplayMode: If(varWaitingForAnswer, DisplayMode.Disabled, DisplayMode.Edit)`,
   same as every other action button.
 
-## Planned: the coding task watcher
+## The plan windows (task plan and coding plan)
 
-Not built; the design and the reasons are in `docs/coding-agent.md` ("Telling the user when a task finishes"). What it adds here:
-- A second `Timer`, slow (every 5 to 10 seconds) and separate from the one-second status Timer, that runs only while `varWatchTasks` is true.
-  `varWatchTasks` is set when a conversation opens with an open coding task, or when a response's `sources` starts with "Started coding
-  task", and cleared when none are open.
-- Its `OnTimerEnd` reads the conversation's coding tasks, shows their `progress` in the status display, and, when one has finished with no
-  turn in flight (`varWaitingForAnswer`) and no pending approval, sets `varPendingTrigger` and calls `Select` on the Send button.
-- The Send button's `OnSelect` branches on `varPendingTrigger`: blank sends the text box, set sends the fixed text "Retrieving coding task
+Two icons in the top right, beside the clock and New Chat, each open a pop-up showing a saved plan in full. The checklist icon opens the
+task plan (the to-do list, `GET /conversations/{id}/task-plan`) and the page-with-`</>` icon opens the coding plan
+(`GET /conversations/{id}/coding-plan`). Both are `Image` controls from uploaded SVGs in the New Chat style: outline only, `#808080`
+stroke, stroke width 6, a 100x100 viewBox, no background square. The approval card for a coding task points to the coding plan icon.
+- **Both built and checked in the real control** (task plan 2026-11-15, coding plan 2026-11-16): headings, bold, numbered lists and the
+  status emoji render. The coding plan window is the task plan's controls copied with other names.
+- **The pop-up is a `Container`** (title label, X icon, `HTML text` control), because an `HTML text` control has no shadow and a container
+  does: the container carries the fill, radius and shadow, and `Visible` is set on it alone. The `HTML text` control has `AutoHeight` off
+  and a fixed `Height`, and scrolls by default when the content is taller (seen with a long plan, 2026-11-15).
+- **Variables:** `varShowTaskPlan` and `varTaskPlanHtml`, `varShowCodingPlan` and `varCodingPlanHtml`. Each is seeded (`false`, `""`) in
+  `App.OnStart` and reset in New Chat and in the picker's restore `OnSelect`, so another conversation never shows the old plan.
+- **Icon `OnSelect`**, fetch on open, with the window opening before the call returns so a slow read shows an empty window, not nothing.
+  The coding plan icon closes the task plan first, and the task plan icon closes the coding plan first, so only one is open:
+  ```
+  Set(varShowCodingPlan, false);
+  Set(varTaskPlanHtml, "");
+  Set(varShowTaskPlan, true);
+  Set(varTaskPlanHtml, AnalyticsAgent.GetConversationTaskPlan(varConversationId).task_plan_html)
+  ```
+  The coding plan reads `GetConversationCodingPlan(...).plan_html` (a different property name). The X icon is `Set(varShowTaskPlan, false)`.
+- **Never disabled.** The icons keep working during a turn and while an approval card is showing: reading the plan while waiting is
+  intended, and the card sends the user here.
+- **Fetched on open only.** The task plan changes during a turn, so an open window is stale until the icon is selected again. A refetch when
+  a response arrives, if the window is open, is not built.
+- **Task plan content** (`render_task_plan_markdown`): a legend (`⬜ To do · 🔄 In progress · ✅ Done`), the scope, then the tasks numbered,
+  each led by its emoji. No "Task plan" heading: the window title says it.
+- Re-importing the connector resets `x-api-key` on every operation, including these two reads (see the connector note below).
+
+## The background tasks window and the coding task watcher
+
+Built 2026-11-17, except the finish trigger (below). The design and the reasons are in `docs/coding-agent.md` ("Telling the user when a
+task finishes").
+- **The window.** A third icon, a terminal (`>_` in a window, same outline style as the others), sits at the bottom beside the model picker
+  button, not in the crowded top bar. It opens a `Container` (title, X icon, a flexible-height `Gallery`) with `Visible: varShowCodingTasks`.
+  The icon is `DisplayMode.Disabled` with `Transparency: 0.6` when `varHasOpenTasks` is false, so a blank window can't be opened. The X
+  sets `varShowCodingTasks` to false. Opening it sets the other four windows' flags (conversation picker, task plan, coding plan, model
+  picker) to false, and each of those icons sets `varShowCodingTasks` to false: one window at a time.
+- **The row** is one `Label` and a pulsing `Image` (the coding plan SVG): `Name & " (" & Switch(Status, "queued", "Waiting to start",
+  "completed", "Finished, reporting the result", Progress) & ")"`. One label, so a long plan name wraps and can't overlap the progress. The
+  icon's `Transparency` is `If(ThisItem.Status = "completed", 0, Max(0, Sin(TaskPulseTimer.Value / 300)) * 0.5)`, the same wave as the
+  status icon, so a finished task holds steady.
+- **`colCodingTasks`** (`TaskId`, `Name`, `Status`, `Progress`, `Outcome`, `Branch`, seeded with a `"seed"` row, so the gallery's `Items` is
+  `Filter(colCodingTasks, TaskId <> "seed")`) is filled only by the watcher. It is updated in place (`RemoveIf` for tasks no longer
+  returned, `Collect` for new ones, `Patch` only when `Status` or `Progress` changed), because `ClearCollect` every few seconds would
+  re-render the gallery and reset its scroll.
+- **`TaskWatchTimer`**: `Duration: 5000`, `Repeat: true`, `AutoStart: false`, `Start: varWatchTasks`, outside the gallery. Its `OnTimerEnd`
+  reads `GetConversationCodingTasks`, wrapped in `IfError(..., Blank())` so a failed poll changes nothing and retries on the next tick, updates
+  the collection as above, then `Set(varHasOpenTasks, !IsEmpty(Filter(colCodingTasks, TaskId <> "seed")))`, `Set(varWatchTasks,
+  varHasOpenTasks)` and `If(!varHasOpenTasks, Set(varShowCodingTasks, false))`. It stops itself when nothing is open.
+- **`TaskPulseTimer`**: `Duration: 1885` (one cycle of `Sin(Value / 300)`), `Repeat: true`, `AutoStart: false`, `Start: varShowCodingTasks And
+  varHasOpenTasks`, outside the gallery. The icon formulas read it from inside the gallery.
+- **What sets `varWatchTasks`** (the timer starts on a false-to-true change): the picker's restore `OnSelect` (with `Set(varHasOpenTasks,
+  false)` and `Set(varShowCodingTasks, false)` first, so the old conversation's state is hidden until the first poll), and Approve's
+  `OnSelect`, last statement: `If(!IsEmpty(Filter(varResponse.sources, StartsWith(Value, "Started coding task"))), Set(varWatchTasks,
+  true))`. Only Approve: a task starts only through an approval, and Reject never reaches the agent. After a new task the window can take
+  up to 5 seconds to show it.
+- **Flag lifecycle.** `varWatchTasks`, `varHasOpenTasks` and `varShowCodingTasks` are seeded false in `App.OnStart` and reset false in New
+  Chat; the picker restore sets `varWatchTasks` to true as above. `colCodingTasks` is re-seeded in all three.
+- **A finished task stays in the list**, as "Finished, reporting the result", until the follow-up turn announces it and marks it `notified`.
+  Until the finish trigger exists, any message sent in the conversation does that (finished tasks are attached at the start of a turn), and
+  the next poll then empties the list and closes the window.
+- **Seen once in Studio testing (2026-11-17):** after leaving the app mid-task and returning, the watcher had stopped polling, so the row
+  stayed on its last stage line and the pulse (which follows `varHasOpenTasks`, updated only by a poll) kept running. New Chat, then restoring
+  the conversation, restarted it. Setting `varWatchTasks` false then true in one formula does not restart a timer (`Start` only sees the
+  final value). Not checked in the published dashboard (a browser tab switch is the case to try). If it recurs there, bind
+  `TaskWatchTimer.Reset` to a variable pulsed true then false at the start of Send and of the tasks icon's `OnSelect`, as `TurnTimer` is.
+
+### The finish trigger (not built)
+- In `OnTimerEnd`, when a task has `Status = "completed"`, `varWaitingForAnswer` is false and no approval card is pending, set
+  `checkCodingAnswerTrigger` and call `Select` on the Send button.
+- The Send button's `OnSelect` branches on `checkCodingAnswerTrigger`: blank sends the text box, set sends the fixed text "Retrieving coding task
   result..." with `app_message_is_synthetic: true`, leaves the text box alone, and clears the variable.
 - The Question label's outline may be dropped for that text, so the row looks like the agent's own line.
 
@@ -565,6 +629,14 @@ Set(varWaitingForAnswer, false);
 Set(varPrefill, "");
 Set(varCancelRequested, false);
 Set(varResetTurnTimer, false);
+Set(varShowTaskPlan, false);
+Set(varTaskPlanHtml, "");
+Set(varShowCodingPlan, false);
+Set(varCodingPlanHtml, "");
+Set(varWatchTasks, false);
+Set(varHasOpenTasks, false);
+Set(varShowCodingTasks, false);
+ClearCollect(colCodingTasks, {TaskId: "seed", Name: "", Status: "", Progress: "", Outcome: "", Branch: ""});
 ```
 
 **`PostConversation()` takes zero visible arguments — `x-api-key` must be
@@ -576,7 +648,7 @@ Swagger JSON at all, it's a separate Power Platform-side setting layered on
 top), which surfaced as `PostConversation()` suddenly demanding an argument
 it never needed before. Fix lives in the connector editor's **Request** step
 per operation: set `x-api-key`'s **Visibility → Internal** and **Default
-value →** the real secret value, for all 4 operations, every time the
+value →** the real secret value, for every operation, every time the
 connector definition gets re-imported.
 
 ## `answer_html` styling
@@ -605,8 +677,9 @@ no explicit `font-size` at all and silently fell back to the browser's
 default size, visibly mismatched against everything around it. The renderer
 (`_AnswerRenderer`, `app/gateway/entry_exit.py`) now styles `paragraph`,
 `heading` (levels ≤2 get `ANSWER_HEADING_FONT_SIZE`, levels 3+ get
-`ANSWER_SUBHEADING_FONT_SIZE`), `list_item`, `codespan`, `block_code`, and
-every table cell — nothing is left to the surrounding context.
+`ANSWER_SUBHEADING_FONT_SIZE`), `list_item` (also a `margin-bottom` of
+`ANSWER_LIST_ITEM_SPACING`, so long lists don't run together), `codespan`,
+`block_code`, and every table cell — nothing is left to the surrounding context.
 
 **Chart display: inline `<img>`, decided and built.** `answer_html`'s
 mistune renderer embeds chart images directly in the flowing answer text

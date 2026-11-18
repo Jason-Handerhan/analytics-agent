@@ -78,7 +78,7 @@ Google ID token check and a claim on the conversation for nothing. Build order: 
   `sessions.task_plan`. The coding tasks read returns this conversation's tasks that are queued, running, or finished and not yet
   announced (status `notified` is left out), with name, status, `progress` and outcome. The app never learns a task id, because the agent
   does not quote it, so this is a read by conversation and not `GET /tasks/{id}`. Routes, beside `GET /conversations/{id}/history` (the tasks read is built, 2026-11-14, and returns `CodingTasksResponse`, a list of
-  `CodingTaskNotification`; the plan and to-do reads are built, 2026-11-15, and return html):
+  `CodingTaskNotification`; the plan and to-do reads are built, 2026-11-15, and return html; the connector has all three, and the to-do window is built in the app):
   `/conversations/{id}/coding-plan`, `/conversations/{id}/task-plan` and `/conversations/{id}/coding-tasks`, each checked with
   `assert_owns_conversation`. One poll of the tasks read feeds both the status display (the `progress` line) and the trigger.
 - **Watching.** The app reads the tasks once when a conversation opens, and starts a slow watcher Timer when it finds an open task or when
@@ -90,9 +90,9 @@ Google ID token check and a claim on the conversation for nothing. Build order: 
   the flag true. For the agent, the gateway replaces the question with "The coding task finished. What was the result?" (a constant in
   `gateway.py`); the chat history keeps the app's text, as it keeps "Approved" for an approval. The existing exactly-one validator needs no
   change. The flag says only that the app wrote the message; a second kind of synthetic message would need it to say which.
-- **The app side.** The Send button's `OnSelect` gets a branch on `varPendingTrigger`: blank means the text box, set means the fixed text
+- **The app side.** The Send button's `OnSelect` gets a branch on `checkCodingAnswerTrigger`: blank means the text box, set means the fixed text
   and the flag, with the text box neither read nor cleared (a half-typed draft survives) and the variable cleared afterward. The watcher
-  sets `varPendingTrigger` and `Select`s the Send button, so the long formula is not copied. It is a normal turn from there: the status
+  sets `checkCodingAnswerTrigger` and `Select`s the Send button, so the long formula is not copied. It is a normal turn from there: the status
   popup shows, and Send stays disabled until the response returns, as for any turn.
 - **The look.** The row's Question label can lose its outline when its text is the fixed text (`BorderThickness` or `BorderColor`, which
   take formulas), keyed on `ThisItem.Question` so restored rows match, with the text defined once in the app. If that is not easy, the
@@ -101,7 +101,10 @@ Google ID token check and a claim on the conversation for nothing. Build order: 
   fails before that point leaves the task finished, and the next poll sends again; no guard is added. A failure after it loses the
   announcement, and the user asks, which `get_coding_task` serves. Several finished tasks are announced in one turn
   (`get_background_task_notifications`).
-- **Prompts to revisit when this is built.** The agent is told it will hear about a finished task "at the start of a later turn" (the start result, the CODE CHANGES paragraph, and the finished-task message). Once the app starts the turn, it should know that, while the app is open, it will be asked about the result as soon as the task finishes, and can tell the user so. The start result and the CODE CHANGES paragraph are the places to check first, then the `get_coding_task` description and `render_finished_notification`.
+- **Prompts aligned with this (2026-11-17).** The start result no longer says the agent hears "at the start of a later turn": it says the user can follow the task in the background tasks window and the agent is notified the moment it finishes (`check_text` in `start_coding_task`). The finished-task message (`render_finished_notification`) is unchanged: "finish the user's current question first" already covers the app-started turn, whose question asks for the result. Revisit only if live runs show the agent offering the result when it was asked for it.
+- **Save before showing (2026-11-17).** The agent sometimes described a plan without saving it, so the user's approval came before the first save and `start_coding_task` refused (the plan was first saved this turn). `save_coding_plan`'s description now says to save a plan before showing it and each change before describing it, and the CODE CHANGES paragraph orders the flow as save, then go over it with the user. A prompt change, so it is checked in live runs, not by a test; not yet checked.
+- **Built (2026-11-17): the watcher Timer and the background tasks window** (`docs/frontend.md`, "The background tasks window and the coding task
+  watcher"). Not built: the trigger. In Studio the watcher stopped after the app was left mid-task and re-entered; see that section.
 - **To verify in Studio before building.** `Select(SendButton)` from a Timer's `OnTimerEnd` (the reference says `Select` is for behavior
   formulas and `OnTimerEnd` is one; no example found), and with a disabled button; a formula-driven Timer `Duration`; the Timer in a hidden
   tab and in the Power BI embed (a community report says Timers stop in a hidden tab, which would only pause the polling); connector call
@@ -119,7 +122,7 @@ Google ID token check and a claim on the conversation for nothing. Build order: 
 | `open_pull_request(task_id)` | Takes only the id. Opens a **draft** PR into `dev` from the task's pushed branch, signed in with `github-pr-token` (setup guide, Step 22). The title (the plan name) and body are built in code from the stored plan and result (`build_pull_request_body` in `app/markdown_display_formatting.py`: the plan's goal and requirements, then what the task did), never from text the main agent writes. A `failed` task is allowed. Refused, with the link, if the branch already has an open PR (GitHub is asked, not the stored `pr_url`, so a PR a person opened or closed by hand counts), or has no commits ahead of `dev`; stores `pr_url` on the task |
 | `background_tasks/{task_id}` (Firestore) | `conversation_id`, `user_id`, the plan snapshot, `status` (`queued`, `running`, `completed`, `notified`), `progress` (a stage line the job overwrites), the `CodingAgentResult` (which holds the outcome), `cancel_requested`, timestamps, with a TTL |
 | Coding-agent service (Cloud Run) | Private; `POST /run/{task_id}`, called by Cloud Tasks. Reads its task from Firestore, runs the deep agent, writes progress and the result back |
-| Conversation reads (proposed) | `/conversations/{id}/coding-plan`, `/task-plan` and `/coding-tasks`: the saved plan, the to-do list, and the tasks not yet announced; ownership-checked by conversation ("Telling the user when a task finishes") |
+| Conversation reads | `/conversations/{id}/coding-plan`, `/task-plan` and `/coding-tasks`: the saved plan, the to-do list, and the tasks not yet announced; ownership-checked by conversation ("Telling the user when a task finishes") |
 
 Ownership works like conversations: every tool and endpoint checks the task belongs to the caller's
 conversation and `oid`. 404, not 403.

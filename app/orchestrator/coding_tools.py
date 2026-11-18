@@ -40,6 +40,7 @@ SAVE_CODING_PLAN_DESCRIPTION = (
     "Saves a draft of a coding task's plan, to build and change with the user, and start with start_coding_task once the "
     "user has approved it. Call it when the user wants a change made to the ML repo's code, and again each time the plan "
     "changes: every save replaces the draft and counts as a new version. "
+    "Save a plan before showing it to the user, and save each change before describing it to the user. "
     "Set discard to true instead of a plan to delete the draft. "
     "Call it only once per round, and never in the same round as start_coding_task or open_pull_request."
 )
@@ -195,8 +196,9 @@ async def start_coding_task(
         await background_task_doc(task_id).delete()
         raise ToolError(f"Could not queue the task ({e}). The plan is still saved. Retry once, or tell the user.") from e
 
-    check_text = ("It runs in the background, usually a few minutes. When it finishes you will be told at the start of "
-                  "a later turn, and you can check on it any time with get_coding_task using this task id.")
+    check_text = ("It runs in the background, usually a few minutes. The user can follow it in the background tasks window, "
+                  "opened with the terminal icon to the left of the model button, below the text box. "
+                  "You are notified the moment it finishes, and can check on it any time with get_coding_task using this task id.")
     try:
         await doc.update({"coding_plan": firestore.DELETE_FIELD})
     except GoogleAPICallError as e:

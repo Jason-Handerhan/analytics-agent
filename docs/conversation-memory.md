@@ -305,6 +305,8 @@ earlier turn otherwise doesn't (only a lossy summary is left). Conversation scop
   non-strict at first, and the model sent it empty or nested under `args` (the shape of the MCP tools); the raw
   validation error then looped it, since it had sent a full plan and was told a field was missing. Strict makes
   both impossible, so it and `manage_notes` hold the strict slots (`.claude/rules/tools.md`).
+- **View**: the checklist icon in the app opens the saved plan in a window (`GET /conversations/{id}/task-plan`, `render_task_plan_markdown`:
+  a legend of the status emoji, the scope, the numbered tasks; `docs/frontend.md`, "The plan windows").
 - **Injection**: `attach_context` puts the rendered plan (after the notes, if any) ahead of the turn's first
   message on a copy at request time, so it is never in `state["messages"]` and never saved. Each block's
   header says earlier `manage_tasks` or `manage_notes` calls in the history are already reflected; "this turn"

@@ -1637,9 +1637,12 @@ XMLA is a documented backup only. REST is the plan.
    `app/markdown_display_formatting.py`, `first_saved_at` so a plan can be saved and started in one turn, and the neutral reject message.
    The coding agent prompt and tool descriptions were aligned with it: the CODE CHANGES paragraph is now only the order of the four tools,
    the reviewer policy moved into the plan's `review` field, and "revision" means a plan based on an existing branch. The coding task
-   telemetry table is built and live-checked (`.claude/rules/telemetry.md`; setup guide, Step 23). **Next:** the full plan view (an endpoint, a Power Apps icon,
-   the to-do list view beside it, and the coding task status display; the three gateway reads are built, 2026-11-15, the connector update and the Power Apps controls are not), which must exist before the pause is deployed; deploying the gateway and the coding agent app;
-   then the follow-up turn when a task finishes, started by the app, with a pass over the coding prompts and tool text for it (`docs/coding-agent.md`, "Telling the user when a task finishes"); then item 2, the judge.
+   telemetry table is built and live-checked (`.claude/rules/telemetry.md`; setup guide, Step 23). **Status (2026-11-16):** the three gateway reads (coding plan, task plan, coding tasks) and `app_message_is_synthetic` are built,
+   the connector is updated, and the gateway is deployed with the pause (2026-11-15; the coding agent app was not redeployed, nothing it runs
+   changed). The task plan and coding plan icons and windows are built and checked in the real control (`docs/frontend.md`, "The plan
+   windows"). List items in answer html now carry spacing (`ANSWER_LIST_ITEM_SPACING`).
+   The background tasks window, its icon and the watcher Timer are built and checked (2026-11-17; `docs/frontend.md`).
+   **Next:** the finish trigger, which has the app start the follow-up turn when a task finishes, with a pass over the coding prompts and tool text for it (`docs/coding-agent.md`, "Telling the user when a task finishes"); then item 2, the judge.
    **Cost gate extraction, done 2026-11-11:** `call_tool_node` calls `assess_query_costs` (returns a `QueryCostAssessment`) and, on a pause,
    `cost_pause_update`; **not a node** (decided 2026-11-10: a node would touch `route_after_agent`, the `path_map`, the status mapping
    and resume for little gain). Behavior is unchanged: a declined gate (cost cap, dry-run failure) marks only the declined BigQuery
