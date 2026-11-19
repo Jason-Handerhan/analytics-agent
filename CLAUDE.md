@@ -127,6 +127,7 @@ that area, rather than reconstructing the design from memory:
 | `docs/frontend.md` | Power Apps controls, filter capture, response rendering |
 | `docs/llm-judge.md` | The scheduled eval job scoring faithfulness |
 | `docs/coding-agent.md` | The planned coding agent: Cloud Run Job, task tools, branch and draft-PR flow |
+| `docs/dashboard-editing.md` | The coding agent editing the Power BI dashboard, publishing to a dev workspace, and the shared page-render tool |
 | `docs/golden-dataset.md` | Hand-verified correctness regression tests |
 | `docs/success-criteria.md` | What proves a phase works — read before building, not just at the end |
 | `docs/build-order.md` | What phase we're in and what's next |

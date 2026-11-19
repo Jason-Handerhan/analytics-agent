@@ -798,7 +798,11 @@ rejected in favour of the second sandbox.
   `workflow_settings.yaml` at the first compile; it worked in the sandbox, which has internet), and which linter
   the job image uses for Python.
 - LangSmith Sandbox: which plan includes it, its retention and residency, and whether the default runtime or its
-  Python version will change; whether the proxy configuration can restrict egress.
+  Python version will change; whether the proxy configuration can restrict egress. **Observed 2026-11-19: the sandbox's egress is already
+  restricted, not open.** From a sandbox, the npm registry, Debian's apt mirror and GitHub answer, but Playwright's browser CDN and the Power BI and
+  Fabric hosts (`api.powerbi.com`, `app.powerbi.com`, `api.fabric.microsoft.com`) reset the connection (`ECONNRESET`). The app sets no `proxy_config`;
+  LangSmith's docs describe organization-level restricted egress (the default for non-Enterprise organizations, overriding a sandbox's own
+  `access_control`), which fits but is not confirmed for this organization. Anything that must reach another host runs in the app, not the sandbox.
 - Skills with a sandbox backend: that `skills=[...]` finds skill files uploaded into the sandbox, that the agent
   reads `SKILL.md` and runs the scripts by absolute path, and that `nbformat` installs and runs under the
   sandbox's Python 3.14.
