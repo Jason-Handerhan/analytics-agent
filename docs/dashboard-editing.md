@@ -1,18 +1,18 @@
 # Dashboard editing and the shared page-render tool
 
-The coding agent edits the Power BI dashboard's PBIP files, publishes to a dev workspace, and looks at
+The coding agent edits the Power BI dashboard's PBIP files, publishes to the Agent Sandbox workspace, and looks at
 the result through a headless screenshot of the **published** report. The render step is one shared
-tool: the coding agent uses it on the dev workspace, and the main agent can use it on production for
+tool: the coding agent uses it on the Agent Sandbox workspace, and the main agent can use it on production for
 visual grounding. Decided 2026-11-19 after an experiment (proven items below); nothing here is built yet.
 
 ## The loop
 
-Edit the PBIR and TMDL files in the sandbox, `validate`, publish the model then the report to the dev
+Edit the PBIR and TMDL files in the sandbox, `validate`, publish the model then the report to the Agent Sandbox
 workspace, render the published report, look at the screenshot, fix, then open a pull request. A human
 reviews the PR and promotes to production by hand.
 
 - **Publishing is not gated.** The only gate is the workspace the agent can reach: its identity is a
-  Member of the dev workspace and nothing else.
+  Member of the Agent Sandbox workspace and nothing else.
 - **Render the published report, never local files.** The Microsoft CLI's `preview` renders local
   files only; it was kept out of the design because a local render still needs a new measure
   published first (`Missing_References`), cannot apply bookmarks or slicers, and shows the edit
@@ -25,7 +25,11 @@ reviews the PR and promotes to production by hand.
   visual, so a deleting edit must be scrubbed or done in place.
 - A service principal can create and update a **semantic model** (about 14 s to create) and a
   **report** (about 2 s) through the Fabric item APIs. An update replaces the whole definition, so the
-  tool always sends every file. The report's `definition.pbir` must be `byConnection` to the dev model.
+  tool always sends every file. The report's `definition.pbir` must be `byConnection` to the Agent Sandbox model.
+- The Desktop-published Agent Sandbox report (a Desktop publish of the repo's `.pbip`) is stored as **PBIR** (248
+  parts, no `report.json`), and `updateDefinition` with the repo's files, `definition.pbir` rewritten to a
+  connection to the Agent Sandbox model in the payload only, returned 202 and `Succeeded` and left the report
+  unchanged in the browser (2026-11-19).
 - An in-place model update **keeps the Import data**. A model created through the API has no data.
 - A service principal can mint its own embed token (`GenerateToken`, datasets, reports and
   `targetWorkspaces` in one call) only as a **Member or Admin**; Contributor fails with 403, though a
@@ -48,7 +52,7 @@ reviews the PR and promotes to production by hand.
 | Part | Runs in | Holds |
 |---|---|---|
 | Edit PBIR/TMDL, `validate`, git, the PR | Sandbox | No credentials |
-| `publish_dashboard`, `render_dashboard` (coding agent) | Coding agent app (open egress) | The dev identity's secret |
+| `publish_dashboard`, `render_dashboard` (coding agent) | Coding agent app (open egress) | The coding agent's Power BI secret |
 | The render function | A shared module, imported by the coding agent app now and the gateway later | Nothing; callers pass an identity |
 | `get_page_info`, extended with the render (main agent, later) | Gateway | The production render identity's secret |
 
@@ -88,7 +92,7 @@ Beeswarm, Barplot, and open and close pairs for the pie chart, donut chart, assu
 
 ## Identities and guards
 
-- **Coding agent identity:** a new service principal, a Member of the dev workspace only, not the
+- **Coding agent identity:** a new service principal, a Member of the Agent Sandbox workspace only, not the
   analytics agent's `power-bi-sp-*` (which can query production). Its secret lives in Secret Manager and
   reaches only the coding agent app. The analytics service principal is currently a Member of production,
   kept for the main agent's render later.
@@ -105,9 +109,17 @@ Beeswarm, Barplot, and open and close pairs for the pie chart, donut chart, assu
 - New data stays human-driven: the agent adds the SQLX, the user builds the table and brings it into the
   model in Desktop. A promoted model change needs a schema rebuild and a gateway redeploy.
 
+## The repo stays openable in Desktop
+
+A user must be able to open the repo's `.pbip` file in Power BI Desktop at any time, including on an
+agent's branch. So the agent's edits keep every file Desktop-valid, and the publish tool never changes
+the repo's files: it rewrites `definition.pbir` from a relative path to a connection to the Agent Sandbox model
+**in the payload it sends**, leaving the committed file as it is. `validate` checks the schemas but not
+Desktop itself, so opening the branch in Desktop is part of the human review before the PR is merged.
+
 ## One-time setup (human)
 
-Publish the model and report to the dev workspace from Desktop, and set the BigQuery credentials on the
+Publish the model and report to the Agent Sandbox workspace from Desktop, and set the BigQuery credentials on the
 model's data source there. Everything after that is the agent's.
 
 ## Unverified, confirm before building
@@ -127,20 +139,32 @@ model's data source there. Everything after that is the agent's.
   only". Accepted for a portfolio project; a real deployment would buy a capacity.
 - **Refresh for new data-bearing objects** (about 8 a day on shared capacity; not tested).
 - Whether Contributor is enough for the item APIs (Microsoft's docs say it is; Member was used).
+- **Open item: should the main agent also render Agent Sandbox?** It could show a user a pending dashboard change
+  in chat. The identity would be a Member of both workspaces (embed tokens need Member; there is no
+  read-only role that can mint one), so the limit is code: the gateway has no publish path and the tool
+  only returns images. Decide at step 11, with an optional `environment` input on `get_page_info`.
 
 ## Build plan
 
 One step at a time, checked in after each; each ships with Layer 1 tests where something is testable.
 
-1. **Decisions and setup (needs approval).** The shared module's home (proposed `app/powerbi_render.py`),
-   the render dependency (proposed: Python Playwright plus the `powerbi-client` script, our own small
-   function, over keeping the patched Microsoft CLI, which is fragile to upstream versions and has no
-   filter API), the dev identity and its secrets, the dev workspace's model and report, and the dev
-   BigQuery credentials. No code.
+1. **Decisions and setup.** Decided 2026-11-19: the shared module is `app/powerbi_render.py`, a plain
+   function module that the coding agent's `render_dashboard` and the main agent's `get_page_info` each
+   call from their own tool; the render is our own Python Playwright function with the `powerbi-client`
+   script from npm (vendored), not the patched Microsoft CLI (eight separate patches by the end of the
+   experiment, fragile to upstream versions, no filter API). Both new dependencies are approved.
+   The module's target is an enum (`production` or `agent_sandbox`) mapped to workspace and report IDs in
+   config, never an ID the model passes. Still to do: where the vendored script lives, and the coding
+   agent's Power BI service principal and its secrets (a Member of Agent Sandbox only; created and verified
+   2026-11-19, setup guide Step 24). The Agent Sandbox workspace holds the Agent Sandbox model (`71ea68dc`) and the
+   Agent Sandbox report (`b84e7228-9955-4f40-87df-b8fc3dac692d`, named "Instacart ML Model Evaluation"),
+   both published from Desktop from the repo's `.pbip` project; `updateDefinition` on the report is proven.
+   `agent-test-report` and `agent-test-model`, created through the Fabric API during the experiment, are
+   throwaway and will be deleted. No code.
 2. **Render core.** `RenderRequest` and `RenderResult` models, the token mint with a cache, the embed
    URL lookup, embed, bookmark, screenshot and crop, and the actionable errors. Layer 1: request
    validation, token expiry, crop, error mapping against a fake page. Layer 2: a notebook against the
-   dev report.
+   Agent Sandbox report.
 3. **Slicers and filters.** Resolve a slicer by title, build its state from the current state, test the
    field-parameter slicers. Layer 1: the state builder. Layer 2: live.
 4. **Chromium in the coding agent app.** The image, memory, and one real render on Cloud Run; measure

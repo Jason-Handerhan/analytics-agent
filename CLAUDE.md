@@ -236,4 +236,5 @@ connection) actually needs it as a config constant rather than a deploy-time
 value. Secrets live in Secret Manager: `power-bi-sp-client-id`,
 `power-bi-sp-client-secret`, `azure-tenant-id`, `entra-client-secret`,
 `gateway-api-key`, `github-read-token`, `anthropic-api-key`,
-`langsmith-api-key`, `gemini-api-key`, `openai-api-key`, `github-agent-push-token`, `github-pr-token`.
+`langsmith-api-key`, `gemini-api-key`, `openai-api-key`, `github-agent-push-token`, `github-pr-token`,
+`coding-agent-power-bi-sp-client-id`, `coding-agent-power-bi-sp-client-secret`.

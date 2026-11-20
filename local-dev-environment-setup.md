@@ -1794,6 +1794,73 @@ access to that one table and nothing else in `telemetry`.
 
 ---
 
+## Step 24 — Coding agent: its Power BI service principal for the Agent Sandbox workspace
+
+**When:** before the coding agent app first publishes to or renders from Agent Sandbox (`docs/dashboard-editing.md`). The portal parts need Entra
+app-registration rights and Power BI admin, like Step 14. Done 2026-11-19.
+
+The coding agent app signs in to Power BI as its own service principal, **a Member of the Agent Sandbox workspace and nothing else**. It is not the
+analytics agent's `power-bi-sp-*` (which can query production). Member is the lowest role that can mint an embed token, and it is enough to publish.
+
+**Part 1: Entra and Power BI.**
+1. **Register the app** (Step 14, A1): name `coding-agent-powerbi-sp`, this directory only, no redirect URI. Copy the **Application (client) ID**.
+2. **Create a client secret** (A3): 24 months, copy the **Value** at once, and note the expiry. When it lapses the coding agent app's Power BI calls start failing with an auth error.
+3. **Create a separate security group**, `coding-agent-powerbi-service-principals`, and add the app. Do not reuse `powerbi-api-service-principals`: that group is
+   also scoped for the read-only admin APIs (A7), which give tenant-wide read of every workspace's metadata, and this identity needs none of it.
+4. **Tenant setting.** Admin portal, Tenant settings, Developer settings, **"Service principals can call Fabric public APIs"**: keep it enabled and
+   **add** the new group next to the existing one. Add it to no Admin API setting.
+5. **Workspace access.** In **Agent Sandbox**, Manage access, add `coding-agent-powerbi-sp` as **Member**. A role change can take a while to apply (up to
+   about 40 minutes once).
+
+**Part 2: store the secrets.** In the GCP console, Secret Manager, **Create secret**, with no trailing space or newline in the value:
+
+| Secret | Value |
+|---|---|
+| `coding-agent-power-bi-sp-client-id` | the client ID from step 1 |
+| `coding-agent-power-bi-sp-client-secret` | the client secret Value from step 2 |
+
+On each secret, Permissions, Grant access: `coding-agent-sa@YOUR_PROJECT.iam.gserviceaccount.com` and your own account, role **Secret Manager Secret Accessor**.
+Not `agent-sa`. These two are not in Step 15's loops: only `coding-agent-sa` may read them. The client ID is also not a secret and goes into
+`app/config.py` when the code first needs it.
+
+**Part 3: verify it, including what it must not reach.** In one PowerShell window:
+```powershell
+$env:AZURE_CONFIG_DIR = "$HOME\.azure-coding-agent-sp-test"
+$clientId = gcloud.cmd secrets versions access latest --secret=coding-agent-power-bi-sp-client-id
+$clientSecret = gcloud.cmd secrets versions access latest --secret=coding-agent-power-bi-sp-client-secret
+az login --service-principal -u $clientId -p $clientSecret --tenant YOUR_TENANT_ID --allow-no-subscriptions
+$token = az account get-access-token --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv
+$h = @{ Authorization = "Bearer $token" }
+
+$sandbox = "AGENT_SANDBOX_WORKSPACE_ID"; $sandboxModel = "ITS_MODEL_ID"; $sandboxReport = "ITS_REPORT_ID"
+$prod = "PRODUCTION_WORKSPACE_ID"; $prodModel = "PRODUCTION_MODEL_ID"
+
+function Check($label, $call) { try { & $call | Out-Null; "OK    $label" } catch { "HTTP $($_.Exception.Response.StatusCode.value__)  $label" } }
+
+"--- should be OK"
+Check "list reports in Agent Sandbox" { Invoke-RestMethod -Uri "https://api.powerbi.com/v1.0/myorg/groups/$sandbox/reports" -Headers $h }
+Check "mint an embed token for the Agent Sandbox report" { Invoke-RestMethod -Method Post -Uri "https://api.powerbi.com/v1.0/myorg/GenerateToken" -Headers $h -ContentType "application/json" -Body (@{ datasets = @(@{ id = $sandboxModel }); reports = @(@{ id = $sandboxReport }); targetWorkspaces = @(@{ id = $sandbox }); lifetimeInMinutes = 15 } | ConvertTo-Json -Depth 5) }
+
+"--- should FAIL (401, 403 or 404)"
+Check "list reports in the production workspace" { Invoke-RestMethod -Uri "https://api.powerbi.com/v1.0/myorg/groups/$prod/reports" -Headers $h }
+Check "run a DAX query on the production model" { Invoke-RestMethod -Method Post -Uri "https://api.powerbi.com/v1.0/myorg/groups/$prod/datasets/$prodModel/executeQueries" -Headers $h -ContentType "application/json" -Body (@{ queries = @(@{ query = 'EVALUATE ROW("t", 1)' }) } | ConvertTo-Json -Depth 5) }
+Check "call the read-only admin API" { Invoke-RestMethod -Uri 'https://api.powerbi.com/v1.0/myorg/admin/groups?$top=1' -Headers $h }
+
+Remove-Item -Recurse -Force "$HOME\.azure-coding-agent-sp-test"
+Remove-Variable clientSecret, clientId, token, h -ErrorAction SilentlyContinue
+```
+Confirmed 2026-11-19: the first two print `OK`; the last three print 401, 404 and 401. A "should FAIL" line that prints `OK` is the failure that matters: the identity
+reaches more than it should, so stop and check the group and the role.
+
+**If something fails**
+- *`az login` fails:* the client ID or secret was pasted wrongly, or has a stray newline: create a new secret version.
+- *The first two lines fail with 401 or 403:* the Member role has not applied yet (wait and retry), or the group is not on the tenant setting yet.
+- *`gcloud` says permission denied reading a secret:* the Secret Accessor grant to your account is missing on that secret.
+
+**Afterwards (optional).** If the analytics agent's service principal was added to Agent Sandbox for the experiment, remove it there: it needs no access to that workspace.
+
+---
+
 ## Daily workflow from here on
 
 1. Open the project: `code .` from the folder, or just reopen it in VS Code.
