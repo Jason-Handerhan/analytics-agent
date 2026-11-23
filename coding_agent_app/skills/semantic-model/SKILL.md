@@ -1,0 +1,60 @@
+---
+name: semantic-model
+description: Edit this dashboard's Power BI semantic model by hand in its TMDL files, including measures, columns, relationships, field parameters, descriptions, hierarchies and calculation groups. Use whenever a task touches the model under dashboard/pbip (the folder ending in .SemanticModel). Report pages and visuals are covered by the powerbi-report skill.
+---
+
+# Semantic model (TMDL)
+
+You edit the model's TMDL text files directly, in `dashboard/pbip/<name>.SemanticModel/definition/`. Tables are in `tables/`, one `.tmdl` file each, and a measure lives inside its table's file. Report pages and visuals are a different job.
+
+A separate AI assistant, the **analytics agent**, answers users' questions about this dashboard's data. It reads the live model's table, column and measure names and descriptions, and runs DAX against the model as a service principal. The references below mention it wherever a rule exists for its sake.
+
+## Rules
+
+- **A new data table must come from the Instacart ML BigQuery project, already aggregated.** This does not apply to calculated tables such as field parameters and calculation groups, which hold no source data. Aggregate in SQLX first, as far as the visuals allow, and bring in the small result, not raw rows. If the table does not exist yet or needs aggregating, make the SQLX change only and stop: end with a message telling the user to build the table (run Dataform) and resubmit the dashboard part. Once the table exists, follow "Add or change a table or column" below.
+- **Do not add security roles.** A model with row-level security cannot be queried by the service principal the analytics agent uses, which would break it.
+- **Describe everything you add.** The analytics agent reads descriptions from the live model. Write them as `references/ai-readiness.md` and `references/tmdl-guidelines.md` describe: a `///` line above the object, never a `description:` property.
+- **Every measure needs a `formatString`.**
+- **Match the neighbors' names.** This model mixes styles (`_Model_Evaluation_Measures`, `Pct_Diff_F1`, `Recall_at_5`), so copy the style of the nearest existing object instead of the defaults in the naming reference. A name given in the plan wins.
+- **Leave generated metadata alone.** Keep every existing `lineageTag` and `PBI_*` annotation as it is, and omit `lineageTag` on new objects.
+
+## Modify the model
+
+1. Find what exists: list the table files, search them for the object, and query the published model's metadata with `run_dax_query` (`INFO.VIEW.TABLES()`, `INFO.VIEW.COLUMNS()`, `INFO.VIEW.MEASURES()`, `INFO.VIEW.RELATIONSHIPS()`). Those return names, descriptions and format strings but not a measure's DAX, which you read from the file. Compare the two: if the published model does not match the files (an object in one and not the other), end with a blocking question; publish over it only if the plan says the user knows about the mismatch and asked you to.
+2. Read the reference you need (table below) before writing TMDL.
+3. Plan the change and check for a duplicate or a naming conflict.
+4. Edit in this order: columns, then relationships, then measures. Measures go before columns inside a table file.
+5. Test a draft measure before you write it into the file: `run_dax_query` with `DEFINE MEASURE '<table>'[<name>] = <expression> EVALUATE ROW("v", [<name>])`. After a publish, query the real measure.
+
+## Add or change a table or column
+
+A new table or column has no rows in the published model until the model is refreshed. Measures and visuals need no refresh.
+
+1. Make the TMDL change. For a new table, copy the `partition ... = m` block of an existing BigQuery-backed table such as `evaluation_metrics.tmdl`, changing only the schema and table names.
+2. Publish with `publish_dashboard`.
+3. Refresh the model. There is no refresh tool yet: go to step 4, and if it finds no rows, end with a blocking question asking the user to refresh the model and resubmit.
+4. Check the data arrived with `run_dax_query`, for example `EVALUATE ROW("rows", COUNTROWS('<table>'))` and a sample of the new column. Build visuals on it only once it returns rows.
+
+## Author a field parameter
+
+Read `references/field-parameters.md` and follow its create, edit or rename workflow. Create one only if the plan asks for it.
+
+## Saving and validating
+
+1. Check your own TMDL text first: tab indentation, a `///` description, a `formatString`, single quotes around names with spaces.
+2. If the change also touches report files, for example a visual that uses the new measure, run `validate_dashboard` before you publish. It checks the report files only. It does not read TMDL, so it cannot catch a mistake in a model file.
+3. Publish with `publish_dashboard`. The service checks the model's TMDL when it receives it, and a malformed file is rejected with the reason.
+4. After the publish, confirm the measure with `INFO.VIEW.MEASURES()` (its `State` should be `Valid`) and by evaluating it, and use `render_dashboard` if a visual depends on it.
+
+## References
+
+| File | Read it when |
+|---|---|
+| `references/tmdl-guidelines.md` | Before writing any TMDL: syntax, file layout, relationships, hierarchies, calculation groups, user-defined functions, descriptions, format strings |
+| `references/naming-conventions.md` | When naming a new measure, column or display folder; the existing model's names win over these defaults |
+| `references/field-parameters.md` | For any field-parameter table: create, edit, rename or delete |
+| `references/modeling-guidelines.md` | Before adding a table, column, relationship or hierarchy: star schema, data types, hiding keys, explicit measures, format strings |
+| `references/dax-guidelines.md` | Before writing a measure or a `run_dax_query` query: DAX patterns, `DEFINE MEASURE`, `SUMMARIZECOLUMNS`, time intelligence |
+| `references/metadata-discovery.md` | To look up what the model contains with `INFO.VIEW.*` queries: tables, columns, measures, relationships, dependencies |
+| `references/ai-readiness.md` | When writing descriptions and names the analytics agent will read |
+| `references/pbip.md` | To see how the project folder, `definition.pbism` and `definition.pbir` fit together. Do not rebind the report or edit these files |

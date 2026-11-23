@@ -1,0 +1,24 @@
+INSTACART REORDER ENGINE — SYSTEM ARCHITECTURE
+
+Flow: Kaggle Instacart Market Basket Analysis dataset (kaggle.com/datasets/psparks/instacart-market-basket-analysis) -> Google Cloud Platform (IAM-secured) -> Power BI.
+
+1. Data warehouse & pipeline orchestration: the raw Kaggle dataset lands in Cloud Storage, then BigQuery (dbt/Dataform pipeline: data cleansing, feature engineering, automated assertions).
+2. Agent Platform (16 vCPU, 64GB RAM, 1x NVIDIA L4 GPU), four stages in order:
+   - EDA: long-tail sparsity, cyclical order patterns, feature screening (cumulative gain).
+   - Base models: LightGBM and XGBoost, each as Ranker and Classifier; 3-fold stratified GroupKFold CV.
+   - Ensembling: Rank Reciprocal Fusion (RRF) with Optuna weight optimization; exports .pkl.
+   - Evaluation: Recall@5, NDCG@5, Precision@5, F1@5. Tuning/ensembling by NDCG@5; champion by Recall@5. SHAP: mean-absolute importance and beeswarm.
+3. Results storage: Cloud Storage holds the base ranker and classifier .pkl files; BigQuery holds model evaluation metrics, SHAP mean-absolute-importance bar data, SHAP beeswarm plot data, and Power BI dimension tables.
+4. Power BI (.pbip CI/CD format + .pbix): champion model selection, model evaluation metrics, SHAP feature importance visualization, financial impact analysis.
+
+SDLC, INFRASTRUCTURE PROVISIONING & SECURITY
+  GitHub Repository   — version control + CI/CD blueprint (dev/main branches,
+                         PR merge into main; automated CI/CD not deployed for
+                         this portfolio, but the structure supports it —
+                         e.g. GitHub Actions running tests or triggering
+                         Dataform on merge to main)
+  Google Cloud Shell  — VM setup & provisioning
+  IAM Roles           — role-based access control
+  Google-Managed
+    Encryption Keys   — GMEK
+  Secret Manager      — secret storage & management

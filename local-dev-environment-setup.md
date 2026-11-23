@@ -1857,7 +1857,7 @@ reaches more than it should, so stop and check the group and the role.
 - *The first two lines fail with 401 or 403:* the Member role has not applied yet (wait and retry), or the group is not on the tenant setting yet.
 - *`gcloud` says permission denied reading a secret:* the Secret Accessor grant to your account is missing on that secret.
 
-**Afterwards (optional).** If the analytics agent's service principal was added to Agent Sandbox for the experiment, remove it there: it needs no access to that workspace.
+**The analytics agent's service principal also stays a Member of Agent Sandbox** (decided 2026-11-19): the main agent is expected to render screenshots there, so it can describe what the coding agent changed (`docs/dashboard-editing.md`). That is a separate identity from the one in this step, which never reaches production.
 
 ---
 

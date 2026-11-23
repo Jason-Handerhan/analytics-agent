@@ -1,0 +1,34 @@
+EXECUTIVE SUMMARY
+
+This project leverages the Kaggle Instacart Market Basket Analysis dataset to
+build a machine learning-powered recommendation engine designed to populate a
+personalized, 5-slot reorder widget during active shopping sessions.
+Delivering relevant product suggestions drives profit lift through three key
+mechanisms: increasing Average Order Value (AOV) by encouraging supplementary
+purchases, boosting conversion rates via reduced friction, and mitigating
+customer churn through saved time and increased engagement.
+
+The champion model — a Rank Reciprocal Fusion (RRF) ensemble of all base
+models (XGBoost Ranker & Classifier + LightGBM Ranker & Classifier) —
+achieved a 0.3674 Recall@5 on unseen test data. Predicting nearly 37% of a
+customer's reorders within five slots compares favorably to a heuristic
+baseline (predicting the first five items from the prior cart), a 39.3% lift
+over the heuristic's 0.2638 Recall@5.
+
+Using public Instacart SEC filings for baseline assumptions, this
+architecture projects an estimated $118M Annual Profit Lift versus a
+"no widget" scenario, and $33.5M Annual Profit Lift over the heuristic
+approach.
+
+AI-Accelerated Development & Human-in-the-Loop Workflow: Generative AI tools
+were used across the development lifecycle — brainstorming, code generation,
+documentation drafting — with human-in-the-loop review at every step. AI
+provided foundational code and debugging assistance; manual oversight
+optimized code, identified architecture risks, and filled technical gaps.
+
+Portfolio Context & Disclaimer: these financial projections demonstrate
+business-analytics and ROI-estimation skills for this portfolio project.
+Instacart's actual scale and success already rely on sophisticated
+recommendation engines; this analysis does not represent real-world
+incremental impact for Instacart today. It illustrates the theoretical value
+of deploying such models from a hypothetical zero baseline.

@@ -27,7 +27,8 @@ RECURSION_LIMIT = 200
 AGENT_TIMEOUT_SECONDS = 20 * 60  # the agent's working time; the sandbox setup and the checks after it are not counted
 SKILLS_DIR = Path(__file__).parent / "skills"
 SKILL_FILES = {"notebooks": ("SKILL.md", "read_notebook.py", "write_notebook.py", "edit_notebook.py"),
-               "sqlx": ("SKILL.md", "compose_query.py")}
+               "sqlx": ("SKILL.md", "compose_query.py"),
+               "project-background": ("SKILL.md", "executive_summary.txt", "system_architecture.txt")}
 
 
 class SandboxSetupError(RuntimeError):

@@ -16,6 +16,10 @@ RUN uv sync --frozen --only-group coding-agent --no-install-project
 COPY app/__init__.py app/config.py app/coding_task_models.py app/coding_task_store.py app/shared_helpers.py ./app/
 COPY coding_agent_app ./coding_agent_app
 
+# The project-background skill's two text files come from the orientation folder, replacing the local copies kept in that skill
+# for testing: the orientation folder is the source, so edit it there
+COPY context/orientation/executive_summary.txt context/orientation/system_architecture.txt ./coding_agent_app/skills/project-background/
+
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Fails the build, not the first request, if an app module the service imports was not copied
