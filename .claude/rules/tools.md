@@ -234,7 +234,7 @@ later changes the URL and adds auth headers — not this file.
 | `get_conversation_findings` | This conversation's earlier verified answers: `view="overview"` (sizes, questions, compaction summaries) or `view="turns"` (full rows) | Only `view="turns"` is a number source, and only for the `verified_numbers` it returns; the overview is never citable (`docs/conversation-memory.md`) |
 | `manage_tasks` | The conversation's task plan: replaces the whole list, an empty list clears it | Never a number source: a task holds work, not results (`docs/conversation-memory.md`) |
 | `manage_notes` | The conversation's standing notes (`preference`, `definition`, `goal`, `constraint`): add, update or delete by id | Never a number source: a note holds what the user stated, not data figures (`docs/conversation-memory.md`) |
-| `save_coding_plan` | A draft coding plan, built and changed with the user: saves it as the session's `coding_plan` (a new version each save; `first_saved_at` is kept from the first). `base_branch` `dev` is a new task; another existing branch (listed from GitHub, not `main`) is a revision, else an error lists the eligible branches. The result tells the agent to start straight away only when the user approved the plan as shown and asked for just the changes saved, and otherwise to show it and wait | Never a number source: a plan holds work to do, not results (`docs/coding-agent.md`) |
+| `save_coding_plan` | A draft coding plan, built and changed with the user (called with only `guide` set it returns that type's plan guide and saves nothing; a plan is refused unless its type's guide was read earlier this turn, `guides_read` injected by `dispatch_other_call`): saves it as the session's `coding_plan` (a new version each save; `first_saved_at` is kept from the first). `base_branch` `dev` is a new task; another existing branch (listed from GitHub, not `main`) is a revision, else an error lists the eligible branches. The result tells the agent to start straight away only when the user approved the plan as shown and asked for just the changes saved, and otherwise to show it and wait | Never a number source: a plan holds work to do, not results (`docs/coding-agent.md`) |
 | `start_coding_task` | Starts the saved draft plan as a background coding agent task (no arguments): refused if there is no draft or it was first saved this turn; pauses for the user's approval before it runs (`docs/approval-workflow.md`); writes the task, queues it with Cloud Tasks, clears the draft | Never a number source (`docs/coding-agent.md`) |
 | `get_coding_task` | The conversation's coding tasks: no `task_id` lists them (summary rows); with one, its status and, once finished, the result, with options for the diff, the plan and the agent's to-dos | Never a number source: a coding task's numbers are context, not data (`docs/coding-agent.md`) |
 | `open_pull_request` | Opens a draft pull request into `dev` from a finished task's branch (`task_id` only); the title and description are built in code from the stored plan and result; refused with the existing pull request's link if the branch has an open one (GitHub is asked, not the stored `pr_url`) or no commits ahead of `dev`; pauses for the user's approval before it runs; stores `pr_url` on the task | Never a number source (`docs/coding-agent.md`) |
@@ -458,10 +458,11 @@ class SubmitAnswerArgs(BaseModel):
                     "natural genuinely fits or clarifying_question is set.")
     clarifying_question: str = Field(
         default="",
-        description="Set this INSTEAD of answer_markdown, and leave answer_markdown empty, only when "
-                    "the request is genuinely ambiguous and a wrong guess would mislead the user. Ask "
-                    "one short question naming the specific choice. Otherwise answer -- do not ask "
-                    "about anything a reasonable default covers.")
+        description="Use INSTEAD of answer_markdown (leave it empty) only when you have nothing else to "
+                    "show and the request is so ambiguous a wrong guess would mislead the user. Ask "
+                    "short questions naming the specific choices. Never set both: if you also have an "
+                    "answer or draft, put the questions in answer_markdown and leave this empty. Don't "
+                    "ask about anything a reasonable default covers.")
     title: str = Field(
         default="",
         description="A short label for this turn, 3-8 words, no numbers -- e.g. 'reorder rate by "
@@ -523,8 +524,7 @@ class SubmitAnswerArgs(BaseModel):
             raise ValueError("Set only one of answer_markdown or clarifying_question, not both.")
         if not (has_answer or has_question):
             raise ValueError(
-                "Set exactly one of answer_markdown (your final answer) or clarifying_question "
-                "(one question for the user, only when the request is genuinely ambiguous).")
+                "Set exactly one of answer_markdown (your final answer) or clarifying_question.")
         return self
 
 SUBMIT_ANSWER_DESCRIPTION = f"""Call this with your final answer ... (when to call it, partial answers, no

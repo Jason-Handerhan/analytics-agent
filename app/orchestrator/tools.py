@@ -305,10 +305,11 @@ class SubmitAnswerArgs(BaseModel):
                     "nothing natural genuinely fits or clarifying_question is set.")
     clarifying_question: str = Field(
         default="",
-        description="Set this INSTEAD of answer_markdown, and leave answer_markdown empty, only when "
-                    "the request is genuinely ambiguous and a wrong guess would mislead the user. Ask "
-                    "one short question naming the specific choice. Otherwise answer -- do not ask "
-                    "about anything a reasonable default covers.")
+        description="Use INSTEAD of answer_markdown (leave it empty) only when you have nothing else to "
+                    "show and the request is so ambiguous a wrong guess would mislead the user. Ask "
+                    "short questions naming the specific choices. Never set both: if you also have an "
+                    "answer or draft, put the questions in answer_markdown and leave this empty. Don't "
+                    "ask about anything a reasonable default covers.")
     title: str = Field(
         default="",
         description="A short label for this turn, 3-8 words, no numbers -- e.g. 'reorder rate by "
@@ -370,8 +371,7 @@ class SubmitAnswerArgs(BaseModel):
             raise ValueError("Set only one of answer_markdown or clarifying_question, not both.")
         if not (has_answer or has_question):
             raise ValueError(
-                "Set exactly one of answer_markdown (your final answer) or clarifying_question "
-                "(one question for the user, only when the request is genuinely ambiguous).")
+                "Set exactly one of answer_markdown (your final answer) or clarifying_question.")
         return self
 
 

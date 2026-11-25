@@ -59,7 +59,7 @@ class TimeLimitedSandbox(LangSmithSandbox):
 SANDBOX_SYSTEM_PROMPT = f"""You are a coding agent working in a clone of a Dataform ML feature pipeline at {WORK_DIR} (definitions/ holds the SQLX, src/ and config/ the training code).
 
 WHERE YOU WORK
-You have a shell, and the Dataform CLI is installed. You may change any code file in the repo, but never touch .git/, .github/, dashboard/ or images/, and never change the device settings in its files. Do not run git commit or git push; the changes are collected afterwards. Paths in the task like /definitions are relative to {WORK_DIR}. Search only inside {WORK_DIR}; never run grep or find from /, which walks the whole machine and times out. Put scratch files in /tmp, never in the repo, and keep there any note you will need later in a long task (a design, a model inventory): your context can be summarized, files cannot. Re-read them before the step that needs them. This sandbox has no GPU and no BigQuery access (the BigQuery tools run outside it), and the repo's training code sets device='cuda' or 'gpu'.
+You have a shell, and the Dataform CLI is installed. You may change any code file in the repo, but never touch .git/, .github/, dashboard/ or images/, and never change the device settings in its files. Do not run git commit or git push; the changes are collected afterwards. Paths in the task like /definitions are relative to {WORK_DIR}. Search only inside {WORK_DIR}; never run grep or find from /, which walks the whole machine and times out. Put scratch files in /tmp, never in the repo, and keep there any note you will need later in a long task (a design, a model inventory): your context can be summarized, files cannot. Re-read them before the step that needs them. This sandbox has no GPU and no BigQuery access (the BigQuery tools run outside it), and the repo's training code sets device='cuda' or 'gpu'. Aggregations of agent_safe for the dashboard are notebooks in Notebooks/dashboard_data/ that aggregate with SQL in BigQuery and write to the agent_dashboard dataset, never SQLX and never a change to agent_safe, even if the plan says otherwise (unless its decisions say the user chose another way); check the query with dry_run_sql from a .sql file.
 
 BEFORE YOU BUILD
 Read the task and what it points to in the repo before you edit anything. Check that the plan and the repo tell you everything you need to build it correctly. If something essential is missing, stop and finish with blocking_questions instead of guessing. Do this as soon as you notice the gap, before the work or in the middle of it: asking early costs a short run, a wrong guess costs a whole one. Ask only when the answer would change what you build and neither the plan nor the repo settles it. For anything smaller, choose the sensible option, follow the neighboring code, and list it under assumptions. The same applies to a blocker you meet while building: an error you cannot fix after a real attempt, or a change the task depends on that you cannot make (for example, a model or table change the task needs).
@@ -79,6 +79,36 @@ Do not add a dependency unless the change truly needs it and the value justifies
 YOUR FINAL ANSWER
 You finish with a structured answer: report, assumptions, blocking_questions and follow_up_questions. It is the only thing kept, and the description of each field says what belongs in it."""
 
+
+# Judged by a grader after the agent says it is done; the task is the first message in the transcript.
+# Add criteria as new failure types appear.
+CODING_RUBRIC = """
+Judge only the lines the diff adds or changes, and what those lines refer to. Problems that already exist in code the diff does not touch are not failures. A criterion that does not apply to this task passes. Clearing the saved execution count of a notebook cell that was edited is expected, not a violation.
+1. Every deliverable the task asks for is present in the diff, not only described in the agent's report or its todo list.
+2. Every column named in an assertion line (such as rowConditions) that the diff adds or changes is produced by that table's own query.
+3. Every column or alias that a SQL line added or changed by the diff reads is produced by the table or CTE it comes from, and is in scope where it is used.
+4. Every feature name that the diff adds to a Python feature list is a column that definitions/gold/final_ml_features_table.sqlx produces.
+5. Every function, import or constant used by the Python lines the diff adds or changes exists.
+6. Every caller of a function whose signature the diff changes still works.
+7. Every claim the report makes about what the diff changes is true, and it claims no change the diff lacks. Claims about what was run are not judged.
+8. The final report lists every file the diff changes and says what changed in each.
+9. The diff contains nothing the task did not ask for, and no scratch or debug files.
+10. The added tests do not parse source code, copy a production list, run a training script, or read real data or a saved model, and no helper's only job is calling another function.
+11. For each .sqlx file the diff changes, the transcript lists a valid dry run of its composed SQL (/tmp/composed/<table>.sql).
+"""
+
+# The same, for a dashboard task. Add criteria as new failure types appear.
+DASHBOARD_RUBRIC = """
+Judge only what the diff adds or changes, and what those lines refer to. Problems that already exist in the dashboard the diff does not touch are not failures. A criterion that does not apply to this task passes.
+1. Everything the plan describes for each page is present in the diff, with every card, chart, slicer, bookmark and button it names and the chart and slicer types it gives.
+2. Every field a visual uses exists in the model or is added by the diff.
+3. Every table, column and measure the diff adds has a `///` description, and every new measure has a `formatString`.
+4. The final report says what each new measure calculates.
+5. No bookmark, button, interaction or slicer sync points at something the diff removed.
+6. The diff changes nothing under dashboard/ the plan did not ask for, and does not rearrange an existing page the plan did not ask to change.
+7. Every claim the report makes about what the diff changes is true, and it claims no change the diff lacks. Claims about what was run are not judged.
+8. The final image render of each changed page shows what the plan describes for it, readable, with nothing clipped or overlapping.
+"""
 
 # How the grader reviews, added to the middleware's own grader prompt (which keeps its role, injection defenses and verdicts).
 GRADER_SYSTEM_PROMPT_WITH_TOOLS = GRADER_SYSTEM_PROMPT + (

@@ -10,13 +10,14 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from langsmith.sandbox import SandboxClient, SandboxClientError
 
-from app.coding_task_models import (CODING_RUBRIC, CodingAgentPlan, CodingAgentResult, FileChange, ReviewCriterion, ReviewEvaluation,
+from app.coding_task_models import (CodingAgentPlan, CodingAgentResult, FileChange, ReviewCriterion, ReviewEvaluation,
                                     Todo, TokenCounts, TokenUsage)
 from app.coding_task_store import complete_coding_task, mark_coding_task_running, update_progress
 from app.config import CODING_AGENT_DEFAULT_BASE_BRANCH, REPO_URL
 from coding_agent_app.apply_and_verify import (ApplyPatchResult, FinalChecks, apply_patch_and_push, build_final_checks,
                                                verify_patch_in_clean_sandbox)
-from coding_agent_app.coding_agent import CountingUsageHandler, PatchCheckMiddleware, StructuredCodingAgentResponse, build_coding_agent
+from coding_agent_app.coding_agent import (CODING_RUBRIC, CountingUsageHandler, PatchCheckMiddleware, StructuredCodingAgentResponse,
+                                           build_coding_agent)
 from coding_agent_app.patch import RESTORE_ENDINGS, WORK_DIR, PatchFile, read_patch
 from coding_agent_app.telemetry.writer import RunDetails, write_coding_task_row
 

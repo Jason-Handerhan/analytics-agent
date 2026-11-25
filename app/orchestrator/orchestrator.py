@@ -451,9 +451,15 @@ async def dispatch_other_call(tc: dict, prior_tool_calls: list[ToolCallRecord],
                                      "turn_started_at": turn_started_at}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 
+    # Saving a plan also needs the guides this turn's earlier calls have read
+    if tc["name"] == "save_coding_plan":
+        guides_read = [tool_record["args"]["guide"] for tool_record in prior_tool_calls
+                       if tool_record["name"] == "save_coding_plan" and tool_record["success"] and tool_record["args"].get("guide")]
+        full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id, "guides_read": guides_read}}
+        return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
+
     # Tools that only need the conversation id injected
-    if tc["name"] in ("get_conversation_findings", "manage_tasks", "manage_notes", "save_coding_plan", "get_coding_task",
-                      "open_pull_request"):
+    if tc["name"] in ("get_conversation_findings", "manage_tasks", "manage_notes", "get_coding_task", "open_pull_request"):
         full_args = {**tc, "args": {**tc["args"], "conversation_id": conversation_id}}
         return await ALL_TOOLS[tc["name"]].ainvoke(full_args)
 

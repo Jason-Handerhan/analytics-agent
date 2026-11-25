@@ -11,7 +11,10 @@ A separate AI assistant, the **analytics agent**, answers users' questions about
 
 ## Rules
 
-- **A new data table must come from the Instacart ML BigQuery project, already aggregated.** This does not apply to calculated tables such as field parameters and calculation groups, which hold no source data. Aggregate in SQLX first, as far as the visuals allow, and bring in the small result, not raw rows. If the table does not exist yet or needs aggregating, make the SQLX change only and stop: end with a message telling the user to build the table (run Dataform) and resubmit the dashboard part. Once the table exists, follow "Add or change a table or column" below.
+- **A new data table must already exist in BigQuery, aggregated as far as the visuals allow.** Calculated tables (field parameters, calculation groups) hold no source data and are exempt.
+  - Use a table from `agent_safe`, `agent_dashboard` or one the ML repo's code builds. Bring in the small result, not raw rows.
+  - Check it with `list_tables` and `get_table_schema`. They cannot see `ml_model_results`; for a table there, rely on the plan and `Notebooks/evaluation/model_evaluation.ipynb`, which builds it.
+  - If the table does not exist yet or is finer than the visuals need, make no model change and stop. End with a blocking question telling the user it needs a code plan first, then resubmit the dashboard part.
 - **Do not add security roles.** A model with row-level security cannot be queried by the service principal the analytics agent uses, which would break it.
 - **Describe everything you add.** The analytics agent reads descriptions from the live model. Write them as `references/ai-readiness.md` and `references/tmdl-guidelines.md` describe: a `///` line above the object, never a `description:` property.
 - **Every measure needs a `formatString`.**

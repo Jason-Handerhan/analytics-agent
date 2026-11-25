@@ -3,94 +3,63 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.config import CODING_AGENT_DEFAULT_BASE_BRANCH
 
-# Judged by a grader after the agent says it is done; the task is the first message in the transcript.
-# Add criteria as new failure types appear.
-CODING_RUBRIC = """
-Judge only the lines the diff adds or changes, and what those lines refer to. Problems that already exist in code the diff does not touch are not failures. A criterion that does not apply to this task passes. Clearing the saved execution count of a notebook cell that was edited is expected, not a violation.
-1. Every deliverable the task asks for is present in the diff, not only described in the agent's report or its todo list.
-2. Every column named in an assertion line (such as rowConditions) that the diff adds or changes is produced by that table's own query.
-3. Every column or alias that a SQL line added or changed by the diff reads is produced by the table or CTE it comes from, and is in scope where it is used.
-4. Every feature name that the diff adds to a Python feature list is a column that definitions/gold/final_ml_features_table.sqlx produces.
-5. Every function, import or constant used by the Python lines the diff adds or changes exists.
-6. Every caller of a function whose signature the diff changes still works.
-7. Every claim the report makes about what the diff changes is true, and it claims no change the diff lacks. Claims about what was run are not judged.
-8. The final report lists every file the diff changes and says what changed in each.
-9. The diff contains nothing the task did not ask for, and no scratch or debug files.
-10. The added tests do not parse source code, copy a production list, run a training script, or read real data or a saved model, and no helper's only job is calling another function.
-11. For each .sqlx file the diff changes, the transcript lists a valid dry run of its composed SQL (/tmp/composed/<table>.sql).
-"""
-
-
 # --- the plan: written by the main agent through save_coding_plan, so it is validated ---
 
-class SuggestedCode(BaseModel):
-    purpose: str = Field(description="What this code is for and how the coding agent should use it.")
-    file: str | None = Field(None, description="The repo file the code would be implemented in, if it belongs to one.")
-    code: str
-
-
-class FileToImitate(BaseModel):
-    path: str
-    what: str = Field(description="What to follow in this file, specifically: its column documentation block, how it "
-                                  "forward-fills, its test style.")
-
-
 class CodingAgentPlan(BaseModel):
-    name: str = Field(max_length=100, description="A short title the user will recognize: what it changes and where, such as "
-                                                  "'LGBM ranker' or 'Aisle pacing ratio for the ranker'.")
-    
-    goal: str = Field(description="What this change achieves and why, in one or two sentences, stated as the result and not the "
-                                  "work. No files, steps or limits (those go in requirements and constraints), and no numbers.")
-    
+    subagent_type: Literal["code", "dashboard"] = Field(description=(
+        "'code' changes the ML repo's code: SQLX tables, Python, and notebooks. 'dashboard' changes the Power BI dashboard: its "
+        "pages and visuals and its semantic model (measures, columns, tables brought into the model)."))
+
+    name: str = Field(max_length=100, description=(
+        "A short title the user will recognize: what it changes and where, such as 'LGBM ranker' or "
+        "'Aisle pacing ratio for the ranker'."))
+
+    goal: str = Field(min_length=1, description=(
+        "What this change achieves and why, in one or two sentences, stated as the result and not the work. No files, steps or "
+        "limits (those go in the description), and no numbers."))
+
+    scope: str = Field(min_length=1, max_length=600, description=(
+        "What is changing and where, in a few sentences (for example 'Add a Cost page with cost cards and a cost-by-model chart; "
+        "no changes to other pages')."))
+
     base_branch: str = Field(CODING_AGENT_DEFAULT_BASE_BRANCH, description=(
         f"`{CODING_AGENT_DEFAULT_BASE_BRANCH}` for a new task: the coding agent starts from it and pushes a new branch. To make a "
         "revision of an earlier task, set this to the `branch` in that task's result, copied exactly: the coding agent starts from "
         "that branch and adds its commit to it. Make a revision when the new work needs, fixes or extends that task's changes; "
         f"independent work stays on `{CODING_AGENT_DEFAULT_BASE_BRANCH}`. Ask the user if it is unclear which."))
-    
-    requirements: list[str] = Field(min_length=1, description=(
-        "The deliverables, one item per thing to build or change, each naming the table, file or model it applies to. Split "
-        "anything joined by 'and' that touches more than one place. For example: 'Add user_aisle_pacing_ratio to "
-        "prelim_user_aisle_features', 'Forward-fill the new columns in skeleton_features', 'Expose user_aisle_pacing_ratio in "
-        "final_ml_features_table and add it to rowConditions', 'Pass the feature to the LGBM ranker only', 'Create a notebook "
-        "comparing the ranker with and without the feature, including gain importance'. How to tell it works is not a "
-        "requirement (put the test behaviours in tests), and what not to do goes in constraints."))
-    
-    tests: list[str] = Field([], description=(
-        "Only what the compile, the SQL dry runs and linting cannot check: the behaviours the new pytest tests must pin down, each "
-        "as one sentence (for example 'select_features returns the feature only for the ranker'). Ask for the fewest tests that "
-        "would fail if the behaviour broke; no tests of wiring, training, real data or SQL. Leave empty when the change needs no "
-        "new test."))
-    
-    constraints: list[str] = Field([], description="Rules the change must follow: paths it may or may not touch, naming "
-                                                   "conventions, models or tables that must stay as they are, a limit on scope.")
-    
-    files_to_imitate: list[FileToImitate] = Field([], description="Existing repo files whose style or structure the new code "
-                                                                  "should follow.")
-    
-    decisions: list[str] = Field([], description=(
-        "Choices the user made that settle something the agent would otherwise guess (which of two approaches, a name, a "
-        "threshold, what is out of scope), each as an instruction with the user's reason if they gave one. If the user dictated "
-        "specific logic or SQL, write it here in full. Do not list your own suggestions here; put code you suggest in "
-        "suggested_code."))
-    
-    suggested_code: list[SuggestedCode] = Field([], description=(
-        "Code you suggest as a starting point. The coding agent treats it as unverified, and the repo wins on any conflict. Do not "
-        "paste code that already exists in the repo; name the file in files_to_imitate instead."))
-    
+
     review: bool = Field(False, description=(
-        "Whether a reviewer checks the finished work against the criteria below and sends the coding agent back to fix what "
-        "fails. It increases token cost and run time, more for a larger task. Set it yourself: on for larger or riskier changes, "
-        "off for small ones. When you show the plan, say whether it is on and why, and what it does. The user approving the plan "
-        "approves this setting for this plan only: keep it through every version of the plan unless they change it, and don't "
-        "raise it again. A different build is a new plan, so choose and state it again. If the user says they want it on or off "
-        "for all plans going forward, record that with manage_notes, then use it for every plan without recommending, until they "
-        "say otherwise.\n"
-        "The criteria:\n" + CODING_RUBRIC))
+        "Whether a reviewer checks the finished work and sends the coding agent back to fix what fails. The criteria for each "
+        "type are in its guide: read it to tell the user what is checked. It increases token cost and run time, more for a larger "
+        "task. Set it yourself: on for larger or riskier changes, off for small ones. When you show the plan, say whether it is "
+        "on and why, and what it does. The user approving the plan approves this setting for this plan only: keep it through "
+        "every version of the plan unless they change it, and don't raise it again. A different build is a new plan, so choose "
+        "and state it again. If the user says they want it on or off for all plans going forward, record that with manage_notes, "
+        "then use it for every plan without recommending, until they say otherwise."))
+
+    new_pages: int | None = Field(None, ge=0, le=3, description=(
+        "Dashboard plans only: how many new pages this plan adds, at most 3: 0 if it adds none (an edit, a delete or a model-only "
+        "change). A larger dashboard is planned in parts, "
+        "one plan after another."))
+
+    audience: str | None = Field(None, description=(
+        "Dashboard plans only: who uses the dashboard and how. Needed when the plan adds a new page or a new dashboard."))
+
+    description: str = Field(min_length=1, max_length=20000, description=(
+        "The plan itself, in markdown, with the information the guide for this type calls for. State each point once. Do not repeat yourself."))
+
+    @model_validator(mode="after")
+    def _dashboard_only_fields(self) -> "CodingAgentPlan":
+        if self.subagent_type == "dashboard":
+            if self.new_pages is None:
+                raise ValueError("A dashboard plan needs new_pages: how many new pages it adds (0 if none), at most 3.")
+        elif self.new_pages is not None or self.audience is not None:
+            raise ValueError("new_pages and audience apply only to a dashboard plan (subagent_type 'dashboard'). Leave them out of a code plan.")
+        return self
 
 
 class CodingPlanDraft(TypedDict, total=False):
@@ -125,7 +94,7 @@ class FinalCheck:
 
 @dataclass
 class ReviewCriterion:
-    """One criterion of CODING_RUBRIC as the reviewer judged it."""
+    """One criterion of the reviewer's rubric as the reviewer judged it."""
     criterion: str
     passed: bool
     gap: str | None = None          # what is missing, when it failed

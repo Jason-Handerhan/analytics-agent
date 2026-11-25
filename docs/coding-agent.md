@@ -322,10 +322,14 @@ named table (refs resolved to full table names), which the dry-run tool below ne
   `get_table_schema(table)`, call the BigQuery client's table metadata endpoints (no query job, no free-form SQL,
   no cost) and accept only an allowlist of datasets held in code: **`instacart`** (raw sources plus the
   `cleansed_*` and `order_products_cleansed` staging tables), **`building_blocks`** and
-  **`ml_model_feature_table`** (the schema names in the SQLX configs). The job's service account is new, with
-  `roles/bigquery.metadataViewer` on those three datasets only: names, types and descriptions, never rows. IAM
-  decides what exists for the job; the code decides what the tool accepts. **Not `agent_safe`:** that is the main
-  agent's dataset and says nothing about the tables the coding agent edits. The agent also reads the repo's SQL
+  **`ml_model_feature_table`** (the schema names in the SQLX configs), plus **`agent_safe`** and **`agent_dashboard`**
+  (added 2026-11-24: the dashboard reads `agent_safe`, and the aggregations of it that a notebook writes go to
+  `agent_dashboard`, `docs/dashboard-planning.md`). The job's service account is new, with
+  `roles/bigquery.metadataViewer` on the first three datasets and `roles/bigquery.dataViewer` on the last two, because a dry run
+  needs `bigquery.tables.getData` on what it reads (below); the tools never return rows. IAM
+  decides what exists for the job; the code decides what the tool accepts. `ml_model_results` stays out: what it holds is
+  already in the dashboard model or `agent_safe`, and `model_evaluation.ipynb` shows how it is built. `agent-sa` has no grant
+  on `agent_dashboard`, so the main agent sees that data only through the dashboard. The agent also reads the repo's SQL
   for the tables the project defines; the live tool adds real types, the source tables and what is materialized.
 - **No aggregate check by the main agent.** The main agent can't read these tables (`agent_safe` excludes the ML
   pipeline datasets), so it can't validate the feature's values.
@@ -366,7 +370,7 @@ hasn't been rebuilt with the new columns, so it can only test the silver layer. 
 **Access map for the dry run (2026-11-06; settle before building `dry_run_sql`).** Never any write permission: no table
 create, update or delete, so Dataform's `CREATE TABLE ... AS SELECT` is never run by the job, and the tool dry-runs only the
 compiled `SELECT` body (`dataform compile --json` gives it as the table's `query`). `list_tables` and `get_table_schema`
-need `roles/bigquery.metadataViewer` on the three datasets. `dry_run_sql` needs `bigquery.jobs.create`
+need `roles/bigquery.metadataViewer` on the datasets (the three, and `agent_safe` and `agent_dashboard` from 2026-11-24, which also get Data Viewer). `dry_run_sql` needs `bigquery.jobs.create`
 (`roles/bigquery.jobUser`, project level); BigQuery's documentation says running a query also needs
 `bigquery.tables.getData` on every table and view it references (and on a view's underlying tables), and does not say whether
 a dry run is exempt. **The open question: does a dry run succeed with metadata access only?** **Answered 2026-11-06: no (outcome B).** Run through
@@ -814,7 +818,7 @@ How the notebook becomes the job. **Exists** means in the notebook or `coding_ag
 
 | Module in `coding_agent_app/` | Holds |
 |---|---|
-| `coding_agent.py` | exists in the notebook: `build_coding_agent`, `SANDBOX_SYSTEM_PROMPT`, the grader prompt (`CODING_RUBRIC` stays in `app/coding_task_models.py`, where the plan model embeds it), `compact_transcript`, `PatchCheckMiddleware`. The middleware lives here because it is agent-loop glue, which keeps `patch.py` free of langchain imports |
+| `coding_agent.py` | exists in the notebook: `build_coding_agent`, `SANDBOX_SYSTEM_PROMPT`, the grader prompt and `CODING_RUBRIC` (the rubric moved here from `app/coding_task_models.py` on 2026-11-23: only the coding agent app uses it; the main agent reads a pasted copy in `context/subagent_plan_guides/code.md`, which a test keeps in step), `compact_transcript`, `PatchCheckMiddleware`. The middleware lives here because it is agent-loop glue, which keeps `patch.py` free of langchain imports |
 | `patch.py` | exists: `read_patch`, `validate_patch`, `validate_notebooks`, `build_patch`, the blocked-path and size constants, `RESTORE_ENDINGS` |
 | `apply_and_verify.py` | exists: `apply_patch_and_push`, `verify_patch_in_clean_sandbox`, `build_final_checks` and their dataclasses. The push is part of `apply_patch_and_push` (built 2026-11-08): given a `new_branch` (a first task) or `is_revision` (the base branch is the agent's own), a patch that applies is committed (author `coding-agent`, message = `agent: <plan name> (task <task id>)` plus the plan's goal) and pushed; a new task creates `agent/<plan name>-<short task id>`, a revision adds a commit to the branch it continues. Tested against a local bare repo; the real push with the branch-only token (from the job's environment) is Layer 2. The clean sandbox verifies **before** the push (decided 2026-11-10): a revision is pushed onto its own base branch, so a clone made after the push would already hold the patch and the patch would not apply; a failed verification still does not block the push, so a failed task keeps its branch for a revision |
 | `orchestration.py` | `execute_coding_run` (built: the sandbox, the agent, apply and verify, the result) and `run_coding_task(task_id)` (built: claim the task, read the parent for a revision, send the preamble and the plan as JSON, call `execute_coding_run`, write the result in a `finally`; an error becomes a stopped result with `model_unavailable`, `sandbox_error` or `internal_error`; a revision's parent is trusted to have pushed a branch, which `start_coding_task` checks) |

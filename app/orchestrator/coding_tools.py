@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 
 import requests
 from google.api_core.exceptions import GoogleAPICallError
@@ -20,6 +20,7 @@ from app.config import (
     CODING_AGENT_LOCATION,
     CODING_AGENT_QUEUE,
     CODING_AGENT_SERVICE_URL,
+    CONTEXT_DIR,
     GCP_PROJECT_ID,
     GITHUB_REPO_BRANCH,
     GITHUB_REPO_NAME,
@@ -38,8 +39,13 @@ logger = logging.getLogger(__name__)
 
 SAVE_CODING_PLAN_DESCRIPTION = (
     "Saves a draft of a coding task's plan, to build and change with the user, and start with start_coding_task once the "
-    "user has approved it. Call it when the user wants a change made to the ML repo's code, and again each time the plan "
-    "changes: every save replaces the draft and counts as a new version. "
+    "user has approved it. Call it when the user wants a change made to the ML repo's code or to the dashboard. "
+    "Before writing or changing a plan, read the guide for its type unless it is already in your context: call it with only "
+    "guide set to 'code' or 'dashboard'. It provides the essential information for building the plan in collaboration with the user. "
+    "A plan is for one type, never both: when a request needs both, plan one now and the other after it finishes. "
+    "The dashboard guide says how to tell whether a dashboard change needs a code plan first. "
+    "Settle the plan by working out what you can yourself and asking the user for the rest. "
+    "Every save replaces the draft and counts as a new version, so send the whole plan each time. "
     "Save a plan before showing it to the user, and save each change before describing it to the user. "
     "Set discard to true instead of a plan to delete the draft. "
     "Call it only once per round, and never in the same round as start_coding_task or open_pull_request."
@@ -48,17 +54,28 @@ SAVE_CODING_PLAN_DESCRIPTION = (
 
 class SaveCodingPlanArgs(FlatToolArgs):
     plan: CodingAgentPlan | None = Field(
-        None, description="The full plan. Every save replaces the previous draft. Leave out when discarding.")
+        None, description="The full plan. Every save replaces the previous draft. Leave out when discarding or reading a guide.")
     discard: bool = Field(
         False, description="Set to true instead of a plan to delete the saved draft, for example when the user drops "
                            "the task.")
+    guide: Literal["code", "dashboard"] | None = Field(None, description=(
+        "Set this alone, with no plan, to read the guide for a type before writing a plan: it provides the essential information "
+        "for building the plan in collaboration with the user. 'code' changes the ML repo's code (SQLX, Python, notebooks). "
+        "'dashboard' changes the Power BI dashboard or its semantic model."))
 
     @model_validator(mode="after")
-    def _exactly_one_of_plan_or_discard(self) -> "SaveCodingPlanArgs":
-        """Requires a plan or discard=true, not both and not neither."""
-        if bool(self.plan) == self.discard:
-            raise ValueError("Set exactly one of plan (to save a draft) or discard=true (to delete the saved draft).")
+    def _exactly_one_action(self) -> "SaveCodingPlanArgs":
+        """Requires exactly one of plan, discard=true or guide."""
+        if sum([self.plan is not None, self.discard, self.guide is not None]) != 1:
+            raise ValueError("Set exactly one of plan (to save a draft), discard=true (to delete the saved draft) or guide "
+                             "(to read the guide for a plan type).")
         return self
+
+
+# The guide for each plan type, returned by save_coding_plan(guide=...). Read at import: a missing file stops the app from
+# starting, like the page-info files.
+PLAN_GUIDES = {name: (CONTEXT_DIR / "subagent_plan_guides" / f"{name}.md").read_text(encoding="utf-8")
+               for name in ("code", "dashboard")}
 
 
 def list_candidate_branches() -> list[str]:
@@ -102,9 +119,16 @@ async def check_base_branch(base_branch: str) -> str:
 @tool(args_schema=SaveCodingPlanArgs, description=SAVE_CODING_PLAN_DESCRIPTION)
 async def save_coding_plan(
     conversation_id: Annotated[str, InjectedToolArg],
+    guides_read: Annotated[list[str], InjectedToolArg],
     plan: CodingAgentPlan | None = None,
     discard: bool = False,
+    guide: Literal["code", "dashboard"] | None = None,
 ) -> str:
+    if guide:
+        return PLAN_GUIDES[guide]
+    if plan and plan.subagent_type not in guides_read:
+        raise ToolError(f"Plan not saved. Call save_coding_plan with guide set to '{plan.subagent_type}' first, then rewrite the plan "
+                        "following the guide and save it again.")
     if discard:
         try:
             await session_doc(conversation_id).update({"coding_plan": firestore.DELETE_FIELD})

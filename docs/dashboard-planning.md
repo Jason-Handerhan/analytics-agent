@@ -1,11 +1,11 @@
-# Dashboard planning: draft v2 (2026-11-23)
+# Dashboard planning: the flat coding plan, its guides, and the coding agent's dashboard path
 
-**Status: draft, nothing built.** The earlier nested-schema draft is `docs/dashboard-planning-draft.md` (revision 3, reconstructed). This version replaces its schema with a small flat envelope plus a free-form description, and moves the field-by-field guidance out of the tool schema into a guide the tool returns on request. Fold into `docs/coding-agent.md` and `docs/dashboard-editing.md` once approved, then delete both drafts.
+**Status: design settled 2026-11-23, nothing built.** The plan is a small flat envelope plus a free-form description, and the field-by-field guidance is a guide the tool returns on request, not part of the tool schema. This replaces the nested-schema plan in `docs/dashboard-planning-draft.md` (kept for reference only; it is superseded). Revise this doc as it is built.
 
 **Decided so far**
-- One tool, `save_coding_plan`, with **flat** arguments (not nested, not a discriminated union). `subagent_type` (`code` or `dashboard`) selects the guide, tool set, system prompt, preamble, rubric and path guard. A union is the move once a second type needs two or more fields of its own.
+- One tool, `save_coding_plan`, whose `plan` argument is one **flat** model, `CodingAgentPlan` (no nested sub-objects, no union yet). Its `subagent_type` (`code` or `dashboard`) selects the guide, tool set, system prompt, preamble, rubric and path guard, and is stored in the plan so the stored dict describes itself.
 - A plan is an **envelope** the code can validate plus a **free-form `description`** the main agent writes with the user, following the sections the type's guide lists. The agent shapes the description to the request (add, edit, delete, model-only, restyle).
-- **The guidance is the same guidance we have now**, in a guide the tool returns when called with only `subagent_type`. It is not in the tool schema or the system prompt, so conversations that never plan pay nothing for it.
+- **The guidance is the same guidance we have now**, in a guide the tool returns when called with only `guide` set to a type. It is not in the tool schema or the system prompt, so conversations that never plan pay nothing for it.
 - **The coding agent works out the model.** The user specifies what the pages do; the description names model needs only when the user was specific. A plan may change only the model.
 - Light validation only (2b). No parsing of headings, no card or slicer caps, no check of page names against the diff.
 - A new dashboard follows Microsoft's layout rules (`layout.md`); a change to the existing dashboard matches how its existing pages are arranged.
@@ -25,74 +25,40 @@ Revision 3 gave each page `cards`, `charts`, `slicers`, `field_parameters`, `boo
 
 ### 2a. Arguments
 
+`SaveCodingPlanArgs` stays as today (`plan` and `discard`) with one new argument, `guide`:
+
 ```python
 class SaveCodingPlanArgs(FlatToolArgs):
-    subagent_type: Literal["code", "dashboard"] = Field(description=(
-        "'code' changes the ML repo's code (SQLX, Python, notebooks). 'dashboard' changes the Power BI dashboard or its semantic model. "
-        "Send only this, with nothing else, to get the guide for that type before writing a plan."))
-    name: str | None = Field(None, max_length=100, description=(
-        "A short title the user will recognize: what it changes and where, such as 'LGBM ranker' or 'Aisle pacing ratio for the ranker'."))
-    goal: str | None = Field(None, description=(
-        "What this change achieves and why, in one or two sentences, stated as the result and not the work. No files, steps or limits "
-        "(those go in the description), and no numbers."))
-    scope: str | None = Field(None, max_length=500, description=(
-        "What is changing and where, in a few sentences (for example 'Add a Cost page with cost cards and a cost-by-model chart; "
-        "no changes to other pages')."))
-    base_branch: str | None = Field(None, description=(
-        "`dev` for a new task: the coding agent starts from it and pushes a new branch. To make a revision of an earlier task, set "
-        "this to the `branch` in that task's result, copied exactly: the coding agent starts from that branch and adds its commit to "
-        "it. Make a revision when the new work needs, fixes or extends that task's changes; independent work stays on `dev`. Ask the "
-        "user if it is unclear which."))
-    review: bool | None = Field(None, description=(
-        "Whether a reviewer checks the finished work against the criteria in the guide and sends the coding agent back to fix what "
-        "fails. It increases token cost and run time, more for a larger task. Set it yourself: on for larger or riskier changes, off "
-        "for small ones. When you show the plan, say whether it is on and why, and what it does. The user approving the plan "
-        "approves this setting for this plan only: keep it through every version of the plan unless they change it, and don't raise "
-        "it again. A different build is a new plan, so choose and state it again. If the user says they want it on or off for all "
-        "plans going forward, record that with manage_notes, then use it for every plan without recommending, until they say "
-        "otherwise."))
-    new_pages: int | None = Field(None, ge=0, le=3, description=(
-        "Dashboard plans only: how many new pages this plan adds (0 if none), at most 3."))
-    audience: str | None = Field(None, description=(
-        "Dashboard plans only: who uses the dashboard and how. Needed when the plan adds a new page or a new dashboard."))
-    description: str | None = Field(None, max_length=20000, description=(
-        "The whole plan, in markdown, with the sections the guide lists. Saves it, replacing the draft."))
-    discard: bool = Field(False, description="Set to true instead of a plan to delete the saved draft.")
+    plan: CodingAgentPlan | None = Field(None, description=(
+        "The full plan. Every save replaces the previous draft. Leave out when discarding or reading a guide."))
+    discard: bool = Field(False, description=(
+        "Set to true instead of a plan to delete the saved draft, for example when the user drops the task."))
+    guide: Literal["code", "dashboard"] | None = Field(None, description=(
+        "Set this alone, with no plan, to read the guide for a type before writing a plan: it provides the essential information "
+        "for building the plan in collaboration with the user. 'code' changes the ML repo's code (SQLX, Python, notebooks). "
+        "'dashboard' changes the Power BI dashboard or its semantic model."))
 ```
 
 | Sent | Does |
 |---|---|
-| `subagent_type` alone | Returns the guide for that type. Saves nothing. |
-| `description`, with `name`, `goal`, `scope`, `base_branch`, `review` (and for a dashboard `new_pages`) | Saves a new version of the whole plan. |
+| `guide` | Returns the guide for that type. Saves nothing. |
+| `plan` | Saves a new version of the whole plan. |
 | `discard=true` | Deletes the draft. |
 
 The saved draft is attached to the main agent's prompt every turn until the task starts, so a change to one page is made by resending the description with the other pages copied unchanged. The plan window shows the whole plan, and the agent shows the user only what changed.
 
 ### 2b. Validation (the whole list)
 
-- Exactly one of the three actions. A save with a missing envelope field fails naming the missing fields.
-- `goal` and `scope` are not empty; `scope` is at most 500 characters; `description` is at most 20,000. The description cap only stops something outrageous (a three-page plan is a few thousand characters); the draft stays in the prompt until the task starts, so it is also the ceiling on that cost.
-- `new_pages` and `audience` are accepted only when `subagent_type` is `dashboard`, and a dashboard plan must send `new_pages` (0 if none), so the agent has to count. More than 3 fails with "A plan adds at most 3 new pages. Plan the others after this one finishes."
+- **The arguments:** exactly one of `plan`, `discard` or `guide`.
+- **The plan model** (`CodingAgentPlan`, built in step 1.1): `goal`, `scope` and `description` are not empty; `scope` is at most 600 characters; `description` is at most 20,000. The description cap only stops something outrageous (a three-page plan is a few thousand characters); the draft stays in the prompt until the task starts, so it is also the ceiling on that cost.
+- **Dashboard-only fields:** `new_pages` and `audience` are accepted only when `subagent_type` is `dashboard`, and a dashboard plan must send `new_pages` (0 if none), so the agent has to count. More than 3 is refused by the field's range.
 - `base_branch` is checked as today.
 
 Not validated, on purpose: headings, which pages the plan names, card or slicer counts, whether the description matches `new_pages`. The user reads the plan before approving, the coding agent stops with a blocking question if it cannot build the plan, and the diff and the reviewer see what changed.
 
 ### 2c. The stored plan
 
-```python
-class CodingAgentPlan(BaseModel):
-    subagent_type: Literal["code", "dashboard"]
-    name: str
-    goal: str
-    scope: str
-    base_branch: str
-    review: bool
-    new_pages: int | None = None
-    audience: str | None = None
-    description: str
-```
-
-The checks in 2b are its validators, so `start_coding_task` re-validates the stored dict as it does today. Callers read the type inline (`plan.subagent_type == "dashboard"`); no property.
+`CodingAgentPlan` in `app/coding_task_models.py` is one flat model: `subagent_type` (`code` or `dashboard`), `name`, `goal`, `scope`, `base_branch`, `review`, `new_pages`, `audience` and `description`. It carries the field descriptions the main agent sees (the schema of the `plan` argument), and the dashboard-only rule is its validator, so `start_coding_task` re-validates the stored dict as it does today. Callers read the type inline (`plan.subagent_type == "dashboard"`); no property.
 
 ### 2d. What the save does (unchanged from today)
 
@@ -104,15 +70,15 @@ The arguments describe the envelope fields in full (name, goal, scope, base bran
 
 ### 3a. How it is delivered
 
-One markdown file per type, read at startup like `context/page_info/` and returned verbatim by the tool (`context/coding_plan_guides/code.md`, `dashboard.md`). The tool description and the system prompt carry only a pointer. (A new subfolder of `context/`: to confirm.)
+One markdown file per type, read at startup like `context/page_info/` and returned verbatim by the tool (`context/subagent_plan_guides/code.md`, `dashboard.md`). The tool description and the system prompt carry only a pointer. (A new subfolder of `context/`: to confirm.)
 
 ### 3b. `save_coding_plan` description
 
-> Saves a draft of a coding task's plan, to build and change with the user, and start with start_coding_task once the user has approved it. Call it when the user wants a change made to the ML repo's code or to the dashboard. Before writing a plan, call it with only subagent_type ('code' or 'dashboard') to get the guide for that type: it lists the sections to write and what each needs. A plan is for one type, never both: when a request needs both, plan one now and the other after it finishes. A dashboard that needs data that is not built yet, or that should be aggregated first, needs the code plan first: a SQLX change for data before the ML model (anything built by the SQLX), or a change to the notebook that builds the results table for data after it (model results, SHAP values and the like). Read the SQLX or the notebook in the repo to see the schemas (you cannot query those datasets). If the code does not define the table, it has not been added; if it does, ask the user to confirm they have run it. Once they have, plan the dashboard change, which brings the table into the model. Settle the plan by working out what you can yourself and asking the user for the rest. Every save replaces the draft and counts as a new version, so send the whole plan each time. Save a plan before showing it to the user, and save each change before describing it to the user. Set discard to true instead of a plan to delete the draft. Call it only once per round, and never in the same round as start_coding_task or open_pull_request.
+> Saves a draft of a coding task's plan, to build and change with the user, and start with start_coding_task once the user has approved it. Call it when the user wants a change made to the ML repo's code or to the dashboard. Before writing or changing a plan, read the guide for its type unless it is already in your context: call it with only guide set to 'code' or 'dashboard'. It provides the essential information for building the plan in collaboration with the user. A plan is for one type, never both: when a request needs both, plan one now and the other after it finishes. The dashboard guide says how to tell whether a dashboard change needs a code plan first. Settle the plan by working out what you can yourself and asking the user for the rest. Every save replaces the draft and counts as a new version, so send the whole plan each time. Save a plan before showing it to the user, and save each change before describing it to the user. Set discard to true instead of a plan to delete the draft. Call it only once per round, and never in the same round as start_coding_task or open_pull_request.
 
 ### 3c. System prompt
 
-`CODE CHANGES` gains the sentences from revision 3: a plan changes either the ML repo's code or the dashboard, never both; plan one at a time; if a dashboard change needs data that is not built yet, the code plan comes first (SQLX before the ML model, the notebook that builds the results table after it), and the user runs it before the dashboard plan; and, new: plan the pages (what each is for, its cards, charts and slicers), not the model, because the coding agent works out the measures and columns they need. `LARGE REQUESTS` gains one sentence: a dashboard plan with more than one page is a large request: settle the shared things first, then plan one page at a time.
+`CODE CHANGES` changes in two places: "Changes to the ML repo's code **or to the dashboard** run through four tools", and "save_coding_plan: **read the guide for the plan's type**, save a plan, then go over it with the user". Nothing else is added: one type per plan and the code-plan-first rule are in the tool description, the dashboard guide's step 1 says how to tell whether a code plan comes first, and multi-page planning is in the guide's "Large requests" section. `LARGE REQUESTS` is unchanged.
 
 ### 3d. The code guide: what goes in `description`
 
@@ -125,11 +91,13 @@ The sections of a code plan's description. The envelope's own fields (name, goal
 - **Decisions.** Choices the user made that settle something the agent would otherwise guess (which of two approaches, a name, a threshold, what is out of scope), each as an instruction with the user's reason if they gave one. If the user dictated specific logic or SQL, write it here in full. Do not list your own suggestions here.
 - **Suggested code.** Code you suggest as a starting point, each with its purpose, the file it would live in if it belongs to one, and the code. The coding agent treats it as unverified, and the repo wins on any conflict. Do not paste code that already exists in the repo; name the file in Files to imitate instead.
 
-**What the reviewer checks** (the one part of the guide that is not about the description: the criteria cannot live in the `review` argument without the schema carrying both rubrics, and you tell the user what is checked when you show the plan): `CODING_RUBRIC`, copied into the guide.
+**What the reviewer checks** (the one part of the guide that is not about the description: the criteria cannot live in the `review` argument without the schema carrying both rubrics, and you tell the user what is checked when you show the plan): `CODING_RUBRIC`, pasted into the guide (the constant lives in `coding_agent_app/coding_agent.py`, and `tests/test_coding_agent.py` checks the guide holds the same text).
 
 ### 3e. The dashboard guide: what goes in `description`
 
 A dashboard plan is about the pages: what each is for and how it looks. The coding agent works out the model (it finds or builds the measures and columns the pages need), the files to copy and the code. Write the information below in whatever structure fits the request; it is a list of what the plan should hold, not a template.
+
+The guide opens with three sections before the plan's own information: **Where data comes from** (the semantic model in the main agent's context and `get_page_info`; the row-level `agent_safe` tables, whose columns are in context; the SQLX in `definitions/` for data before the ML model and `Notebooks/evaluation/model_evaluation.ipynb` for data after it, read through `get_repo_contents`; aggregations of `agent_safe` are a code plan that adds a notebook in `Notebooks/dashboard_data/` writing to `agent_dashboard`, a note under the decision table), **How much to aggregate** (the coarsest grain that still meets what the pages show), and **Step 1: does the dashboard need new data?** Step 1 checks the user's description against the model, chart by chart, before any design question. It decides with a three-row table: the data is in the model or a measure can calculate it (dashboard plan only); a table the code already builds has it (dashboard plan only, after the user confirms they ran that code); or nothing builds it yet, only at a finer grain, or it needs a join (code plan first, with a `manage_tasks` list: code plan, merge, the user builds the table, dashboard plan, pull request). It uses no data query: the registries are in context, and `LARGE REQUESTS` forbids data queries while planning.
 
 **When they apply, for any dashboard plan**
 - **Constraints.** What must not change ('do not touch page X'). **Decisions.** Choices the user settled, each as an instruction with their reason if they gave one. If the user says the published sandbox dashboard is out of step with the files and asks to publish over it, record that here.
@@ -158,7 +126,7 @@ A dashboard plan is about the pages: what each is for and how it looks. The codi
 
 **Large requests.** A plan adds at most 3 new pages; more is several plans, one after another, so say so and plan the first part now. With more than one page, settle what is shared first (goal, audience, style, slicers that appear on every page), save a task list with `manage_tasks`, then add one page per turn: resend the whole description with the new page added and the others copied unchanged, and show the user only the new page. The user approves once, when the last page is in.
 
-**What the reviewer checks:** `DASHBOARD_RUBRIC` (section 4e), copied into the guide, for the same reason as the code guide's.
+**What the reviewer checks:** `DASHBOARD_RUBRIC` (section 4e), pasted into the guide with a test that keeps the two in step, as for the code guide..
 
 ## 4. The coding agent
 
@@ -215,14 +183,14 @@ The tool set follows the type: only a dashboard task is given `publish_dashboard
 
 Today the reviewer is a `RubricMiddleware` grader (`coding_agent.py` 267): an agent with `show_changes` and the read-only sandbox tools, three iterations, reading `compact_transcript` (the task, the latest todo list, the dry runs, the report). It runs after the patch check. For a dashboard task:
 
-- **A rubric by type.** `DASHBOARD_RUBRIC`, selected where `CODING_RUBRIC` is now (`orchestration.py` 181), and listed in the dashboard guide so the main agent can tell the user what is checked. Criteria, from revision 3's notes: everything the plan describes for each page is present with every card, chart, slicer, bookmark and button it names; every field a visual uses exists in the model or is added by the diff; new model objects have a `///` description and a `formatString`; the report says what each new measure calculates; no bookmark, interaction or slicer sync points at something the diff removed; the diff changes nothing under `dashboard/` the plan did not ask for; the report matches the diff. The path, last-publish and render checks of 4d are code, not criteria.
+- **A rubric by type.** `DASHBOARD_RUBRIC`, selected where `CODING_RUBRIC` is passed now (`orchestration.py`, the `rubric` entry of the run input), and listed in the dashboard guide so the main agent can tell the user what is checked. Criteria, from revision 3's notes: everything the plan describes for each page is present with every card, chart, slicer, bookmark and button it names; every field a visual uses exists in the model or is added by the diff; new model objects have a `///` description and a `formatString`; the report says what each new measure calculates; no bookmark, interaction or slicer sync points at something the diff removed; the diff changes nothing under `dashboard/` the plan did not ask for; the report matches the diff. The path, last-publish and render checks of 4d are code, not criteria.
 - **A tool for the final renders.** `show_renders` returns the image of each changed page's last render, so the reviewer judges the picture against the plan. The last-publish check guarantees those are the renders of the final state. It is a tool, not part of `compact_transcript`, so the reviewer fetches images only when it needs them. `render_dashboard` saves each render under `/tmp/renders/` in the sandbox (outside the repo) named by page folder, and `show_renders` reads them. (How render images are stored for the PR and the user is the open question in `docs/dashboard-editing.md` step 10; this does not decide it.)
 - **A grader prompt per type.** `GRADER_SYSTEM_PROMPT_WITH_TOOLS` becomes one prompt per `subagent_type`, chosen where it is passed to `RubricMiddleware`. The dashboard one names `show_renders`, says the plan's description is prose to read against the diff and the renders, and carries the dashboard criteria. A new type gets its own prompt, rubric and tools the same way, even though only two exist. `compact_transcript` is unchanged.
 
 ## 5. Later (notes, not for now)
 
 - **The refresh tool** (build-plan step 6c) and the dashboard dataset decision (6g, item 5), both needed before the code-plan-then-dashboard-plan flow works without manual steps.
-- **More subagent types.** A researcher (read-only, internet search, a smaller model) would not use the draft, approve, branch and PR flow, so it likely starts through its own path; the `subagent_type` dispatch and the guide mechanism carry over.
+- **More subagent types (decided approach, 2026-11-23).** A researcher (read-only, internet search, a smaller model) is added by making the `plan` argument a discriminated union on `subagent_type`, `CodingAgentPlan | ResearchPlan` (`Field(discriminator="subagent_type")`; `CodingAgentPlan` keeps `Literal["code", "dashboard"]`, which the union supports), not by a new tool. `CodingAgentPlan` is not touched, and `guide` gains the new type. Everything that carries "a plan" keeps working, because the draft, the stored dict and the plan window do not care which variant it is. The cost is mechanical: the call sites that validate or type a plan as `CodingAgentPlan` (about five: `markdown_display_formatting.py` twice, `gateway.py`, `coding_tools.py`, `coding_task_store.py`, `orchestration.py`) move to a `TypeAdapter` or a shared alias; the base-branch check, the PR flow and the path guard run only for the coding variants; and `name`, `goal`, `scope` and `description` can move to a shared base class then, not before. Model reliability with the union is not a concern: the chart tool already takes a union. `save_coding_plan` is already non-strict on Claude, so the union's discriminator is not a grammar problem.
 - **An append argument** for adding a page without resending the others, only if resending the description proves error-prone in the Layer 2 trial.
 
 ## 6. Everything that reads the plan, and what has to change
@@ -235,7 +203,7 @@ Found by searching every file for `CodingAgentPlan`, `plan.<field>`, `["plan"]`,
 |---|---|
 | `CodingAgentPlan` (42-93) | Replace with the flat model in 2c and its validators. `requirements`, `tests`, `constraints`, `decisions`, `files_to_imitate` and `suggested_code` are removed as fields; `SuggestedCode` and `FileToImitate` go with them; their guidance moves into the guides (3d). |
 | `review` field description (85-93) | Shortened (2a); the long text and the rubric move into the guides. |
-| `CODING_RUBRIC` | Stays; listed in the code guide. `DASHBOARD_RUBRIC` is added beside it (4e). |
+| `CODING_RUBRIC` | Moved to `coding_agent_app/coding_agent.py` (only the coding agent app uses it; done 2026-11-23); a pasted copy is in the code guide and a test keeps them in step. `DASHBOARD_RUBRIC` is added beside it (4e), with the same test for the dashboard guide. |
 | `CodingPlanDraft`, `CodingAgentTask` docstrings (96-100, 191) | No change: they hold the plan as a dict. |
 
 ### 6b. The main agent's tools and prompt
@@ -248,10 +216,11 @@ Found by searching every file for `CodingAgentPlan`, `plan.<field>`, `["plan"]`,
 | `coding_tools.py` 152-163 `check_start_coding_task` | No change: `model_validate` of the stored dict validates the flat plan. |
 | `coding_tools.py` 268-269, 284, 312, 345, 356, 460 | No change: they read only `name`, `goal` and `base_branch`, which stay top level. |
 | `orchestrator.py` 108 `ANTHROPIC_NON_STRICT_TOOLS` | Already lists `save_coding_plan`; the flat schema is validated at dispatch. |
-| `orchestrator.py` 112, 455, 636 (round rules), 818 (`SOURCE_LABELS`) | No change. A guide call and the save are separate rounds, which "once per round" allows. |
+| `orchestrator.py` 112, 636 (round rules), 818 (`SOURCE_LABELS`) | No change. A guide call and the save are separate rounds, which "once per round" allows. |
+| `orchestrator.py` `dispatch_other_call` (done 2026-11-24) | `save_coding_plan` has its own branch that injects `guides_read`, the guides this turn's earlier successful calls read; `save_coding_plan` refuses a plan whose type's guide is not in it. Guide results are redacted from history, so the guide must be read again each turn a plan is written. |
 | `orchestrator.py` 938-944 `render_coding_plan` | No change: it dumps the plan into the prompt each turn, and the description cap in `save_coding_plan` already bounds what it dumps. |
 | `context.py` 139-145 `LARGE REQUESTS`, `CODE CHANGES` | The sentences in 3c. |
-| `context/coding_plan_guides/` | New: `code.md` and `dashboard.md` (3d, 3e). |
+| `context/subagent_plan_guides/` | New: `code.md` and `dashboard.md` (3d, 3e). |
 | **Process** | `.claude/rules/orchestrator.md`: orchestrator changes are built and tried in `notebooks/phase3_graph.ipynb` first and ported after. `coding_tools.py` and `context.py` are under that rule. |
 
 ### 6c. Showing the plan to the user: `app/markdown_display_formatting.py`
@@ -272,13 +241,13 @@ The plan reaches `run_coding_task` as a stored dict and is validated at `orchest
 | `orchestration.py` 155-224 `execute_coding_run` | New `subagent_type`. It selects the agent's tools and prompt (via `build_coding_agent`), the rubric (181), the clean-sandbox step (216) and the final checks (221). |
 | `orchestration.py` 29, 139-152 `SKILL_FILES`, `prepare_sandbox` | Uploads skills by a fixed file list per skill. Replace with an upload of the whole `skills/` tree (build-plan step 7), which every task gets. |
 | `coding_agent.py` 59-80 `SANDBOX_SYSTEM_PROMPT` | Stays the code prompt. Add `DASHBOARD_SYSTEM_PROMPT` (4a), chosen by type. |
-| `coding_agent.py` 211-275 `build_coding_agent` | New type. For a dashboard task: the dashboard tools, the dashboard prompt, the grader prompt for the type, `show_renders` in the reviewer's tools and the type passed to `PatchCheckMiddleware`; `list_tables` and `get_table_schema` stay, now able to read `ml_model_results`, which `CODING_AGENT_DATASETS` lacks. |
+| `coding_agent.py` 211-275 `build_coding_agent` | New type. For a dashboard task: the dashboard tools, the dashboard prompt, the grader prompt for the type, `show_renders` in the reviewer's tools and the type passed to `PatchCheckMiddleware`; `list_tables` and `get_table_schema` stay, and now also read `agent_safe` and `agent_dashboard` (`ml_model_results` stays out, `docs/dashboard-editing.md` 6d). |
 | `coding_agent.py` 91-108 `StructuredCodingAgentResponse` | Shared by both types. The `report` description gains the dashboard wording (4c). |
 | `coding_agent.py` 131-193 `PatchCheckMiddleware` | Takes the type. Passes it to `validate_patch`. For a dashboard task, adds the last-publish-and-render check (4d). |
 | `patch.py` 12, 83-127 `BLOCKED_PATTERNS`, `validate_patch(patch_bytes)` | Becomes `validate_patch(patch_bytes, subagent_type)`. Common blocks apply to both. `dashboard/*` is blocked for a code task. For a dashboard task everything outside `dashboard/` is blocked, and inside it `.pbix` and `.pbi/` stay blocked (build-plan step 8). |
 | `apply_and_verify.py` 113-157 `verify_patch_in_clean_sandbox` | A dashboard patch has no SQLX or Python, so it only applies the patch. |
 | `apply_and_verify.py` 161-239 `build_final_checks` | Dashboard branch: the apply check only (no compile, dependency, ruff, pytest or validate); a separate function, called by type. |
-| `coding_agent_app/tools.py`, `config.py` | New: the dashboard tools, `show_renders`, `POWER_BI_RENDER_TARGETS`, the coding agent's Power BI secrets, and `ml_model_results` for the coding agent's datasets (build-plan steps 2 to 6b). The publish and render tools return the hash and the page folder (4d). |
+| `coding_agent_app/tools.py`, `config.py` | New: the dashboard tools, `show_renders`, `POWER_BI_RENDER_TARGETS`, the coding agent's Power BI secrets, and `agent_safe` and `agent_dashboard` for the coding agent's datasets (done 2026-11-24; build-plan steps 2 to 6b). The publish and render tools return the hash and the page folder (4d). |
 | Sandbox snapshot | Node and the pinned report CLI (build-plan step 7). |
 | `coding_agent_app/telemetry/` `schema.py` 34-39, `writer.py` 33-51 | Add `subagent_type`: a `STRING` column in the schema and `plan["subagent_type"]` in the row. BigQuery cannot add a `REQUIRED` column to an existing table, so it is `NULLABLE` there (the writer always sets it), or the table is recreated. |
 
@@ -308,11 +277,11 @@ The plan reaches `run_coding_task` as a stored dict and is validated at `orchest
 ### 6g. Open questions and things the audit turned up
 
 1. **Code plans move to the new shape too** (decided 2026-11-23): one tool, one shape. Today's structured fields become the code guide's sections, and the reviewer sees a text plan. The draft is revised as we build; the regression test of code tasks (6h, step 3b) is the check that this did not break code tasks.
-2. **Where the guides live:** `context/coding_plan_guides/` (decided).
-3. **The caps:** 500 characters for `scope`, 20,000 for `description`. The second only stops something outrageous; the first keeps the summary short. Check both against real plans.
+2. **Where the guides live:** `context/subagent_plan_guides/` (decided).
+3. **The caps:** 600 characters for `scope`, 20,000 for `description`. The second only stops something outrageous; the first keeps the summary short. Check both against real plans.
 4. **`review`'s rubric** lives in the guides, not the schema (decided); the rest of its description stays in the argument.
 5. **Dataset access for dashboard tasks:** leave as is for now (step 6d of `docs/dashboard-editing.md`); revisit if the coding agent cannot check a table it is told to bring in.
-5b. **The main agent plans a data change from the repo, not from the data.** It cannot query the pre-model datasets, but it can read the SQLX (or the notebook for data after the model) with its code tools and see the schemas, which is enough to plan; the coding agent checks real tables with its own dry runs and, once 6d is decided, `ml_model_results`. It also cannot see whether the user has built the table, so it relies on the user saying so.
+5b. **The main agent plans a data change from the repo, not from the data.** It cannot query the pre-model datasets, but it can read the SQLX (or the notebook for data after the model) with its code tools and see the schemas, which is enough to plan; the coding agent checks real tables with its own dry runs and, for `agent_safe` and `agent_dashboard`, its table listings. It also cannot see whether the user has built the table, so it relies on the user saying so.
 6. **Page info for the coding agent** is a separate idea (step 9d of `docs/dashboard-editing.md`).
 7. **The dashboard tools do not exist yet** (build-plan steps 2 to 6b). The main agent side (6a to 6c) can be built and tried first.
 

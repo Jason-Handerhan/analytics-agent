@@ -1,8 +1,10 @@
 # Dashboard planning: draft for review (2026-11-20, revision 3)
 
-**Status: draft, nothing built.** Fold into `docs/coding-agent.md` and `docs/dashboard-editing.md` once approved, then delete this file.
+**Superseded by `docs/dashboard-planning.md` (the flat plan). Kept for reference only; do not build from this file.**
 
-**Reconstructed 2026-11-23.** This file was overwritten by revision 4 (now `docs/dashboard-planning-draft-v2.md`). It was untracked, so git could not restore it. It is rebuilt from the session's reads of it with every later edit applied; wording may differ from the lost original in places.
+**Status: draft, nothing built.**
+
+**Reconstructed 2026-11-23.** This file was overwritten by revision 4 (now `docs/dashboard-planning.md`). It was untracked, so git could not restore it. It is rebuilt from the session's reads of it with every later edit applied; wording may differ from the lost original in places.
 
 **Decided so far**
 - A plan is for `code` or for the `dashboard`, exactly one. A request that needs both is done one plan at a time.

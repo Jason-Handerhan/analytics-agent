@@ -94,13 +94,14 @@ get_table_schema.handle_tool_error = True
 # --- dry_run_sql (built per run, because it reads the run's sandbox) ------------------------------------
 
 DRY_RUN_SQL_DESCRIPTION = """Check with BigQuery that the SQL in a file is valid, and see the columns and types it would return,
-without running it. Nothing executes and no rows come back. Pass a file that the sqlx skill's compose_query.py wrote
-(/skills/sqlx/SKILL.md): SQL of a table you changed only validates once that script has built it."""
+without running it. Nothing executes and no rows come back. Pass a file of SQL. For a SQLX table you changed, use the file
+the sqlx skill's compose_query.py wrote (/skills/sqlx/SKILL.md), since SQLX only validates once that script has built it.
+For a query in a notebook, write the query to a .sql file and pass that."""
 
 
 class DryRunSqlArgs(BaseModel):
-    sql_file: str = Field(description="Path of a composed SQL file printed by compose_query.py, "
-                                      "such as /tmp/composed/final_ml_features_table.sql.")
+    sql_file: str = Field(description="Path of a SQL file: a composed file printed by compose_query.py, such as "
+                                      "/tmp/composed/final_ml_features_table.sql, or a .sql file holding a notebook's query.")
 
 
 def build_dry_run_sql(sandbox):

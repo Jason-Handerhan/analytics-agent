@@ -52,5 +52,5 @@
   "Notebooks/base_models/train_xgboost_classifier.ipynb": "Notebook: trains/tunes the XGBoost classifier base model",
   "Notebooks/ensemble/ensemble.ipynb": "Notebook: RRF ensemble weight optimization",
   "Notebooks/evaluation/model_evaluation.ipynb": "Computes final evaluation metrics (Recall/NDCG/Precision/F1@5) and SHAP feature importance per model/split, writes results back to BigQuery for the dashboard",
-  "Notebooks/evaluation/financial_impact.ipynb": "Translates model performance into projected financial impact (profit lift by driver), writes results back to BigQuery for the dashboard"
+  "Notebooks/evaluation/financial_impact.ipynb": "Calculates and plots each model's financial impact (profit lift by driver); writes nothing to BigQuery"
 }

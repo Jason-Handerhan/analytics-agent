@@ -190,8 +190,8 @@ model's data source there. Everything after that is the agent's.
   only". Accepted for a portfolio project; a real deployment would buy a capacity.
 - **Refresh for new data-bearing objects** (about 8 a day on shared capacity; not tested). A new table has no data in
   Agent Sandbox until its model is refreshed; step 6c plans the tool, after two unknowns are tested.
-- **`ml_model_results` is not in `CODING_AGENT_DATASETS`.** The dashboard's tables live there, so the coding agent's
-  `list_tables` and `get_table_schema` cannot confirm a table exists before it adds one. Decided to settle it in step 6d.
+- **`ml_model_results` is not in `CODING_AGENT_DATASETS`** (decided, step 6d). The coding agent's `list_tables` and
+  `get_table_schema` cannot confirm a table there exists; for those the plan and `model_evaluation.ipynb` are the source.
 - **Field-parameter tables** have no BigQuery source (they are calculated); the new-table rule does not cover them.
 - **A new page's description.** The text is an HTML measure (for example `HTML_Model_Evaluation_Info`) inside the
   model's measures table file, shown on the page's Info page. The main agent reads it with `get_repo_contents`
@@ -266,10 +266,11 @@ One step at a time, checked in after each; each ships with Layer 1 tests where s
    `coding_agent_app/skills/semantic-model/SKILL.md`**: replace the no-tool fallback with a call to this tool, and add
    the trigger to this tool's description. Also add the refresh to step 7 of the report skill's `authoring.md`
    Quick Start Workflow (after publish, before render).
-6d. **Dataset access for dashboard tasks (decide).** `CODING_AGENT_DATASETS` (`instacart`, `building_blocks`,
-   `ml_model_feature_table`) does not include `ml_model_results`, where the dashboard's tables live, so a dashboard task cannot
-   check that a table it is told to bring in exists. Either give the coding agent `ml_model_results`, or a new dataset for
-   dashboard-bound tables, with guidance on when to use which. Needed before the code-plan-then-dashboard-plan flow.
+6d. **Dataset access for dashboard tasks (decided 2026-11-24).** `CODING_AGENT_DATASETS` gains `agent_safe` and `agent_dashboard`
+   (Data Viewer for the coding agent's account on both). Aggregations of `agent_safe` for the dashboard are notebooks in
+   `Notebooks/dashboard_data/` that aggregate with SQL in BigQuery and write to `agent_dashboard`, a dataset `agent-sa` cannot read.
+   `ml_model_results` stays out (everything in it is in the model or `agent_safe`). To confirm: that the Power BI dataset's
+   BigQuery connection can read `agent_dashboard`.
 7. **The sandbox snapshot and skill.** The report CLI for its offline lookups (`catalog`, `formatting`, `expr`,
    `theme`); the Microsoft report skill (MIT), built from its own structure by `scripts/build_pbi_skills.py`: a `SKILL.md` dispatcher
    with three modes (planning, design, authoring; Microsoft's management mode is dropped because publishing is a step in the
@@ -291,11 +292,10 @@ One step at a time, checked in after each; each ships with Layer 1 tests where s
     `planning-part-02.md` are not in the coding agent's skill: their interview and approval gate are the main agent's job,
     and the coding agent receives the approved plan. The report skill's `design.md` tells the coding agent that a vague
     request (audience, purpose, page count or desired filters/slicers missing) ends with a blocking question, so the main agent's
-    plan must supply those four. The plan's dashboard section (draft, user's template): cards at the top of the page; charts
-    listed in priority order (top left is highest); page slicers above the cards; colors and style default to matching the
-    existing dashboard; field parameters; bookmarks; buttons. The main agent's guidance sets placement defaults for these.
+    plan must supply those four. The plan format and the main agent's dashboard guidance (what each plan covers, layout and
+    style defaults, field parameters, bookmarks, buttons) are in `docs/dashboard-planning.md`, section 3.
 9c. **Dashboard reviewer (later).** A second reviewer rubric, selected by the plan's kind, for the judgment criteria the code
-    cannot check (a draft is in `docs/dashboard-planning-draft.md`, section 5), and possibly the final render of each changed page
+    cannot check (the criteria are in `docs/dashboard-planning.md`, section 4e), and possibly the final render of each changed page
     as reviewer input. The path, validate and render-after-last-edit checks are deterministic code, not reviewer criteria.
 9d. **Page info for the coding agent (idea, not designed).** `get_page_info`'s per-page text lives in display measures in the
     model, so the coding agent can already read it; it also goes stale when the coding agent changes a page. To think through:
