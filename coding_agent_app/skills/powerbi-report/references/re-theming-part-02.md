@@ -293,10 +293,6 @@ For every visual with explicit formatting, verify foreground/background contrast
 - Chart series colors (`dataPoint.fill` or `dataColors`) must be saturated/vivid —
   dark/muted colors blend into dark backgrounds making bars/lines invisible
 
-#### Step 4: Validate and verify
-
-Follow the standard edit, `validate_dashboard`, `publish_dashboard`, `render_dashboard` loop.
-
 ### Preventive Authoring: Theme-Adaptive Visuals
 
 To minimize re-theming effort when building new reports:

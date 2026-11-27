@@ -16,11 +16,9 @@ Power BI resolves formatting in a layered cascade (highest priority wins):
 | 5 | Custom theme (visualStyles - type-specific; dataColors; textClasses; style presets) | `theme.json → visualStyles[type]["*"][obj]` | Theme encoding | theming.md (see `theming.md`, section `6-visual-styles-visualstyles`) |
 | 6 | Custom theme (visualStyles - wildcard) | `theme.json → visualStyles["*"]["*"][obj]` | Theme encoding | theming.md (see `theming.md`, section `6-visual-styles-visualstyles`) |
 | 7 | Base theme | `SharedResources/BaseThemes/` | Theme encoding | theming.md |
-| 8 (lowest) | System defaults | Built into PBI Desktop | — | No skill-side file; verify rendered defaults with `render_dashboard` |
+| 8 (lowest) | System defaults | Built into PBI Desktop | — | No skill-side file |
 
 A property set at layer 2 overrides the same property at layers 3–8.
-When a cascade result matters visually, verify it with
-`render_dashboard`.
 
 > **⚠️ Theme changes require sweeping all cascade layers.** The theme file
 > only controls layers 5–6. Hardcoded colors in `page.json` (layer 4) and

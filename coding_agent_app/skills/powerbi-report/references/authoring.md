@@ -1,18 +1,6 @@
 
 # Authoring Mode: Power BI Report (PBIR/PBIP)
 
-> **AUTHORING COMPLETION GATE — MANDATORY FOR REPORT EDITS**
->
-> **Validation and rendering are paired. A passing `validate_dashboard` is never task completion.** Any task that creates or modifies rendered report content is incomplete until:
->
-> 1. `validate_dashboard` passes.
-> 2. The dashboard is published with `publish_dashboard`, and the last publish is the final state of the files.
-> 3. Every affected page is rendered with `render_dashboard` after that publish.
-> 4. The renders are reviewed using `screenshot-review.md`.
-> 5. Visible issues are fixed and the `validate_dashboard`, `publish_dashboard`, `render_dashboard` and review loop is repeated.
->
-> Render each page changed by page, visual, filter, slicer, bookmark or layout edits, and every page for report-wide changes such as themes or global formatting. If a page cannot be rendered or reviewed, say so in your report instead of claiming completion.
-
 This mode enables reading, editing, and creation of Power BI report
 definition files in the **PBIR (Power BI Report)** format used by **PBIP
 (Power BI Project)** files.
@@ -22,9 +10,6 @@ definition files in the **PBIR (Power BI Report)** format used by **PBIP
 ### MUST
 
 - Use this mode only for concrete PBIR/PBIP report-file mechanics such as pages, visuals, filters, slicers, navigation, bookmarks, themes, formatting, validation, publishing, and renders.
-- Validate PBIR with `validate_dashboard` after each logical batch. Every successful
-  validation must continue into `publish_dashboard`, a fresh render and a review; never stop
-  at the validation result.
 - Use CLI capability lookup before writing visual roles, formatting objects, enum values, selectors, or expression encodings.
 - When editing an existing dashboard, copy the neighbors unless the plan says otherwise: start a new visual from an existing visual of the same type and keep its formatting, sizing and placement. For a new dashboard, follow the sizing formulas unless the plan gives you a reference to copy.
 - Leave `definition.pbir` (the publish tool sets its model binding), `.pbi/` and the `.pbix` file alone.
@@ -48,9 +33,8 @@ definition files in the **PBIR (Power BI Report)** format used by **PBIP
 3. **Route by intent** → use **Topic Files and Examples** below to pick the relevant guide.
 4. **Use CLI metadata** → see `powerbi-report-author-cli.md` for exact visual roles, formatting objects, property names, enum values and selector requirements; do not infer these from memory.
 5. **Check common pitfalls** → read `pitfalls.md` before editing when the change touches visuals, bindings, filters, formatting, layout or rendered output.
-6. **Validate** → run `validate_dashboard` after every logical batch of PBIR changes, then always continue to step 7.
-7. **Publish and render** → publish with `publish_dashboard`, render every affected page with `render_dashboard`, and review the renders using `screenshot-review.md`. Do not proceed until both validation and visual review pass. For dashboard builds, page scaffolding is not completion: each requested page needs data-bound visuals.
-8. **Finish** → the last publish must be the final state of the files, with every changed page rendered after it. Give the user a concise summary of what was done and any issues (major and minor).
+6. **Review** → review each render using `screenshot-review.md`. For dashboard builds, page scaffolding is not completion: each requested page needs data-bound visuals.
+7. **Finish** → give a concise summary of what was done and any issues (major and minor).
 
 ## Deleting a page, visual or bookmark
 

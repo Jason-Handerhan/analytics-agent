@@ -23,31 +23,28 @@ A separate AI assistant, the **analytics agent**, answers users' questions about
 
 ## Modify the model
 
-1. Find what exists: list the table files, search them for the object, and query the published model's metadata with `run_dax_query` (`INFO.VIEW.TABLES()`, `INFO.VIEW.COLUMNS()`, `INFO.VIEW.MEASURES()`, `INFO.VIEW.RELATIONSHIPS()`). Those return names, descriptions and format strings but not a measure's DAX, which you read from the file. Compare the two: if the published model does not match the files (an object in one and not the other), end with a blocking question; publish over it only if the plan says the user knows about the mismatch and asked you to.
+1. Find what exists, in the TMDL files under `dashboard/pbip` (list the table files and search them for the object) and in the published model (`run_dax_query` with `INFO.VIEW.TABLES()`, `INFO.VIEW.COLUMNS()`, `INFO.VIEW.MEASURES()`, `INFO.VIEW.RELATIONSHIPS()`, which return names, descriptions and format strings but not a measure's DAX). If you notice a significant difference between them, end with a blocking question, unless the plan says to publish over it. Write what you learn to `/tmp/model-inventory.md`, adding to it if it already exists.
 2. Read the reference you need (table below) before writing TMDL.
 3. Plan the change and check for a duplicate or a naming conflict.
 4. Edit in this order: columns, then relationships, then measures. Measures go before columns inside a table file.
-5. Test a draft measure before you write it into the file: `run_dax_query` with `DEFINE MEASURE '<table>'[<name>] = <expression> EVALUATE ROW("v", [<name>])`. After a publish, query the real measure.
+5. To test a draft measure, use `run_dax_query` with `DEFINE MEASURE '<table>'[<name>] = <expression> EVALUATE ROW("v", [<name>])`.
 
 ## Add or change a table or column
 
-A new table or column has no rows in the published model until the model is refreshed. Measures and visuals need no refresh.
+A new table or column has no rows in the published model until the model is refreshed. Do this every time you add one.
 
-1. Make the TMDL change. For a new table, copy the `partition ... = m` block of an existing BigQuery-backed table such as `evaluation_metrics.tmdl`, changing only the schema and table names.
+1. Make the TMDL change. For a new BigQuery table, copy the `partition ... = m` block of an existing BigQuery-backed table such as `evaluation_metrics.tmdl`, changing only the schema and table names.
 2. Publish with `publish_dashboard`.
-3. Refresh the model. There is no refresh tool yet: go to step 4, and if it finds no rows, end with a blocking question asking the user to refresh the model and resubmit.
-4. Check the data arrived with `run_dax_query`, for example `EVALUATE ROW("rows", COUNTROWS('<table>'))` and a sample of the new column. Build visuals on it only once it returns rows.
+3. Refresh the model with `refresh_dashboard_model`.
+4. Check the data arrived with `run_dax_query`, for example `EVALUATE ROW("rows", COUNTROWS('<table>'))` and a sample of the new column. Build visuals on it only once it returns rows. If the refresh fails or no rows arrive, end with a blocking question that gives the reason.
 
 ## Author a field parameter
 
 Read `references/field-parameters.md` and follow its create, edit or rename workflow. Create one only if the plan asks for it.
 
-## Saving and validating
+## Check your TMDL
 
-1. Check your own TMDL text first: tab indentation, a `///` description, a `formatString`, single quotes around names with spaces.
-2. If the change also touches report files, for example a visual that uses the new measure, run `validate_dashboard` before you publish. It checks the report files only. It does not read TMDL, so it cannot catch a mistake in a model file.
-3. Publish with `publish_dashboard`. The service checks the model's TMDL when it receives it, and a malformed file is rejected with the reason.
-4. After the publish, confirm the measure with `INFO.VIEW.MEASURES()` (its `State` should be `Valid`) and by evaluating it, and use `render_dashboard` if a visual depends on it.
+Check your own TMDL text: tab indentation, a `///` description, a `formatString`, single quotes around names with spaces. `validate_dashboard` checks report files only and does not read TMDL. The model's TMDL is checked at publish, and a malformed file is rejected with the reason.
 
 ## References
 

@@ -222,7 +222,7 @@ the ID can't come from `POST /ask`.
   turn does at its start. Powers the coding task status display and the app's finish trigger (`docs/coding-agent.md`,
   "Telling the user when a task finishes").
 - `GET /conversations/{conversation_id}/coding-plan` — no body. Returns `CodingPlanResponse`: the saved draft plan
-  (read with `fetch_session_memory`) as markdown (`render_plan_markdown`, every section the plan has) rendered to html by `render_answer_html`,
+  (read with `fetch_session_memory`) as markdown (`render_plan_markdown`: name, type, goal, scope, audience for a dashboard plan, base branch and reviewer, then the description) rendered to html by `render_answer_html`,
   or a short "No coding plan is saved" message when there is no draft (never saved, discarded, or cleared when its task started).
 - `GET /conversations/{conversation_id}/task-plan` — no body. Returns `TaskPlanResponse`: the saved task plan from
   `fetch_session_memory` as markdown (`render_task_plan_markdown`: a legend of the status emoji, the scope, then each task numbered with its emoji)

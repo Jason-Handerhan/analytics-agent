@@ -132,7 +132,7 @@ The guide opens with three sections before the plan's own information: **Where d
 
 ### 4a. A system prompt per type
 
-`SANDBOX_SYSTEM_PROMPT` stays as the code prompt and a new `DASHBOARD_SYSTEM_PROMPT` is added; `build_coding_agent` picks one by `subagent_type`. The dashboard prompt carries only what the skills do not say. `planning.md` already holds the vagueness checks, the inventory, the check that every named page, measure and field exists or can be built, the blocking-question rule and the todo list; `authoring.md` holds the validate, publish and render loop, the last-publish rule, "copy the neighbors", and the report; `layout.md` the geometry; `semantic-model` the rule to test a measure with `DEFINE MEASURE`. What is left:
+`SANDBOX_SYSTEM_PROMPT` stays as the code prompt and a new `DASHBOARD_SYSTEM_PROMPT` is added; `build_coding_agent` picks one by `subagent_type`. The dashboard prompt carries only what the skills do not say. `planning.md` already holds the vagueness checks, the inventory, the check that every named page, measure and field exists or can be built, the blocking-question rule and the todo list; `authoring.md` holds "copy the neighbors" and the report (the workflow of when to validate, publish and render, and the completion gate, are stated once, in this prompt, and no skill refers to them: build this prompt before any dashboard task runs); `layout.md` the geometry; `semantic-model` the rule to test a measure with `DEFINE MEASURE`. What is left:
 
 ```
 You work on the Power BI dashboard in {WORK_DIR}/dashboard/pbip: the report (the folder ending in .Report) and the semantic model
@@ -141,6 +141,25 @@ You work on the Power BI dashboard in {WORK_DIR}/dashboard/pbip: the report (the
 change only the model). /skills/project-background explains the project's own terms (champion model, Recall@5): read it when a plan
 uses a term you do not know. Put scratch files in /tmp, never in the repo, and keep there any note you will need later in a long task:
 your context can be summarized, files cannot. Re-read them before the step that needs them.
+
+DASHBOARD WORKFLOW
+Make changes in the files under `dashboard/pbip`.
+Cheap checks, as you work: run `validate_dashboard` after each logical batch of edits. Use `run_dax_query` to test a draft measure
+before you write it, and to check values in the published model.
+Expensive checks, at checkpoints: when a page or a related set of model changes is complete, publish with `publish_dashboard`, then
+confirm what changed: render the changed pages with `render_dashboard`, and check changed measures with `run_dax_query`.
+Don't render a page again if nothing affecting it changed.
+
+COMPLETION GATE
+A dashboard change is incomplete until:
+1. `validate_dashboard` passes.
+2. The dashboard is published with `publish_dashboard`, and the last publish is the final state of the files.
+3. Each new or changed measure shows `State` `Valid` in `INFO.VIEW.MEASURES()` and returns the values you expect.
+4. Every impacted page has been rendered with `render_dashboard` since the last change that affects it.
+5. Each bookmark you added or changed has been rendered and shows what it should. If you added, removed or moved a visual that existing
+bookmarks show or hide, check those bookmarks too.
+6. The renders are reviewed, and visible issues are fixed.
+If something cannot be checked, say so in your report instead of claiming completion.
 
 To see what a table the plan needs holds, and whether it exists, read the code that builds it: the SQLX under `definitions/`
 (`sources_*.sqlx`, `staging/`, `silver/`, `gold/`) for data before the ML model, and for data after it (model results, SHAP values and
@@ -152,7 +171,7 @@ If the plan needs data that is not in BigQuery yet, or an error or missing capab
 stop with blocking_questions as soon as you notice. Do not ship a weaker substitute that quietly drops a requirement.
 ```
 
-The two sentences of the second paragraph are the only rules not already in a skill, and the file-level duplication in revision 3's four sections (BEFORE YOU BUILD, LAYOUT, HOW YOU WORK, CHECKING YOUR WORK) is gone. Because the guide describes the plan in prose, the old stop rule's "has pages and does not say who it is for" is `planning.md` step 1 alone.
+The workflow, the completion gate and the two paragraphs about data and blocking questions are the only rules not already in a skill, and the file-level duplication in revision 3's four sections (BEFORE YOU BUILD, LAYOUT, HOW YOU WORK, CHECKING YOUR WORK) is gone. Because the guide describes the plan in prose, the old stop rule's "has pages and does not say who it is for" is `planning.md` step 1 alone.
 
 ### 4b. `TASK_PREAMBLE` for a dashboard task
 
@@ -169,7 +188,7 @@ These run in `PatchCheckMiddleware.aafter_agent` and the final checks, not in th
 | Check | How |
 |---|---|
 | **Path guard.** A dashboard task's patch may change only files under `dashboard/`; a code task's may not touch `dashboard/`. | `validate_patch(patch_bytes, subagent_type)`. A violation fails the task, like today's blocked paths. |
-| **The last publish is the final state, and every changed page was rendered after it.** | `publish_dashboard` returns a content hash of the files it sent (the same function that reads the report and model folders out of the sandbox). The middleware finds the last successful publish among the `ToolMessage`s, hashes the sandbox's dashboard files the same way, and compares. A difference is a fixable violation: "You changed the dashboard after your last publish: publish it, then render the changed pages." It also finds the `render_dashboard` results after that publish and requires one for each changed page. Changed pages come from the patch (the page folders under `.Report/definition/pages/`), and the render result must name the page folder it rendered, so the match is by folder, never by display name. Both are requirements on the tools when they are built. |
+| **The last publish is the final state, and every changed page was rendered in its final state.** | `publish_dashboard` returns a content hash of the files it sent (the same function that reads the report and model folders out of the sandbox), with a hash for each page folder and one for the report-wide files (the report settings and theme). The middleware finds the last successful publish among the `ToolMessage`s, hashes the sandbox's dashboard files the same way, and compares. A difference is a fixable violation: "You changed the dashboard after your last publish: publish it, then render the changed pages." For each changed page, the middleware also takes the page's last successful `render_dashboard` result and the publish before it, and compares that publish's page and report-wide hashes with the final files. A page with no render, or changed since its last render, is a fixable violation: "These pages changed after their last render: <pages>. Render them." For each bookmark file the diff adds or changes, it also requires a render with that bookmark's id since the file last changed. Changed pages come from the patch (the page folders under `.Report/definition/pages/`), and the render result must name the page folder it rendered, so the match is by folder, never by display name. These are requirements on the tools when they are built. |
 
 The final `validate_dashboard` check of revision 3 is dropped. `publish_dashboard` runs the same validation as `validate_dashboard` and refuses on any error (`docs/dashboard-editing.md`, step 5), and the check above guarantees the last publish is the final state of the files, so a passing last publish already means the final files validated. The service checks the model's TMDL at the same publish, which a local check could not do. For a dashboard the clean-sandbox step only confirms the patch applies. A separate local schema check would repeat the publish check on the same bytes.
 
@@ -177,7 +196,7 @@ The final `validate_dashboard` check of revision 3 is dropped. `publish_dashboar
 
 The app does not publish the final version itself: publishing is how the agent sees the result, and a final publish it never rendered would ship unseen. Hashes catch an edit after the last publish without relying on timestamps; both normalize line endings the same way. No check compares the pages a diff changed with the pages the plan names: names are free text, the agent may choose a better page name, and a failure would waste a whole task. The diff, the reviewer and the PR review cover that.
 
-The tool set follows the type: only a dashboard task is given `publish_dashboard`, `render_dashboard`, `validate_dashboard` and `run_dax_query`. A future type (a read-only researcher on a smaller model) adds its own tool set, prompt, rubric and model the same way.
+The tool set follows the type: only a dashboard task is given `publish_dashboard`, `refresh_dashboard_model`, `render_dashboard`, `validate_dashboard` and `run_dax_query`. A future type (a read-only researcher on a smaller model) adds its own tool set, prompt, rubric and model the same way.
 
 ### 4e. The reviewer
 
@@ -189,7 +208,6 @@ Today the reviewer is a `RubricMiddleware` grader (`coding_agent.py` 267): an ag
 
 ## 5. Later (notes, not for now)
 
-- **The refresh tool** (build-plan step 6c) and the dashboard dataset decision (6g, item 5), both needed before the code-plan-then-dashboard-plan flow works without manual steps.
 - **More subagent types (decided approach, 2026-11-23).** A researcher (read-only, internet search, a smaller model) is added by making the `plan` argument a discriminated union on `subagent_type`, `CodingAgentPlan | ResearchPlan` (`Field(discriminator="subagent_type")`; `CodingAgentPlan` keeps `Literal["code", "dashboard"]`, which the union supports), not by a new tool. `CodingAgentPlan` is not touched, and `guide` gains the new type. Everything that carries "a plan" keeps working, because the draft, the stored dict and the plan window do not care which variant it is. The cost is mechanical: the call sites that validate or type a plan as `CodingAgentPlan` (about five: `markdown_display_formatting.py` twice, `gateway.py`, `coding_tools.py`, `coding_task_store.py`, `orchestration.py`) move to a `TypeAdapter` or a shared alias; the base-branch check, the PR flow and the path guard run only for the coding variants; and `name`, `goal`, `scope` and `description` can move to a shared base class then, not before. Model reliability with the union is not a concern: the chart tool already takes a union. `save_coding_plan` is already non-strict on Claude, so the union's discriminator is not a grammar problem.
 - **An append argument** for adding a page without resending the others, only if resending the description proves error-prone in the Layer 2 trial.
 
@@ -227,9 +245,9 @@ Found by searching every file for `CodingAgentPlan`, `plan.<field>`, `["plan"]`,
 
 | Where | Change |
 |---|---|
-| 187-236 `PlanMarkdown`, `render_plan_markdown` | Header lines (name, scope, audience, new pages, reviewer), then the description as written. No per-type rendering. Used by `gateway.py` 590 (the plan window), so that endpoint needs no change. |
+| 187-236 `PlanMarkdown`, `render_plan_markdown` | Header lines (name, scope, audience, new pages, reviewer), then the description as written. No per-type rendering. Used by `gateway.py` 590 (the plan window), so that endpoint needs no change. **Done 2026-11-24:** title, type, goal, scope, audience (dashboard only), base branch and reviewer, then the description; `PlanMarkdown` kept, `new_pages` not shown. |
 | 167-180 `coding_approval_message` | No change: name and goal only. |
-| 262-312 `build_pull_request_body`, line 272 | Reads `task["plan"]["requirements"]`. Now includes the scope and the description. |
+| 262-312 `build_pull_request_body`, line 272 | Reads `task["plan"]["requirements"]`. Now includes the scope and the description. **Done 2026-11-24:** the summary holds goal, scope, type and outcome; the description follows in a collapsed "Plan details" block; the Requirements section is gone. |
 
 ### 6d. The coding agent app: it has to know the type
 
@@ -237,7 +255,7 @@ The plan reaches `run_coding_task` as a stored dict and is validated at `orchest
 
 | Where | Change |
 |---|---|
-| `orchestration.py` 37-38 `TASK_PREAMBLE`, 252 | One preamble per type (4b). The text sent to the agent excludes `review` and `base_branch`. |
+| `orchestration.py` 37-38 `TASK_PREAMBLE`, 252 | One preamble per type (4b). The text sent to the agent excludes `review` and `base_branch`. **Done 2026-11-24 for the shared text:** a reworded preamble, and the plan sent as name, type, goal, scope and audience lines, then the description (no JSON, no `new_pages`). One preamble per type waits for the dashboard path. |
 | `orchestration.py` 155-224 `execute_coding_run` | New `subagent_type`. It selects the agent's tools and prompt (via `build_coding_agent`), the rubric (181), the clean-sandbox step (216) and the final checks (221). |
 | `orchestration.py` 29, 139-152 `SKILL_FILES`, `prepare_sandbox` | Uploads skills by a fixed file list per skill. Replace with an upload of the whole `skills/` tree (build-plan step 7), which every task gets. |
 | `coding_agent.py` 59-80 `SANDBOX_SYSTEM_PROMPT` | Stays the code prompt. Add `DASHBOARD_SYSTEM_PROMPT` (4a), chosen by type. |
@@ -249,17 +267,17 @@ The plan reaches `run_coding_task` as a stored dict and is validated at `orchest
 | `apply_and_verify.py` 161-239 `build_final_checks` | Dashboard branch: the apply check only (no compile, dependency, ruff, pytest or validate); a separate function, called by type. |
 | `coding_agent_app/tools.py`, `config.py` | New: the dashboard tools, `show_renders`, `POWER_BI_RENDER_TARGETS`, the coding agent's Power BI secrets, and `agent_safe` and `agent_dashboard` for the coding agent's datasets (done 2026-11-24; build-plan steps 2 to 6b). The publish and render tools return the hash and the page folder (4d). |
 | Sandbox snapshot | Node and the pinned report CLI (build-plan step 7). |
-| `coding_agent_app/telemetry/` `schema.py` 34-39, `writer.py` 33-51 | Add `subagent_type`: a `STRING` column in the schema and `plan["subagent_type"]` in the row. BigQuery cannot add a `REQUIRED` column to an existing table, so it is `NULLABLE` there (the writer always sets it), or the table is recreated. |
+| `coding_agent_app/telemetry/` `schema.py` 34-39, `writer.py` 33-51 | Add `subagent_type`: a `STRING` column in the schema and `plan["subagent_type"]` in the row. BigQuery cannot add a `REQUIRED` column to an existing table, so it is `NULLABLE` there (the writer always sets it), or the table is recreated. **Done 2026-11-24:** `subagent_type` is in the schema and the row, and the live table has the column. |
 
 ### 6e. Tests and scripts
 
 | File | Change |
 |---|---|
-| `tests/test_orchestrator.py` 509-520 | Plan constructors use the flat fields. Add a plan-view case. |
-| `tests/test_coding_tools.py` 23, 48-58 | The stored-task fixture uses the flat plan; `test_build_pull_request_body` covers the description. |
+| `tests/test_orchestrator.py` 509-520 | Plan constructors use the flat fields. Add a plan-view case. **Done.** |
+| `tests/test_coding_tools.py` 23, 48-58 | The stored-task fixture uses the flat plan; `test_build_pull_request_body` covers the description. **Done.** |
 | `tests/test_patch.py` (6 calls) | `validate_patch` gains the type argument. Add: a code patch touching `dashboard/` fails, a dashboard patch touching anything else fails, `.pbix` inside `dashboard/` fails. |
 | `tests/test_apply_and_verify.py` | A dashboard branch of the final checks. |
-| `scripts/coding_agent_tasks.py` | Ten plans use `requirements=` and `tests=`: rewrite each as a `description`. |
+| `scripts/coding_agent_tasks.py` | Ten plans use `requirements=` and `tests=`: rewrite each as a `description`. **Done 2026-11-24:** each is a flat plan whose description comes from a local `plan_description` helper; the goals are unchanged so the regression test (3b) compares like with like. |
 | Notebooks | `notebooks/phase6_coding_agent.ipynb` is parked and keeps its own copy. |
 
 **New tests, lean:** the validators (one action, `new_pages` range and dashboard-only, the length caps, guide mode); the path guard by type; the last-publish-and-render check as a pure function over messages and hashes. The guides are prose: Layer 2, a trial of the main agent writing an add, an edit and a delete plan from the dashboard guide and a code plan from the code guide.

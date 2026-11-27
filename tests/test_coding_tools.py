@@ -24,7 +24,8 @@ def make_task(outcome=None, branch=None):
             "branch": branch, "commit": "abc", "dev_moved": False,
             "token_usage": {"agent": {"input": 1}}, "todos": [{"content": "step", "status": "done"}],
         }
-    return {"task_id": "t1", "plan": {"name": "Aisle pacing", "goal": "g", "base_branch": "dev", "requirements": ["Add the column", "Expose it"]},
+    return {"task_id": "t1", "plan": {"name": "Aisle pacing", "goal": "g", "scope": "One column.", "subagent_type": "code", "base_branch": "dev",
+                     "description": "Add the column."},
             "status": "completed" if outcome else "running", "progress": "Working...", "coding_agent_result": result,
             "completed_at": datetime(2026, 11, 10, tzinfo=timezone.utc) if outcome else None, "pr_url": None}
 
@@ -57,7 +58,8 @@ def test_build_pull_request_body():
     assert "**Outcome:** failed, 0 of 1 checks passed" in body and "- FAILED: compile" in body and "error at line 4" in body
     assert "`definitions/a.sqlx` (+3 -1)" in body and "- 2. bad: missing column" in body
     assert "## Coding agent's report" in body and "Opened from coding task `t1`" in body
-    assert "## Requirements\n1. Add the column\n2. Expose it" in body
+    assert "**Scope:** One column." in body and "**Type:** code" in body
+    assert "<summary>Plan details</summary>\n\nAdd the column.\n\n</details>" in body
     task["coding_agent_result"]["review"]["ran"] = False
     assert "## Reviewer agent" not in build_pull_request_body(task)
 

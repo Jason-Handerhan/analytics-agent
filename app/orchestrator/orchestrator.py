@@ -176,10 +176,11 @@ def _msal_app() -> msal.ConfidentialClientApplication:
     )
 
 
-def get_power_bi_token() -> str:
-    result = _msal_app().acquire_token_for_client(
-        scopes=["https://analysis.windows.net/powerbi/api/.default"]
-    )
+async def get_power_bi_token() -> str:
+    def acquire() -> dict:
+        return _msal_app().acquire_token_for_client(scopes=["https://analysis.windows.net/powerbi/api/.default"])
+
+    result = await asyncio.to_thread(acquire)
     return result["access_token"]
 
 
@@ -188,7 +189,7 @@ async def inject_dax_args(tc: dict) -> dict:
     """Adds Power BI auth/target/guardrail values to a run_dax_query call --
     excluded from the model's schema (exclude_args)"""
     try:
-        access_token = await asyncio.to_thread(get_power_bi_token)
+        access_token = await get_power_bi_token()
     except Exception as e:
         raise ToolError(f"Failed to get a Power BI access token: {e}") from e
     return {

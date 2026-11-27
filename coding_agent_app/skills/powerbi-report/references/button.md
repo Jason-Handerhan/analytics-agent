@@ -224,13 +224,13 @@ up contended space (e.g. move slicers), **never** shrink the button below `recom
 
 ### Step 5: Render-verify and fix clipped labels (required for non-rectangular shapes)
 
-The formula and self-check cannot guarantee a non-rectangular label fits — the render is the
-authoritative test. After authoring, run `publish_dashboard` and look at the page with `render_dashboard`, and **inspect each button**:
+The formula and self-check cannot guarantee a non-rectangular label fits; only a render shows it.
+When you review the page's render, **inspect each button**:
 
 1. Scan every button in the image for a **clipped or truncated label** (glyphs cut at an
    edge, an ellipsis, or text overrunning the shape's narrow region — common on triangles,
    `heart`, `arrow`/chevron tips, `parallelogram`/`trapezoid` slants).
-2. For each clipped button, apply **one** fix and render again. Which fix works depends on *why*
+2. For each clipped button, apply **one** fix. Which fix works depends on *why*
    it clips:
    - **Rectangular shape, label just too long** — this is *horizontal* truncation, so
      increase `position.width` (re-run `text measure` for the value) **or shorten the label**

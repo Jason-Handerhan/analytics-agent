@@ -1,6 +1,27 @@
 """Test tasks for the coding agent, each a CodingAgentPlan to import by name. A task's pieces are module-level variables named
 after it; the aisle pacing tasks share the pieces they have in common."""
-from app.coding_task_models import CodingAgentPlan, SuggestedCode
+from dataclasses import dataclass
+
+from app.coding_task_models import CodingAgentPlan
+
+
+@dataclass
+class SuggestedCode:
+    purpose: str
+    file: str | None
+    code: str
+
+
+def plan_description(requirements, constraints=(), decisions=(), suggested_code=()):
+    """A plan's description as the code guide lays it out: one section for each part the task has."""
+    sections = {
+        "Requirements": "\n".join(f"{number}. {item}" for number, item in enumerate(requirements, start=1)),
+        "Constraints": "\n".join(f"- {item}" for item in constraints),
+        "Decisions": "\n".join(f"- {item}" for item in decisions),
+        "Suggested code": "\n\n".join(
+            f"{item.purpose}{f' (`{item.file}`)' if item.file else ''}\n\n```\n{item.code}\n```" for item in suggested_code),
+    }
+    return "\n\n".join(f"## {heading}\n\n{text}" for heading, text in sections.items() if text)
 
 
 # ---- aisle_pacing
@@ -115,12 +136,11 @@ FROM user_category_temp2""",
 ]
 
 aisle_pacing = CodingAgentPlan(
+    subagent_type="code",
     name="Aisle pacing ratio",
     goal=aisle_pacing_goal,
-    requirements=aisle_pacing_requirements,
-    constraints=aisle_pacing_constraints,
-    decisions=aisle_pacing_decisions,
-    suggested_code=aisle_pacing_suggested_code,
+    scope="Add user_aisle_pacing_ratio to the Dataform pipeline's silver, skeleton and final layers, plus its rowConditions check. Only files under /definitions change.",
+    description=plan_description(aisle_pacing_requirements, aisle_pacing_constraints, aisle_pacing_decisions, aisle_pacing_suggested_code),
 )
 
 # ---- aisle_pacing_lgbm_ranker
@@ -139,12 +159,12 @@ aisle_pacing_lgbm_ranker_constraints = [
 ]
 
 aisle_pacing_lgbm_ranker = CodingAgentPlan(
+    subagent_type="code",
     name="Aisle pacing ratio for the LGBM ranker",
     goal=aisle_pacing_goal,
-    requirements=aisle_pacing_lgbm_ranker_requirements,
-    constraints=aisle_pacing_lgbm_ranker_constraints,
-    decisions=aisle_pacing_decisions,
-    suggested_code=aisle_pacing_suggested_code,
+    scope="Add user_aisle_pacing_ratio to the Dataform pipeline and use it in the LGBM ranker's training only, with a pytest. The other three models keep their features.",
+    description=plan_description(aisle_pacing_lgbm_ranker_requirements, aisle_pacing_lgbm_ranker_constraints, aisle_pacing_decisions,
+                                 aisle_pacing_suggested_code),
 )
 
 # ---- aisle_pacing_lgbm_ranker_w_test_notebook
@@ -168,12 +188,12 @@ aisle_pacing_lgbm_ranker_w_test_notebook_constraints = [
 ]
 
 aisle_pacing_lgbm_ranker_w_test_notebook = CodingAgentPlan(
+    subagent_type="code",
     name="Aisle pacing ratio for the LGBM ranker, with a comparison notebook",
     goal=aisle_pacing_goal,
-    requirements=aisle_pacing_lgbm_ranker_w_test_notebook_requirements,
-    constraints=aisle_pacing_lgbm_ranker_w_test_notebook_constraints,
-    decisions=aisle_pacing_decisions,
-    suggested_code=aisle_pacing_suggested_code,
+    scope="Add user_aisle_pacing_ratio to the Dataform pipeline and use it in the LGBM ranker only, with a pytest, plus one new notebook comparing the ranker without and with the feature.",
+    description=plan_description(aisle_pacing_lgbm_ranker_w_test_notebook_requirements, aisle_pacing_lgbm_ranker_w_test_notebook_constraints,
+                                 aisle_pacing_decisions, aisle_pacing_suggested_code),
 )
 
 # ---- aisle_pacing_all_models_edit_notebook
@@ -195,12 +215,12 @@ aisle_pacing_all_models_edit_notebook_constraints = [
 ]
 
 aisle_pacing_all_models_edit_notebook = CodingAgentPlan(
+    subagent_type="code",
     name="Aisle pacing ratio for all four models",
     goal=aisle_pacing_goal,
-    requirements=aisle_pacing_all_models_edit_notebook_requirements,
-    constraints=aisle_pacing_all_models_edit_notebook_constraints,
-    decisions=aisle_pacing_decisions,
-    suggested_code=aisle_pacing_suggested_code,
+    scope="Add user_aisle_pacing_ratio to the Dataform pipeline and use it in all four base models and everything downstream, including an in-place edit of model_evaluation.ipynb only if it needs one.",
+    description=plan_description(aisle_pacing_all_models_edit_notebook_requirements, aisle_pacing_all_models_edit_notebook_constraints,
+                                 aisle_pacing_decisions, aisle_pacing_suggested_code),
 )
 
 # ---- revision_for_aisle_pacing
@@ -217,10 +237,11 @@ revision_for_aisle_pacing_constraints = [
 ]
 
 revision_for_aisle_pacing = CodingAgentPlan(
+    subagent_type="code",
     name="Aisle pacing ratio in all four models (revision)",
     goal=revision_for_aisle_pacing_goal,
-    requirements=revision_for_aisle_pacing_requirements,
-    constraints=revision_for_aisle_pacing_constraints,
+    scope="Use the already-built user_aisle_pacing_ratio in all four base models and everything downstream. Nothing under /definitions changes.",
+    description=plan_description(revision_for_aisle_pacing_requirements, revision_for_aisle_pacing_constraints),
 )
 
 # ---- column_descriptions
@@ -266,12 +287,12 @@ column_descriptions_suggested_code = [
 ]
 
 column_descriptions = CodingAgentPlan(
+    subagent_type="code",
     name="Column descriptions for every table",
     goal=column_descriptions_goal,
-    requirements=column_descriptions_requirements,
-    constraints=column_descriptions_constraints,
-    decisions=column_descriptions_decisions,
-    suggested_code=column_descriptions_suggested_code,
+    scope="Add column descriptions for all 19 Dataform definitions (13 tables and 6 declarations) in their config blocks, with shared descriptions in one new include file, includes/column_descriptions.js.",
+    description=plan_description(column_descriptions_requirements, column_descriptions_constraints, column_descriptions_decisions,
+                                 column_descriptions_suggested_code),
 )
 
 # ---- cumulative_weekday_counts
@@ -327,11 +348,12 @@ FROM (
 ]
 
 cumulative_weekday_counts = CodingAgentPlan(
+    subagent_type="code",
     name="Cumulative weekday and time-of-day counts",
     goal=cumulative_weekday_counts_goal,
-    requirements=cumulative_weekday_counts_requirements,
-    constraints=cumulative_weekday_counts_constraints,
-    suggested_code=cumulative_weekday_counts_suggested_code,
+    scope="Fix the SQL of prelim_user_order_dow_wide and prelim_user_order_tod_wide so each row holds running counts across all weekdays and times of day, and update the descriptions that describe the old behavior in those tables, skeleton_features and final_ml_features_table.",
+    description=plan_description(cumulative_weekday_counts_requirements, cumulative_weekday_counts_constraints,
+                                 suggested_code=cumulative_weekday_counts_suggested_code),
 )
 
 # ---- rapidfuzz_dependency
@@ -348,10 +370,11 @@ rapidfuzz_dependency_constraints = [
 ]
 
 rapidfuzz_dependency = CodingAgentPlan(
+    subagent_type="code",
     name="Near-duplicate product names",
     goal=rapidfuzz_dependency_goal,
-    requirements=rapidfuzz_dependency_requirements,
-    constraints=rapidfuzz_dependency_constraints,
+    scope="Add find_near_duplicate_names to src/utilities/utility_functions.py with a pytest, and declare rapidfuzz in requirements.txt.",
+    description=plan_description(rapidfuzz_dependency_requirements, rapidfuzz_dependency_constraints),
 )
 
 # ---- aisle_recency_ambiguous
@@ -371,10 +394,11 @@ aisle_recency_ambiguous_constraints = [
 ]
 
 aisle_recency_ambiguous = CodingAgentPlan(
+    subagent_type="code",
     name="Aisle recency score",
     goal=aisle_recency_ambiguous_goal,
-    requirements=aisle_recency_ambiguous_requirements,
-    constraints=aisle_recency_ambiguous_constraints,
+    scope="Add user_aisle_recency_score to the Dataform pipeline's silver, skeleton and final layers, plus its rowConditions check. Only files under /definitions change.",
+    description=plan_description(aisle_recency_ambiguous_requirements, aisle_recency_ambiguous_constraints),
 )
 
 # ---- promo_share_ambiguous
@@ -388,8 +412,9 @@ promo_share_ambiguous_requirements = [
 ]
 
 promo_share_ambiguous = CodingAgentPlan(
+    subagent_type="code",
     name="Promo share of purchases",
     goal=promo_share_ambiguous_goal,
-    requirements=promo_share_ambiguous_requirements,
-    constraints=aisle_recency_ambiguous_constraints,
+    scope="Add user_product_promo_share to the Dataform pipeline's silver, skeleton and final layers, plus its rowConditions check. Only files under /definitions change.",
+    description=plan_description(promo_share_ambiguous_requirements, aisle_recency_ambiguous_constraints),
 )

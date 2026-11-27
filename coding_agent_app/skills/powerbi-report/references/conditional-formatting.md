@@ -97,8 +97,7 @@ in the linked result-type and visual-specific sections below.
    If unsupported, do not move the expression to a similarly named property or
    rely on schema permissiveness. Use a static
    value or a supported built-in visual/target, and say why in your report.
-5. Run `validate_dashboard`, `publish_dashboard`, and check the render. Cover representative
-   nonblank, blank, and invalid values where those cases can occur.
+5. Cover representative nonblank, blank, and invalid values where those cases can occur.
 
 Known cross-cutting unsupported cases include:
 
@@ -193,8 +192,6 @@ conditional-formatting types. `FillRule` corresponds to Type 1, and
 4. **Apply the correct object and selector.** Use the
    selector summary (continued in `conditional-formatting-part-03.md`); requirements differ
    across tables, matrices, charts, cards, and KPIs.
-5. **Validate and render.** Run `validate_dashboard`, `publish_dashboard`, and confirm with
-   `render_dashboard` that the formatting appears.
 
 ## Formatting Options by Visual Type
 

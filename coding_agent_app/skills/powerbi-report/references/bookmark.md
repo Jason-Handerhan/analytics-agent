@@ -28,8 +28,6 @@ user/service state and are out of scope.
 4. Add every bookmark to `definition/bookmarks/bookmarks.json`, directly or as
    a group child.
 5. Wire any button actions to the bookmark's exact `name`.
-6. Run `validate_dashboard`.
-7. Publish with `publish_dashboard`, then use `render_dashboard` to check every forward and reverse transition.
 
 Bookmark state contains raw PBIR identifiers, not display names:
 

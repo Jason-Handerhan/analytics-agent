@@ -169,8 +169,8 @@ Also ensure the theme file exists in `StaticResources/RegisteredResources/`
 and is listed in the `resourcePackages` array with matching `name` and `path`.
 
 On every theme edit, follow the GUID cache-busting procedure in theming.md (see `theming.md`, section `theme-name-guid-convention-cache-busting`)
-— rotate the GUID suffix (keep `<CustomThemeName>` stable), update all
-`report.json` references, and run `publish_dashboard`. Only change `<CustomThemeName>`
+— rotate the GUID suffix (keep `<CustomThemeName>` stable), and update all
+`report.json` references. Only change `<CustomThemeName>`
 if the user explicitly requests a rename.
 
 > ⚠️ **`type` must be `"RegisteredResources"`** — not `"SharedResources"`.
@@ -271,8 +271,7 @@ selected data point in a source visual:
 5. Use the source visual's drillthrough menu, or add a
    Drillthrough button (see `button-part-03.md`, section `drillthrough-button`) when the report needs an
    explicit action.
-6. Run `validate_dashboard`, `publish_dashboard`, and render the target page. `render_dashboard` cannot click
-   a source visual, so check the drillthrough wiring in the files and say in your report that the
+6. `render_dashboard` cannot click a source visual, so check the drillthrough wiring in the files and say in your report that the
    interaction itself was not exercised.
 
 ## Visual Interactions

@@ -7,9 +7,10 @@ visual grounding. Decided 2026-11-19 after an experiment (proven items below); n
 
 ## The loop
 
-Edit the PBIR and TMDL files in the sandbox, `validate_dashboard`, publish the model then the report to the Agent Sandbox
-workspace, render the published report, look at the screenshot, fix, then open a pull request. A human
-reviews the PR and promotes to production by hand.
+Edit the PBIR and TMDL files in the sandbox, checking as you go with the cheap tools (`validate_dashboard`, `run_dax_query`). At
+checkpoints, publish the model then the report to the Agent Sandbox workspace and render the changed pages. The coding agent's exact
+workflow and completion gate are in the dashboard prompt (`docs/dashboard-planning.md`, 4a). Then open a pull request. A human reviews it
+and promotes to production by hand.
 
 - **Publishing is not gated.** The only gate is the workspace the agent can reach: its identity is a
   Member of the Agent Sandbox workspace and nothing else.
@@ -68,7 +69,7 @@ reviews the PR and promotes to production by hand.
 | Part | Runs in | Holds |
 |---|---|---|
 | Edit PBIR/TMDL, the CLI's offline lookups, git, the PR | Sandbox | No credentials |
-| `validate_dashboard`, `publish_dashboard`, `render_dashboard`, `run_dax_query` (coding agent) | Coding agent app (open egress) | The coding agent's Power BI secret (validate needs none) |
+| `validate_dashboard`, `publish_dashboard`, `refresh_dashboard_model`, `render_dashboard`, `run_dax_query` (coding agent) | Coding agent app (open egress) | The coding agent's Power BI secret (validate needs none) |
 | The render function | A shared module, imported by the coding agent app now and the gateway later | Nothing; callers pass an identity |
 | `get_page_info`, extended with the render (main agent, later) | Gateway | The production render identity's secret |
 
@@ -77,17 +78,15 @@ reviews the PR and promotes to production by hand.
 One function, written as a tool from the start so it can move behind an MCP boundary later without
 changing its interface.
 
-- **Input:** the target report (resolved from the caller's config, never from the model), `page`,
-  `bookmark` (name), `slicers` (a slicer's title and the values to select), `scale`.
-- **Behavior:** mint or reuse an embed token for the report and its dataset, fetch the report's
-  `embedUrl`, embed it with the filter and page-navigation panes hidden and `pageName` set, wait for
-  `rendered`, apply the bookmark and slicer states, wait a settle delay, screenshot, and crop the grey
-  "free trial version" strip the embed adds at the top (inside the embed, so it cannot be hidden).
-- **Output:** the PNG, plus the applied state and the available bookmark and slicer names.
-- **Errors the agent can act on:** an unknown bookmark or slicer lists the real ones;
-  `Missing_References` says to publish first if a measure or column was added, otherwise check the
-  spelling in the TMDL; a 401 or 403 says the identity or the embed allowance is the problem, and the
-  agent reports that it could not render instead of retrying.
+- **Input:** the target report (resolved from the caller's config, never from the model), `page` (display name), `bookmark` (id, the file
+  name in the report's `bookmarks/` folder), `slicers` (a slicer's title and the values to select), `scale`.
+- **Behavior:** mint or reuse an embed token for the report and its dataset, look up the page id, embed with the filter and page-navigation
+  panes hidden and the page and bookmark in the embed settings (one render), set the slicers once the report has loaded, wait for `rendered`
+  and then 1 second, and screenshot. A bookmark takes effect only on the page it was saved on.
+- **Output:** the PNG. Power BI's grey "free trial version" strip stays in it (it may overlay the page, so it is not cropped).
+- **Errors the agent can act on:** every failure is a `RenderError` (a `ToolException`). An unknown page or slicer lists the real ones;
+  `Missing_References` says to publish first if a measure or column was added, otherwise check the spelling in the TMDL; a 401 or 403 says
+  the identity or the embed allowance is the problem; anything else says to retry once or carry on without a render.
 - **Which workspace a caller can reach is credentials and config**, not a tool argument.
 - **Numbers.** A screenshot is visual grounding only and sits outside the verification contract. The
   tool's description tells the model never to quote numbers from it; a number read from an image that no
@@ -176,10 +175,10 @@ model's data source there. Everything after that is the agent's.
   set, and compare the panel with the unset one. The stored values carry float noise (`0.3900000000000002`),
   so a typed value may need to match the table's exact float.
   Report-level filters (`setFilters`) are also untested.
-- **Chromium inside the coding agent app on Cloud Run.** Playwright's default flags already include
-  `--no-sandbox` and `--disable-dev-shm-usage`; confirm with one real render, and size memory (2 GiB is
-  a config change; the app runs at 1 GiB today). Every picture so far was rendered on Windows; fonts on Debian may differ, so compare the first Cloud Run render with a Windows one.
-- **The wait before the screenshot (2026-11-20).** The fixed 5 seconds was a guess made early in the experiment and never
+- **The wait before the screenshot (2026-11-20; updated 2026-11-25).** In `app/powerbi_render.py`, every render waits 1 second after the
+  `rendered` event, because the cards can still be fading in when it fires (seen in `notebooks/power_bi_render.ipynb`, with and without a
+  bookmark; one clean render without the wait was not enough evidence to drop it). What follows is the earlier plan.
+  The fixed 5 seconds was a guess made early in the experiment and never
   tuned. The vendored `powerbi-client` 2.25.0 has events for `loaded`, `rendered`, `renderingStarted`, `visualRendered`,
   `bookmarkApplied`, `filtersApplied` and `pageChanged`. Plan: register a one-time `rendered` listener before each change
   (page, bookmark, slicer), apply it, and wait for that next `rendered` with a short timeout for a change that triggers no
@@ -189,7 +188,7 @@ model's data source there. Everything after that is the agent's.
 - **The embed-token allowance.** The free allowance is limited and documented as "development testing
   only". Accepted for a portfolio project; a real deployment would buy a capacity.
 - **Refresh for new data-bearing objects** (about 8 a day on shared capacity; not tested). A new table has no data in
-  Agent Sandbox until its model is refreshed; step 6c plans the tool, after two unknowns are tested.
+  Agent Sandbox until its model is refreshed; step 6c plans the tool and what to test first.
 - **`ml_model_results` is not in `CODING_AGENT_DATASETS`** (decided, step 6d). The coding agent's `list_tables` and
   `get_table_schema` cannot confirm a table there exists; for those the plan and `model_evaluation.ipynb` are the source.
 - **Field-parameter tables** have no BigQuery source (they are calculated); the new-table rule does not cover them.
@@ -206,6 +205,11 @@ model's data source there. Everything after that is the agent's.
   limit is code: the gateway has no publish path, and `get_page_info` only returns images. Agent Sandbox holds a
   copy of the same data, so no new data becomes reachable. Decide the optional `environment` input on
   `get_page_info` at step 11.
+- **How the main agent shows dashboards (2026-11-27; undecided, this is the leaning).** Production stays as it is: the saved page text and
+  reference screenshot, since a live render costs about 14 of a turn's 115 seconds. To review changes, the main agent shows the coding agent's
+  saved final render of each changed page, which is immediate, and renders Agent Sandbox live only for a specific filter, slicer or bookmark
+  the user asks about (so the gateway still needs the browser). To design: where the pictures are stored (a Cloud Storage bucket the coding
+  agent writes and the gateway reads, with a lifetime), and labelling each with its task and time, since a saved picture can go stale.
 
 ## Build plan
 
@@ -218,27 +222,29 @@ One step at a time, checked in after each; each ships with Layer 1 tests where s
    experiment, fragile to upstream versions, no filter API). Both new dependencies are approved. The
    library is a committed, unmodified copy in `app/powerbi_client_js/` (version 2.25.0, MIT, the file we
    tested, `powerbi.min.js` sha256 `30c97c2a4c02b857e76711369344cb9a7efdb39ed1d66d819b7289dbc8f8c5fa`; to update, copy the new
-   `dist/powerbi.min.js` and `LICENSE.txt` from the npm package). The module's target is an enum (`production` or
-   `agent_sandbox`) mapped to workspace and report IDs in config, never an ID the model passes. The coding
+   `dist/powerbi.min.js` and `LICENSE.txt` from the npm package). The module's target is a name (`Instacart ML Model` or
+   `Agent Sandbox`) mapped to workspace, report and model IDs in config (`POWER_BI_RENDER_TARGETS`), never an ID the model passes. The coding
    agent's Power BI service principal is created and verified (a Member of Agent Sandbox only, setup guide
    Step 24). The Agent Sandbox workspace holds the Agent Sandbox model (`71ea68dc`) and the Agent Sandbox
    report (`b84e7228-9955-4f40-87df-b8fc3dac692d`, "Instacart ML Model Evaluation"), both published from
    Desktop from the repo's `.pbip` project; `updateDefinition` on the report is proven. The throwaway
    `agent-test-report` and `agent-test-model` are deleted. The coding agent's image copies only named files
    from `app/`, so step 4 adds `COPY` lines for the new module and the library folder.
-2. **Render core.** `RenderRequest` and `RenderResult` models, the token mint with a cache, the embed
-   URL lookup, embed, bookmark, an event-driven wait (not a fixed delay), screenshot and crop, and the actionable errors. Layer 1: request
-   validation, token expiry, crop, error mapping against a fake page. Layer 2: a notebook against the
-   Agent Sandbox report.
-3. **Slicers and filters.** Resolve a slicer by title, build its state from the current state, test the
-   field-parameter slicers. Layer 1: the state builder. Layer 2: live.
-3b. **Report outline.** A second function in the module, `describe_report(target)`: the published report's
-   pages, bookmarks and slicers (title and field) parsed from its definition (Fabric `getDefinition`, no
-   browser), cached about 5 minutes per target. The main agent learns what exists from this and never renders
-   just to find out. Layer 1: the parsing, against a trimmed saved definition. Layer 2: live. It needs no
-   Chromium, so it can be built before step 4.
-4. **Chromium in the coding agent app.** The image, memory, and one real render on Cloud Run; measure
-   latency, memory and the settle delay.
+2. **Render core (done 2026-11-25).** `render_page(target, access_token, page, bookmark, slicers, scale)` in `app/powerbi_render.py` returns
+   a PNG. The embed URL and token are cached until near expiry; the page is given by display name and looked up on every render; a bookmark is
+   given by id and applied at embed, so there is one render; it waits for `rendered`, then 1 second; errors say what to do. Dropped from the
+   earlier plan: request and result models (the tool wrappers own the argument schemas) and the crop (the free-trial bar stays in the image).
+   Layer 1: token freshness and the page lookup (`tests/test_powerbi_render.py`). Layer 2: `notebooks/power_bi_render.ipynb`.
+3. **Slicers (done 2026-11-25).** By title, a basic `In` filter on the slicer's own target, set when the report has loaded and before its first
+   render finishes; an unknown title lists the page's slicers. A field-parameter slicer together with a bookmark was checked live.
+   Report-level filters are not built.
+4. **Chromium in the coding agent app (done 2026-11-27).** The image installs Playwright's own Chromium (`playwright install --with-deps
+   --no-shell chromium`, plus `libatomic1` for Playwright's bundled Node on Debian 13) and fails the build if it cannot start; the coding agent's
+   Power BI token is `get_power_bi_token` (`coding_agent_app/tools.py`). Measured on a throwaway Cloud Run service, warm renders of "Model
+   Evaluation": about 26 s at 1 vCPU, 14 s at 2, and no better at 4, so **2 vCPU and 2 GiB** (memory peaks a little above 1 GiB). At 2 vCPU: browser
+   start about 1.5 s, report load about 6 s, queries and drawing about 6 s. Renders reached Power BI and looked right. **No browser reuse:** locally a
+   reused browser saved only its start (0.5 s), and neither a reused context nor a local page address shortened the load. Not built: reuse, and
+   keeping the report loaded to switch pages in place. Decided against a separate render service.
 5. **`validate_dashboard` and `publish_dashboard`.** Both read the report files out of the sandbox with one shared
    function (one archive, one read). `validate_dashboard` runs the CLI in the app and returns its diagnostics, with
    `PBIR_SCHEMA_UNREACHABLE` treated as a failed check, not a warning. `publish_dashboard` runs the same validation,
@@ -247,25 +253,35 @@ One step at a time, checked in after each; each ships with Layer 1 tests where s
    too old: the CLI needs 20 or newer), copied in from a multi-stage build; this is the first step that needs it.
    Layer 1: the body builder (every file, no `.platform` or `.pbi`), the rewrite, the cap, and the diagnostics handling
    against a saved CLI output.
+   **Test:** that publishing a broken TMDL file is rejected, and what the error says. `validate_dashboard` does not read TMDL (tested
+   2026-11-27, CLI 0.5.0), so publishing is the only check on a model file.
 6. **`render_dashboard` for the coding agent.** The tool wrapper that returns the image to the agent,
    with the `Missing_References` guidance.
+   **One render at a time.** The tool holds a lock, so renders requested together run one after another: each starts its own browser,
+   and one peaks a little above 1 GiB of the app's 2 GiB. The time limit on a render starts after the wait. The gateway sets its own
+   limit at step 11. The result names the page folder and the bookmark id it rendered, for the final check.
+   **Do not forget, for the render tool's description and arguments (noted 2026-11-25; applies here and to step 11):**
+   - **A slicer example.** Show the exact form, including a field-parameter value:
+     `{"Model Slicer": ["XGBoost Ranker"], "Evaluation Metric Slicer": ["'_Model_Evaluation_Measures'[NDCG]"]}` is what
+     `render_page` takes. Values must match the slicer's items exactly; a wrong one is not reported, the visuals just go blank.
+   - **Argument shape.** A free-form dict is likely rejected by strict tool schemas (confirm), so the tool argument may need to be a
+     list of `{title, values}` objects that the wrapper turns into the dict.
+   - A bookmark is given by its id and takes effect only on the page it was saved on.
+   - The grey "free trial version" bar across the top of the image is Power BI's, not part of the dashboard.
+   - The `scale` range (0.5 to 3) belongs in the argument model.
 6b. **`run_dax_query` for the coding agent.** A tool in the app that runs one `EVALUATE` (or a query-scoped `DEFINE MEASURE`
    plus `EVALUATE`) against the Agent Sandbox model with `executeQueries`, as the coding agent's identity. The target is
    config, never an argument; a row cap and a timeout like the main agent's tool. It cannot reach production. The main agent
    never repeats a number from a coding task's report as data (existing rule). It is not the main agent's MCP tool (that one
    is wired to the analytics agent's identity and the production model); the request logic is a small separate copy in the
    app, or a shared function if sharing does not touch the verified tool.
-6c. **`refresh_dashboard_model` for the coding agent (later).** Triggers a refresh of the Agent Sandbox dataset through
-   the Power BI refresh REST endpoint as the coding agent's identity, polls to Completed or a failure reason, with a
-   timeout and a per-task cap (about 8 refreshes a day on shared capacity). The target is config, never an argument.
-   Needed only after a publish that adds or changes data-bearing objects (a new table or column); measures and
-   visuals do not need it. Test first, with a throwaway table: (1) whether a new table on the same BigQuery connector
-   reuses the dataset's stored credentials, or the refresh fails until they are set in the service; (2) whether
-   `updateDefinition` with a new table triggers a refresh or clears the existing data. Compare the table's row count
-   before and after. **When this is built, update step 3 of "Add or change a table or column" in
-   `coding_agent_app/skills/semantic-model/SKILL.md`**: replace the no-tool fallback with a call to this tool, and add
-   the trigger to this tool's description. Also add the refresh to step 7 of the report skill's `authoring.md`
-   Quick Start Workflow (after publish, before render).
+6c. **`refresh_dashboard_model` for the coding agent (needed before the first dashboard task: the `semantic-model` skill already calls it).**
+   Triggers a refresh of the Agent Sandbox dataset through the Power BI refresh REST endpoint as the coding agent's identity, polls to
+   Completed or a failure reason, with a timeout and a per-task cap (about 8 refreshes a day on shared capacity). The target is config, never
+   an argument. The skill calls it after every publish that adds a table or column. Test first, with a throwaway table: (1) whether a new table
+   on the same BigQuery connector reuses the dataset's stored credentials, or the refresh fails until they are set in the service; (2) whether
+   `updateDefinition` with a new table triggers a refresh or clears the existing data (compare the table's row count before and after); (3)
+   whether a calculated table or column added by publishing is also empty until a refresh (assumed, unverified).
 6d. **Dataset access for dashboard tasks (decided 2026-11-24).** `CODING_AGENT_DATASETS` gains `agent_safe` and `agent_dashboard`
    (Data Viewer for the coding agent's account on both). Aggregations of `agent_safe` for the dashboard are notebooks in
    `Notebooks/dashboard_data/` that aggregate with SQL in BigQuery and write to `agent_dashboard`, a dataset `agent-sa` cannot read.
@@ -306,10 +322,14 @@ One step at a time, checked in after each; each ships with Layer 1 tests where s
 10. **End to end.** A real dashboard task from the main agent's chat to a PR, with before and after
     screenshots (where they are stored is open).
 11. **Main agent.** Extend `get_page_info` (no new tool). `page_name` becomes a plain string instead of a
-    `Literal` built at startup; omitted, it returns the outline from step 3b as text, with no render; named,
+    `Literal` built at startup; omitted, it returns the report outline as text, with no render: the published report's pages, bookmarks
+    (name and id) and slicers (title, field and values), parsed from its definition (Fabric `getDefinition`, no browser) and cached about
+    5 minutes per target, so the agent never renders just to find out what exists. It belongs to this tool, not the render module: only
+    the main agent needs it (the coding agent reads the report files). Layer 1: the parsing, against a trimmed saved definition. Named,
     it behaves as today, plus optional `bookmark` and `slicers` that make the screenshot a live render, with
-    `filter_context` mapped to slicers. Set `handle_tool_error`. Also: the gateway image, memory and a render
-    concurrency cap; the schema-size check; telemetry.
+    `filter_context` mapped to slicers (whether production renders live at all is open: see "How the main agent shows dashboards" above). Set
+    `handle_tool_error`. Also: the gateway image (Chromium and `libatomic1`, as the coding agent's), 2 vCPU with its 2 GiB, a render concurrency
+    cap; the schema-size check; telemetry.
 12. **Later.** Regenerate `get_page_info`'s reference screenshots with the tool, as a scheduled or
     publish-triggered job.
 13. **Later, phase 2.** The coding agent builds a new dashboard, not only edits one: the CLI's `scaffold` command (offline

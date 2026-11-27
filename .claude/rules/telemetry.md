@@ -203,7 +203,7 @@ separate from `agent_telemetry`: a different producer, a different grain (a task
 
 **One schema definition,** `coding_agent_app/telemetry/schema.py`, imported by the writer and by `create_table.py`.
 `build_coding_task_row` (`writer.py`) flattens the completed task document and the `RunDetails` the run collects as it goes. The row
-holds the task and its times, the plan (flattened fields and `plan_json`), the outcome and the agent's report (and `result_json`), the
+holds the task and its times, the plan (its name, goal, type, base branch and review flattened, and the whole plan as `plan_json`), the outcome and the agent's report (and `result_json`), the
 patch as text, the checks, the reviewer's verdict and last-round criteria, tokens and model-call counts for the agent and the reviewer
 (`CountingUsageHandler` counts the calls), per-tool call counts, and three links: `langsmith_run_id`, `cloud_run_revision` and
 `sandbox_snapshot_id`. The reviewer's columns are null when it did not run.

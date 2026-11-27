@@ -33,6 +33,7 @@ SCHEMA = [
     # --- Plan: what the task was asked to do ---
     bigquery.SchemaField("plan_name", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("plan_goal", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("subagent_type", "STRING", mode="NULLABLE"),     # code | dashboard; null on rows from before plans had a type
     bigquery.SchemaField("base_branch", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("is_revision", "BOOLEAN", mode="REQUIRED"),
     bigquery.SchemaField("review_requested", "BOOLEAN", mode="REQUIRED"),

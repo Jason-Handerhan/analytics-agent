@@ -245,8 +245,8 @@ prefer a compact Year/Period dropdown or tile.
   With theme default `8/8` padding, snap `100` up to the 8px grid and use
   **`h=104`**.
 - Wider layouts may render dates side-by-side. Do not assume a fixed threshold;
-  check the render with `render_dashboard` and use
-  **`h = 60 + top + bottom`** only after both inputs visibly share one row.
+  use
+  **`h = 60 + top + bottom`** only when a render shows both inputs on one row.
 
 Fill and light variants are the same as the dropdown slicer (see above).
 

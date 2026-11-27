@@ -32,8 +32,7 @@ skill (its `field-parameters.md`), not here.
    model-side change with the `semantic-model` skill. If the model change cannot
    be made, end with a blocking question instead of building a worse (static)
    visual.
-5. Build the slicer and target visual, run `validate_dashboard`, `publish_dashboard`, and
-   review the result with `render_dashboard`.
+5. Build the slicer and target visual.
 
 ## Recognizing an existing field parameter
 
@@ -69,8 +68,6 @@ target page and confirm both are present.
      [Recognizing an existing field parameter](#recognizing-an-existing-field-parameter).
    - Missing target visual → add a visual that consumes the parameter.
 3. If **both** already exist, do not duplicate them — reuse or adjust in place.
-4. Run `validate_dashboard`, `publish_dashboard`, and review the result with
-   `render_dashboard`.
 
 Never leave the page with only one half (a slicer with nothing to drive, or a
 target visual with no way to switch it).
@@ -100,5 +97,4 @@ correct role, in parameter order, and add a sibling `fieldParameters` array:
 projection offset and `length` is the number of underlying fields represented.
 The projection set and order must match the parameter's `NAMEOF(...)` tuples.
 
-Bad field references can pass `validate` but render an error icon, so always
-run `publish_dashboard` and check the result with `render_dashboard`.
+Bad field references can pass validation but render an error icon.

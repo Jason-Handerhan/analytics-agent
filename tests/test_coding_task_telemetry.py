@@ -26,7 +26,7 @@ def make_task(base_branch="dev", reviewer_ran=True):
     }
     moment = datetime(2026, 11, 11, tzinfo=timezone.utc)
     return {"task_id": "t1", "conversation_id": "c1", "user_id": "u1", "created_at": moment, "started_at": moment, "completed_at": moment,
-            "plan": {"name": "Aisle pacing", "goal": "g", "base_branch": base_branch, "review": reviewer_ran}, "coding_agent_result": result}
+            "plan": {"name": "Aisle pacing", "goal": "g", "subagent_type": "code", "base_branch": base_branch, "review": reviewer_ran}, "coding_agent_result": result}
 
 
 def make_details(patch_bytes=b"diff --git a/x b/x\n"):
@@ -44,6 +44,7 @@ def test_row_matches_schema_and_flattens_the_task():
     assert (row["agent_llm_calls"], row["reviewer_llm_calls"]) == (12, 4)
     assert row["patch"] == "diff --git a/x b/x\n" and row["is_revision"] is False and row["review_criteria"][1]["gap"] == "missing column"
     assert json.loads(row["plan_json"])["name"] == "Aisle pacing" and json.loads(row["result_json"])["outcome"] == "failed"
+    assert row["subagent_type"] == "code"
 
 
 def test_row_without_reviewer_patch_or_dev_base(monkeypatch):

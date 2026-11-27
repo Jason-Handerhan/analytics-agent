@@ -11,8 +11,7 @@ Perform an independent screenshot review using:
 2. A short description of what changed and what should be visible.
 3. The checklist and troubleshooting table below.
 
-Do not rely only on structural validation. Fix any issue found in screenshots,
-then repeat the `validate_dashboard`, `publish_dashboard`, `render_dashboard` loop.
+Do not rely only on structural validation. Fix any issue found in screenshots.
 
 ## Checklist
 

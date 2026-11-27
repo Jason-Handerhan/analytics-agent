@@ -101,7 +101,7 @@ according to the decision path above.
 >
 > A double-wrapped stop can break query rebuilding across the whole report and
 > crash Desktop's FillRule visitor. `validate_dashboard` reports it
-> as `PBIR_FILLRULE_STOP_DOUBLE_WRAP`; still verify gradients with `render_dashboard`.
+> as `PBIR_FILLRULE_STOP_DOUBLE_WRAP`.
 
 > ℹ️ `FillRule` gradients also work on **`fontColor`** (not just `backColor`) —
 > use the identical structure under `values[].properties.fontColor.solid.color.expr.FillRule`.

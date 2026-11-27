@@ -122,10 +122,6 @@ any other content):
 > `.json` extension (e.g., `"MyTheme-a1b2c3d4.json"`). Using a bare name such as
 > `"MyTheme-a1b2c3d4"` causes validation failure and can break Desktop theme
 > loading.
->
-> Run `validate_dashboard` after
-> registering or editing a theme to catch registration and theme JSON issues
-> before `publish_dashboard`.
 
 ## Schema Version
 

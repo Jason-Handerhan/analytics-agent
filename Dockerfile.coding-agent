@@ -1,7 +1,8 @@
 FROM python:3.12-slim
 
-# git for the clone, apply, commit and push; ca-certificates so git can reach GitHub over https
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+# git for the clone, apply, commit and push; ca-certificates so git can reach GitHub over https; libatomic1 for the Node.js
+# bundled with Playwright
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates libatomic1 && rm -rf /var/lib/apt/lists/*
 
 # uv's official binary, no pip install needed
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -12,8 +13,12 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --only-group coding-agent --no-install-project
 
-# Only the app modules coding_agent_app imports; the build fails below if one is missing
-COPY app/__init__.py app/config.py app/coding_task_models.py app/coding_task_store.py app/shared_helpers.py ./app/
+# Playwright's own Chromium for the dashboard renders, with the system libraries and fonts it needs
+RUN /app/.venv/bin/playwright install --with-deps --no-shell chromium && rm -rf /var/lib/apt/lists/*
+
+# Only the app modules the coding agent app uses; the build fails below if one it imports is missing
+COPY app/__init__.py app/config.py app/coding_task_models.py app/coding_task_store.py app/shared_helpers.py app/powerbi_render.py ./app/
+COPY app/powerbi_client_js ./app/powerbi_client_js
 COPY coding_agent_app ./coding_agent_app
 
 # The project-background skill's two text files come from the orientation folder, replacing the local copies kept in that skill
@@ -24,6 +29,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Fails the build, not the first request, if an app module the service imports was not copied
 RUN python -c "import coding_agent_app.main"
+
+# Fails the build if the render module cannot be imported or its browser cannot start
+RUN python -c "from app.powerbi_render import BROWSER_CHANNEL; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); p.chromium.launch(channel=BROWSER_CHANNEL).close(); p.stop()"
 
 # Shell form (no brackets), so the shell fills in $PORT, the port Cloud Run says to listen on.
 # exec makes uvicorn replace the shell, so uvicorn gets Cloud Run's shutdown signal itself and can stop cleanly.

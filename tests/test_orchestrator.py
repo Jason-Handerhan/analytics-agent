@@ -24,7 +24,7 @@ from app.config import (
     TURN_WARNING_SECONDS_REMAINING,
 )
 import app.orchestrator.orchestrator as orchestrator
-from app.coding_task_models import CodingAgentPlan, FileToImitate, SuggestedCode
+from app.coding_task_models import CodingAgentPlan
 from app.markdown_display_formatting import (
     HEADING_CHAR_WEIGHT, HEIGHT_PER_CHAR, HEIGHT_PER_CHART, HEIGHT_PER_CODE_LINE, HEIGHT_PER_TABLE_ROW,
     MAX_ANSWER_HEIGHT, PENDING_APPROVAL_MESSAGE, answer_height, check_table_rows, render_plan_markdown,
@@ -504,19 +504,18 @@ def test_resolve_chart_and_combine_data():
 
 
 def test_render_plan_markdown():
-    """A minimal plan renders only its title, goal, branch line and requirements; each optional part appears under its label when
-    the plan has it."""
-    minimal = CodingAgentPlan(name="Aisle pacing", goal="Add a feature.", requirements=["Add the column"])
-    assert render_plan_markdown(minimal) == (
-        "### Aisle pacing\n\n**Goal:** Add a feature.\n\n**Base branch:** `dev`, **Reviewer:** off\n\n**Requirements**\n\n1. Add the column")
+    """The title is followed by the type, the description comes last as written, and the audience line appears only when the
+    plan has one."""
+    code_plan = CodingAgentPlan(subagent_type="code", name="Aisle pacing", goal="Add a feature.", scope="One column.",
+                                description="Add the column.")
+    parts = render_plan_markdown(code_plan).split("\n\n")
+    assert parts[:2] == ["### Aisle pacing", "**Type:** code"] and parts[-1] == "Add the column."
+    assert "**Reviewer:** off" in parts[-2] and not any(part.startswith("**Audience:**") for part in parts)
 
-    full = CodingAgentPlan(
-        name="Aisle pacing", goal="Add a feature.", requirements=["Add the column"], constraints=["Leave main alone"],
-        tests=["Pins it"], decisions=["Use dev"], files_to_imitate=[FileToImitate(path="a.sqlx", what="its docs")],
-        suggested_code=[SuggestedCode(purpose="Start here", file="b.py", code="x = 1")], review=True)
-    markdown = render_plan_markdown(full)
-    assert "**Reviewer:** on" in markdown and "**Constraints**\n\n- Leave main alone" in markdown
-    assert "- `a.sqlx`: its docs" in markdown and "Start here (`b.py`)\n\n```\nx = 1\n```" in markdown
+    dashboard_plan = CodingAgentPlan(subagent_type="dashboard", name="Cost page", goal="Show cost.", scope="A Cost page.",
+                                     new_pages=1, audience="Ops managers", review=True, description="Build it.")
+    parts = render_plan_markdown(dashboard_plan).split("\n\n")
+    assert "**Audience:** Ops managers" in parts and "**Reviewer:** on" in parts[-2] and parts[-1] == "Build it."
 
 
 def test_render_task_plan_markdown():

@@ -180,8 +180,7 @@ SKILLS = {
             Replace("- **Only when working against a online database**\n"
                     "  - When creating a measure test it with a simple query.\n"
                     "  - Ensure the measure has no errors. Run the query `EVALUATE INFO.MEASURES()` and inspect the column `ErrorMessage`.\n",
-                    "- When creating a measure, test it with a simple query using `run_dax_query`.\n"
-                    "- After publishing, check the measure with `INFO.VIEW.MEASURES()` and confirm its `State` is `Valid`.\n"),
+                    ""),
             DropRange("## Row-Level Security (RLS)\n", "## Descriptions & Documentation\n"),
             DropRange("## Maintenance\n", "## Parameters\n"),
             DropFrom("\n## Parameters\n"),
@@ -233,19 +232,18 @@ SKILLS = {
             Replace("# Power BI Reports - CLI Skill\n", "# Power BI Report\n"),
             Replace("This skill owns the Power BI report lifecycle end to end: requirements and\nscope, visual design, local PBIR/PBIP authoring and preview, and report-item\ntransport to and from Microsoft Fabric.",
                     "This skill covers the dashboard's report in three modes: planning (check the plan against the dashboard and the model before building),\n"
-                    "design (decide how a new page or visual looks), and authoring (edit the PBIR files, validate, publish with `publish_dashboard` and render). A mode that does not\n"
+                    "design (decide how a new page or visual looks), and authoring (edit the PBIR files). A mode that does not\n"
                     "apply is skipped. Model changes (measures, columns, tables) belong to the `semantic-model` skill; this skill covers the report only."),
             DropRange("| Mode | Use when the request... | Existing route examples | Read first |", "## Mode Boundary Rules\n"),
             Replace("## Mode Boundary Rules\n",
                     "| Mode | Use when the request... | Read first |\n|---|---|---|\n"
                     "| `planning` | starts a dashboard task: the plan is checked against the dashboard and the model, the model is inventoried, and anything vague is settled before building | [references/planning.md](references/planning.md) |\n"
                     "| `design` | adds a new page, or a visual with nothing similar to copy: archetype, chart choice, layout, color, typography, theme, accessibility | [references/design.md](references/design.md) |\n"
-                    "| `authoring` | edits the PBIR files, validates them, publishes to the Agent Sandbox workspace with `publish_dashboard`, and renders the result: pages, visuals, filters, slicers, bookmarks, themes, formatting | [references/authoring.md](references/authoring.md) |\n\n"
+                    "| `authoring` | edits the PBIR files: pages, visuals, filters, slicers, bookmarks, themes, formatting | [references/authoring.md](references/authoring.md) |\n\n"
                     "## Mode Boundary Rules\n"),
             Replace("- `authoring` changes local files and performs preview/validation. It does not\n  publish to Fabric.\n"
                     "- `management` transports definitions and manages Fabric report items. It does\n  not invent or directly author PBIR content.\n"
                     "- `planning` owns the guided requirements-to-approval flow for a new report. A\n  focused edit to an existing report goes directly to `authoring`.",
-                    "- `authoring` edits the files, validates them, publishes to the Agent Sandbox workspace\n  with `publish_dashboard`, and renders the result.\n"
                     "- `planning` checks the plan before any edit. It is short for a focused edit to an\n  existing page, which then goes straight to `authoring` without `design`."),
             Replace("A greenfield request can span modes in this order:\n\n```text\nplanning -> design -> authoring -> management\n```\n\n"
                     "Handle one mode at a time. Announce each switch and read the new mode reference\nbefore starting that part. The `planning` approval gate is a turn boundary:\n"
@@ -259,7 +257,7 @@ SKILLS = {
             Replace("| `design` | Produce the complete `Design Brief:` contract, including `design_identity` and a page archetype/layout contract for every page. Do not edit PBIR or call Fabric APIs. |",
                     "| `design` | The design for each new page or visual: archetype and variant, chart choices, and the layout the plan gives, checked against the pre-flight list. Do not edit PBIR. |"),
             Replace("| `authoring` | Persist the requested PBIR/PBIP changes, validate each logical batch, then complete the selected preview and screenshot-review workflow required by the authoring reference. Do not publish. |",
-                    "| `authoring` | The requested PBIR and model changes, validated after each batch, then published with `publish_dashboard`, the last publish being the final state of the files, and every changed page rendered and reviewed after it. |"),
+                    "| `authoring` | The requested PBIR and model changes. |"),
             Replace("| `management` | Complete the requested Fabric report operation, including LRO polling and documented readback verification. |\n", ""),
             Replace("- In `planning` mode, also read `references/planning-part-02.md` before\n  producing `_brief/report-spec.md`; it contains the required canonical design\n  contract and approval checks.\n", ""),
             Replace("- Across a multi-turn task, retain a compact working state containing resolved\n  workspace/item/model IDs, local and downloaded paths, and references already\n"
@@ -285,15 +283,15 @@ SKILLS = {
                     "the real dashboard and model before you edit anything, so the build starts from facts.\n\n"
                     "1. Check the plan for vagueness before anything else. For a new page or dashboard it is vague if audience, purpose, page count, or "
                     "desired filters/slicers are missing; for an edit, if it does not say which page to change and how. If it is vague, stop and end the task with a blocking question.\n"
-                    "2. Inventory the published dashboard (`powerbi-report-author preview-pages` and `preview-visuals`) and the published model (`run_dax_query` with "
-                    "`INFO.VIEW.TABLES()`, `COLUMNS()`, `MEASURES()` and `RELATIONSHIPS()`), using the summary under *Model inventory*, and write that summary to `/tmp/model-inventory.md`. "
-                    "Then compare it with the files you start from: if the published dashboard or model does not match them (a page, table, column or measure in one and not the other), "
-                    "stop and end the task with a blocking question; publish over it only if the plan says the user knows about the mismatch and asked you to.\n"
+                    "2. Understand the current dashboard as far as the request needs. In the sandbox you have the files under `dashboard/pbip` and "
+                    "`powerbi-report-author preview-pages` and `preview-visuals`, which read them. For what is published you have `run_dax_query` for the model and "
+                    "`render_dashboard` for the report. If you notice a significant difference between the published version and the files, stop and end the task with a "
+                    "blocking question, unless the plan says to publish over it. Write what you learn to `/tmp/model-inventory.md`, using the headings under *Model inventory*.\n"
                     "3. Check that every page, measure and field the plan names exists, or that you can build it from the model and the data in BigQuery, and that the plan "
                     "covers what is listed under *Slicers and interactions*. If something it names does not exist and its meaning is not clear enough to build, or something essential cannot be done, "
                     "stop and end the task with a blocking question. A smaller "
                     "gap is a sensible choice that you list as an assumption.\n"
-                    "4. Write the todo list: model changes first, then each page's visuals, then `validate_dashboard`, `publish_dashboard` and `render_dashboard`.\n\n"
+                    "4. Write the todo list for the work, including the validation steps.\n\n"
                     "**Deliverable:** the inventory and the todo list. Then read `design.md` for a new page or visual, or `authoring.md` for an edit.\n"),
             DropRange("> **Required continuation.**", "### Round 2 — Model Inventory and Scope\n"),
             Replace("### Round 2 — Model Inventory and Scope\n", "## Model inventory\n"),
@@ -306,13 +304,8 @@ SKILLS = {
             DropRange("Goal: lock the design identity, accessibility baseline, and delivery target.", "Design defaults (these come from the design skill's gotchas + base theme;"),
             Replace("Design defaults (these come from the design skill's gotchas + base theme;\napplied automatically unless the user overrides):",
                     "These come from the design gotchas and the base theme, and apply unless the plan says otherwise:"),
-            AppendSlice("skills/powerbi-report-cli/references/planning-part-02.md", "## Validation Standards\n", None, [
-                Replace("- `definition.pbir` points to the expected semantic model.\n", ""),
-                Replace("- Power BI Desktop opens the `.pbip`.\n- Desktop reload succeeds.\n"
-                        "- Screenshot capture succeeds for at least the cover and any newly authored\n  pages.\n- If published, Fabric LRO returns `Succeeded`.",
-                        "- `validate_dashboard` passes.\n- The last `publish_dashboard` call is the final state of the files.\n- Every changed page renders without errors after that publish."),
-                Replace("- Generated PBIR is safer than hand-editing individual visual JSON files.\n- Model changes must be persisted before Desktop reload.\n",
-                        "- Model changes must be published with `publish_dashboard` before a visual that uses them renders; otherwise it fails with `Missing_References`.\n"),
+            AppendSlice("skills/powerbi-report-cli/references/planning-part-02.md", "## Anti-Patterns and Pitfalls\n", None, [
+                Replace("- Generated PBIR is safer than hand-editing individual visual JSON files.\n- Model changes must be persisted before Desktop reload.\n", ""),
                 Replace("- Desktop validation catches issues that JSON validation cannot.", "- Rendering catches issues that validation cannot."),
                 Replace("- Fabric publishing is sensitive to `byConnection` schema and theme paths.\n", ""),
             ]),
@@ -322,24 +315,13 @@ SKILLS = {
         Reference("skills/powerbi-report-cli/references/authoring.md", "authoring.md", [
             DropRange("## Contents\n", "# powerbi-report-cli authoring mode -- Power BI Report Authoring (PBIR/PBIP)\n"),
             Replace("# powerbi-report-cli authoring mode -- Power BI Report Authoring (PBIR/PBIP)\n",
-                    "# Authoring Mode: Power BI Report (PBIR/PBIP)\n\n"
-                    "> **AUTHORING COMPLETION GATE — MANDATORY FOR REPORT EDITS**\n>\n"
-                    "> **Validation and rendering are paired. A passing `validate_dashboard` is never task completion.** Any task that creates or "
-                    "modifies rendered report content is incomplete until:\n>\n"
-                    "> 1. `validate_dashboard` passes.\n"
-                    "> 2. The dashboard is published with `publish_dashboard`, and the last publish is the final state of the files.\n"
-                    "> 3. Every affected page is rendered with `render_dashboard` after that publish.\n"
-                    "> 4. The renders are reviewed using `screenshot-review.md`.\n"
-                    "> 5. Visible issues are fixed and the `validate_dashboard`, `publish_dashboard`, `render_dashboard` and review loop is repeated.\n>\n"
-                    "> Render each page changed by page, visual, filter, slicer, bookmark or layout edits, and every page for report-wide changes such as "
-                    "themes or global formatting. If a page cannot be rendered or reviewed, say so in your report instead of claiming completion.\n"),
+                    "# Authoring Mode: Power BI Report (PBIR/PBIP)\n"),
             Replace("This skill enables reading", "This mode enables reading"),
             DropRange("- **Desktop terminal rule (highest priority):**", "- Use this skill only for concrete PBIR/PBIP report-file mechanics"),
             Replace("- Use this skill only for concrete PBIR/PBIP report-file mechanics such as pages, visuals, filters, slicers, navigation, bookmarks, themes, formatting, validation, previews, and screenshots.",
                     "- Use this mode only for concrete PBIR/PBIP report-file mechanics such as pages, visuals, filters, slicers, navigation, bookmarks, themes, formatting, validation, publishing, and renders."),
             Replace("- Validate PBIR with `powerbi-report-author validate` after each logical batch.\n  Every successful schema validation must continue into fresh screenshot\n"
-                    "  capture and review; never stop at the validation result.",
-                    "- Validate PBIR with `validate_dashboard` after each logical batch. Every successful\n  validation must continue into `publish_dashboard`, a fresh render and a review; never stop\n  at the validation result."),
+                    "  capture and review; never stop at the validation result.\n", ""),
             DropRange("- Use the `powerbi-report-author preview` command for rendered-output", "- Use CLI capability lookup before writing visual roles, formatting objects"),
             Replace("- Use CLI capability lookup before writing visual roles, formatting objects, enum values, selectors, or expression encodings.",
                     "- Use CLI capability lookup before writing visual roles, formatting objects, enum values, selectors, or expression encodings.\n"
@@ -365,12 +347,9 @@ SKILLS = {
                 "selector requirements; do not infer these from memory.\n"
                 "5. **Check common pitfalls** → read `pitfalls.md` before editing when the change touches visuals, bindings, filters, formatting, layout or "
                 "rendered output.\n"
-                "6. **Validate** → run `validate_dashboard` after every logical batch of PBIR changes, then always continue to step 7.\n"
-                "7. **Publish and render** → publish with `publish_dashboard`, render every affected page with `render_dashboard`, and review the renders "
-                "using `screenshot-review.md`. Do not proceed until both validation and visual review pass. For dashboard builds, page scaffolding is not "
-                "completion: each requested page needs data-bound visuals.\n"
-                "8. **Finish** → the last publish must be the final state of the files, with every changed page rendered after it. Give the user a concise "
-                "summary of what was done and any issues (major and minor).\n"),
+                "6. **Review** → review each render using `screenshot-review.md`. For dashboard "
+                "builds, page scaffolding is not completion: each requested page needs data-bound visuals.\n"
+                "7. **Finish** → give a concise summary of what was done and any issues (major and minor).\n"),
             Append(
                 "\n## Deleting a page, visual or bookmark\n\n"
                 "Remove it and everything that points at it.\n\n"
@@ -415,16 +394,12 @@ SKILLS = {
             Replace("- [Desktop verification checklist](#desktop-verification-checklist)\n", ""),
             Replace("has no bookmarks, use the schema versions in the templates below and let\n   Desktop upgrade them on save.",
                     "has no bookmarks, use the schema versions in the templates below."),
-            Replace("6. Run `powerbi-report-author validate <Report>.Report`.\n"
-                    "7. Reload in Desktop and exercise every forward and reverse transition.",
-                    "6. Run `validate_dashboard`.\n"
-                    "7. Publish with `publish_dashboard`, then use `render_dashboard` to check every forward and reverse transition."),
+            Replace('\n6. Run `powerbi-report-author validate <Report>.Report`.\n7. Reload in Desktop and exercise every forward and reverse transition.', ''),
             Replace("`powerbi-report-author validate` reports", "`validate_dashboard` reports"),
             DropRange("## Desktop verification checklist\n", "## Anti-patterns\n"),
         ]),
-        authoring("button", Replace("3. For each clipped button, apply **one** fix and reload.", "2. For each clipped button, apply **one** fix and render again."),
-                  Replace("After authoring, run the preview verification loop\n(preview.md (see `preview.md`)) and **inspect the screenshot of each button**:",
-                          "After authoring, run `publish_dashboard` and look at the page with `render_dashboard`, and **inspect each button**:"),
+        authoring("button", Replace('3. For each clipped button, apply **one** fix and reload.', '2. For each clipped button, apply **one** fix.'),
+                  Replace('The formula and self-check cannot guarantee a non-rectangular label fits — the render is the\nauthoritative test. After authoring, run the preview verification loop\n(preview.md (see `preview.md`)) and **inspect the screenshot of each button**:', "The formula and self-check cannot guarantee a non-rectangular label fits; only a render shows it.\nWhen you review the page's render, **inspect each button**:"),
                   Replace("1. `powerbi-report-author validate \"<folder>\"` →\n"
                           "   `powerbi-report-author preview \"<folder>\" --host desktop --status` (the\n"
                           "   unsaved-changes preflight required before every reload) →\n"
@@ -502,8 +477,7 @@ SKILLS = {
                           "- **Org visuals load lazily from the tenant store.** The first reload/screenshot\n"
                           "  can come back blank while the tenant blob is still resolving. Wait ~15–20s and,\n"
                           "  if still blank, **reload a second time** before concluding it is broken.\n", ""),
-                  Replace("always verify org visuals by rendering in Desktop, since `validate` cannot reach\n  the tenant store.",
-                          "always verify org visuals by rendering with `render_dashboard`, since validation cannot reach\n  the tenant store."),
+                  Replace(' —\n  always verify org visuals by rendering in Desktop, since `validate` cannot reach\n  the tenant store.', ', since validation cannot reach\n  the tenant store.'),
                   DropFrom("\n> **⚠️ Custom-visual clobber symptom.**")),
         authoring("conditional-formatting",
                   Replace("Read this when applying data-driven visual formatting in PBIR. Conditional",
@@ -511,21 +485,16 @@ SKILLS = {
                           "Read this when applying data-driven visual formatting in PBIR. Conditional"),
                   Replace("Explain the limitation and offer a static\n   value or a supported built-in visual/target.",
                           "Use a static\n   value or a supported built-in visual/target, and say why in your report."),
-                  Replace("5. Run PBIR validation, load the latest report, and review a screenshot with\n"
-                          "   representative nonblank, blank, and invalid values where those cases can\n   occur.",
-                          "5. Run `validate_dashboard`, `publish_dashboard`, and check the render. Cover representative\n"
-                          "   nonblank, blank, and invalid values where those cases can occur."),
+                  Replace('5. Run PBIR validation, load the latest report, and review a screenshot with\n   representative nonblank, blank, and invalid values where those cases can\n   occur.', '5. Cover representative nonblank, blank, and invalid values where those cases can occur.'),
                   Replace("Replace it with an exact catalog name before reloading", "Replace it with an exact catalog name before publishing"),
-                  Replace("Run `powerbi-report-author validate <path>`, reload\n   the report in Desktop, and confirm that the formatting appears.",
-                          "Run `validate_dashboard`, `publish_dashboard`, and confirm with\n   `render_dashboard` that the formatting appears.")),
+                  Replace('\n5. **Validate and render.** Run `powerbi-report-author validate <path>`, reload\n   the report in Desktop, and confirm that the formatting appears.', '')),
         authoring("conditional-formatting-part-02", CONTINUATION),
         authoring("conditional-formatting-part-03", CONTINUATION,
                   Replace("delegate the model-side\n> change to the `semantic-model-authoring` skill / Power BI Modeling MCP (out of\n"
                           "> scope for this skill), or ask the user to add or fix the measure.",
                           "make the model-side\n> change with the `semantic-model` skill.")),
         authoring("conditional-formatting-part-04", CONTINUATION,
-                  Replace("`powerbi-report-author validate` reports it\n> as `PBIR_FILLRULE_STOP_DOUBLE_WRAP`; still verify gradients after a Desktop\n> reload.",
-                          "`validate_dashboard` reports it\n> as `PBIR_FILLRULE_STOP_DOUBLE_WRAP`; still verify gradients with `render_dashboard`.")),
+                  Replace('`powerbi-report-author validate` reports it\n> as `PBIR_FILLRULE_STOP_DOUBLE_WRAP`; still verify gradients after a Desktop\n> reload.', '`validate_dashboard` reports it\n> as `PBIR_FILLRULE_STOP_DOUBLE_WRAP`.')),
         authoring("conditional-formatting-part-05", CONTINUATION,
                   Replace("(needs a local `.pbip` semantic model or a live model via Modeling\n> MCP)",
                           "(read the model's TMDL files or query it with `run_dax_query`)")),
@@ -535,8 +504,8 @@ SKILLS = {
                   Replace("**text**. Warn the\n  user; offer to use an ImageUrl field or set the category on a column/measure\n  holding valid image URLs.",
                           "**text**. Say so in your report, and use an ImageUrl field or set the category on a column/measure\n  holding valid image URLs.")),
         authoring("formatting-overview",
-                  Replace("verify rendered defaults in Desktop", "verify rendered defaults with `render_dashboard`"),
-                  Replace("verify it through\nthe host-specific workflow in preview.md (see `preview.md`).", "verify it with\n`render_dashboard`.")),
+                  Replace('; verify rendered defaults in Desktop', ''),
+                  Replace('\nWhen a cascade result matters visually, verify it through\nthe host-specific workflow in preview.md (see `preview.md`).', '')),
         authoring("formatting", Replace("use `powerbi-report-author validate`", "use `validate_dashboard`")),
         authoring("formatting-part-02", CONTINUATION,
                   Replace("Ask the user to clarify — page canvas or visual plot area", "Pick by context, page canvas or visual plot area, and say which in your report")),
@@ -546,17 +515,14 @@ SKILLS = {
         authoring("theming",
                   Replace("Referenced from SKILL.md. Read formatting-overview.md", "Read formatting-overview.md"),
                   Replace("5. Reload Desktop — the new filename guarantees cache invalidation.", "5. The new filename guarantees cache invalidation in Desktop."),
-                  Replace("Run `powerbi-report-author validate <path-to-.Report-dir>` after\n> registering or editing a theme to catch registration and theme JSON issues\n"
-                          "> before following the host-specific workflow in preview.md (see `preview.md`).",
-                          "Run `validate_dashboard` after\n> registering or editing a theme to catch registration and theme JSON issues\n> before `publish_dashboard`.")),
+                  Replace('\n>\n> Run `powerbi-report-author validate <path-to-.Report-dir>` after\n> registering or editing a theme to catch registration and theme JSON issues\n> before following the host-specific workflow in preview.md (see `preview.md`).', '')),
         authoring("theming-part-02", CONTINUATION,
                   Replace("see SKILL.md Anti-Patterns (see `../authoring-part-04.md`, section `anti-patterns-and-pitfalls`)", "see `pitfalls.md`"),
                   Replace("`powerbi-report-author validate` does not infer", "`validate_dashboard` does not infer")),
         authoring("re-theming", Replace("Referenced from SKILL.md and theming.md. Read this", "Read this")),
         authoring("re-theming-part-02", CONTINUATION,
                   Replace("Do NOT preview until this entire step is complete.", "Do NOT run `publish_dashboard` until this entire step is complete."),
-                  Replace("Follow the standard edit -> validate -> preview -> screenshot review loop in\npreview.md (see `preview.md`).",
-                          "Follow the standard edit, `validate_dashboard`, `publish_dashboard`, `render_dashboard` loop.")),
+                  Replace('#### Step 4: Validate and verify\n\nFollow the standard edit -> validate -> preview -> screenshot review loop in\npreview.md (see `preview.md`).\n\n', '')),
         authoring("re-theming-part-03", CONTINUATION),
         authoring("slicers", Replace("`powerbi-report-author validate` checks", "`validate_dashboard` checks")),
         authoring("slicers-part-02", CONTINUATION,
@@ -579,7 +545,7 @@ SKILLS = {
                           "Use the verified field identity and date values in the report templates below. If\n"
                           "you cannot find a suitable date field, author the unselected Manual state and say\n"
                           "so in your report."),
-                  Replace("validate the target Desktop build by screenshot and use", "check the render with `render_dashboard` and use")),
+                  Replace('validate the target Desktop build by screenshot and use', 'use'), Replace('only after both inputs visibly share one row.', 'only when a render shows both inputs on one row.')),
         authoring("filters",
                   Replace("Referenced from SKILL.md. Read this when creating", "Read this when creating"),
                   Replace("`powerbi-report-author validate` flags", "`validate_dashboard` flags")),
@@ -608,16 +574,9 @@ SKILLS = {
                           "   model-side change with the `semantic-model` skill. If the model change cannot\n"
                           "   be made, end with a blocking question instead of building a worse (static)\n"
                           "   visual."),
-                  Replace("5. Build the slicer and target visual, validate PBIR, follow the host-specific\n"
-                          "   workflow in preview.md (see `preview.md`), and review the rendered result.",
-                          "5. Build the slicer and target visual, run `validate_dashboard`, `publish_dashboard`, and\n"
-                          "   review the result with `render_dashboard`."),
-                  Replace("4. Validate PBIR, follow the host-specific workflow in\n"
-                          "   preview.md (see `preview.md`), and review the rendered result.",
-                          "4. Run `validate_dashboard`, `publish_dashboard`, and review the result with\n"
-                          "   `render_dashboard`."),
-                  Replace("always\ncomplete the selected-host preview and screenshot review loop in\npreview.md (see `preview.md`).",
-                          "always\nrun `publish_dashboard` and check the result with `render_dashboard`.")),
+                  Replace('5. Build the slicer and target visual, validate PBIR, follow the host-specific\n   workflow in preview.md (see `preview.md`), and review the rendered result.', '5. Build the slicer and target visual.'),
+                  Replace('\n4. Validate PBIR, follow the host-specific workflow in\n   preview.md (see `preview.md`), and review the rendered result.', ''),
+                  Replace('Bad field references can pass `validate` but render an error icon, so always\ncomplete the selected-host preview and screenshot review loop in\npreview.md (see `preview.md`).', 'Bad field references can pass validation but render an error icon.')),
         authoring("powerbi-report-author-cli",
                   Replace("- [Rendering preview vs PBIR inspection commands](#rendering-preview-vs-pbir-inspection-commands)\n", ""),
                   Replace("- [Preview result handling](#preview-result-handling)\n  - [Screenshot options](#screenshot-options)\n", ""),
@@ -635,12 +594,8 @@ SKILLS = {
                   DropRange("> **Mandatory completion gate:**", "> **Before editing existing reports:**"),
                   Replace("`powerbi-report-author validate` flags duplicates", "`validate_dashboard` flags duplicates"),
                   Replace("SKILL.md § PBIR File Layout (see `../authoring-part-02.md`, section `pbir-file-layout`)", "`pbir-layout.md`"),
-                  Replace("and rerun the host-specific workflow in\npreview.md (see `preview.md`). Only change", "and run `publish_dashboard`. Only change"),
-                  Replace("6. Validate and reload the report, select a source data point carrying the\n"
-                          "   field, navigate to the target, and confirm the filter context and Back action.",
-                          "6. Run `validate_dashboard`, `publish_dashboard`, and render the target page. `render_dashboard` cannot click\n"
-                          "   a source visual, so check the drillthrough wiring in the files and say in your report that the\n"
-                          "   interaction itself was not exercised.")),
+                  Replace(', and rerun the host-specific workflow in\npreview.md (see `preview.md`). Only change', '. Only change'), Replace('stable), update all', 'stable), and update all'),
+                  Replace('6. Validate and reload the report, select a source data point carrying the\n   field, navigate to the target, and confirm the filter context and Back action.', '6. `render_dashboard` cannot click a source visual, so check the drillthrough wiring in the files and say in your report that the\n   interaction itself was not exercised.')),
         authoring("screenshot-review",
                   Replace("Use this file after mandatory screenshot capture through the host-specific\nworkflow in preview.md (see `preview.md`) and before reporting completion for every\n"
                           "rendered-output change. Capturing and reviewing every affected page is part of\nthe authoring completion gate, even when the user did not explicitly request a\nscreenshot.\n\n"
@@ -648,7 +603,7 @@ SKILLS = {
                           "complete review loop finishes.",
                           "Use this file after you render a page with `render_dashboard` and before you finish a\nrendered-output change. Review every affected page."),
                   Replace("1. The screenshot image file paths.", "1. The rendered image."),
-                  Replace("then repeat the PBIR validate -> preview -> screenshot review loop.", "then repeat the `validate_dashboard`, `publish_dashboard`, `render_dashboard` loop."),
+                  Replace(",\nthen repeat the PBIR validate -> preview -> screenshot review loop.", "."),
                   DropRange("> **Screenshot scope:**", "## Checklist\n"),
                   Replace("- Does each measure follow `Design Brief.color_map` consistently across visuals?", "- Does each measure keep the same color across visuals?"),
                   Replace("| Same measure uses different colors | `Design Brief.color_map` was not applied consistently | Re-read the brief and set each measure-bound visual to the mapped color. |",
@@ -656,14 +611,14 @@ SKILLS = {
         Reference("skills/powerbi-report-cli/references/authoring-part-02.md", "pbir-layout.md", [
             DropRange("# powerbi-report-cli authoring mode -- Power BI Report Authoring (PBIR/PBIP) - Part 2", "## PBIR File Layout\n"),
             DropFrom("\n---\n"),
-            Replace("the normal edit -> validate -> preview -> review loop.", "the normal edit, `validate_dashboard`, `publish_dashboard`, `render_dashboard` loop."),
+            Replace(' with\nthe normal edit -> validate -> preview -> review loop.', '.'), Replace(' and validate after changes', ''),
             Replace("the binding must be repointed (see `model-binding.md` (see `authoring/model-binding.md`))\n  before the report opens in Desktop.",
                     "the binding must be repointed before the report opens in Desktop (the publish tool sets the model binding)."),
             Replace("## PBIR File Layout\n", "# PBIR File Layout\n"),
             Replace("└── <Report>.SemanticModel/                # OUT OF SCOPE", "└── <Report>.SemanticModel/                # the semantic-model skill"),
             Replace("Preserve schema/version unless intentionally migrating; when creating/repointing/repairing the binding, see `model-binding.md` (see `authoring/model-binding.md`)",
                     "Leave it alone; the publish tool sets the model binding"),
-            Replace("Validate with `powerbi-report-author validate`.", "Validate with `validate_dashboard`."),
+            Replace(' Validate with `powerbi-report-author validate`.', ''),
         ]),
         Reference("skills/powerbi-report-cli/references/authoring-part-04.md", "pitfalls.md", [
             Replace("# powerbi-report-cli authoring mode -- Power BI Report Authoring (PBIR/PBIP) - Part 4\n\n"
@@ -684,7 +639,7 @@ SKILLS = {
                     "**Do not apply it.** Choose an alternative (filter negatives, switch measure, use `labelDisplayUnits`) and say which in your report. "
                     "Apply `logAxisScale: true` only when every bound value is confirmed positive"),
             Replace("do not appear after preview reload", "do not appear after publishing"),
-            Replace(", validate, then follow the host-specific reload workflow in preview.md (see `authoring/preview.md`)", ", `validate_dashboard`, then `publish_dashboard`"),
+            Replace(', validate, then follow the host-specific reload workflow in preview.md (see `authoring/preview.md`)', ''),
             Replace("old hex values before preview", "old hex values before publishing"),
             DropRange("| Using PowerShell `ConvertTo-Json`", "| Using regex or string replacement"),
             DropFrom("\n## Official Documentation\n"),
@@ -737,9 +692,8 @@ SKILLS = {
                        "   `powerbi-report-author preview <path> --host desktop --screenshot <dir> --all-pages`\n"
                        "   — these become the \"before\" evidence.",
                        "2. **Render all pages** — with `render_dashboard`. These become the \"before\" evidence."),
-               Replace("`powerbi-report-author validate` after each batch", "`validate_dashboard` after each batch"),
-               Replace("layout regressions before reload", "layout regressions before publishing"),
-               Replace("**Final Audit** — screenshot AFTER.", "**Final Audit** — render again AFTER."),
+               Replace(' Authoring\n   runs `powerbi-report-author validate` after each batch to catch theme\n   mismatches (`PBIR_THEME_*`), formatting drift (`PBIR_FORMATTING_*`), and\n   layout regressions before reload — common brownfield-edit defects.', ''),
+               Replace('**Final Audit** — screenshot AFTER.', '**Final Audit** — compare the final renders with the "before" ones.'),
                Replace("`powerbi-report-author validate`\n      catches", "`validate_dashboard`\n      catches"),
                AUTHORING_MODE),
         design("chart-selection"),

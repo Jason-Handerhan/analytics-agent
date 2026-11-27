@@ -1,7 +1,7 @@
 """Markdown the system writes for people to read: how tall a chat answer will display, where a too-tall answer is split, the
 table-size check, the approval cards, the plan view and the pull request description."""
 import math
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
 
 import mistune
 
@@ -194,45 +194,32 @@ def numbered_markdown_list(items: list[str]) -> str:
 class PlanMarkdown:
     """Every part of the plan view, in the order it displays. A part left empty is left out."""
     title: str = ""
+    subagent_type: str = ""
     goal: str = ""
+    scope: str = ""
+    audience: str = ""
     branch_and_reviewer: str = ""
-    requirements: str = ""
-    constraints: str = ""
-    tests: str = ""
-    decisions: str = ""
-    files_to_imitate: str = ""
-    suggested_code: str = ""
+    description: str = ""
 
     def render(self) -> str:
-        labeled_sections = {"Requirements": self.requirements, "Constraints": self.constraints, "Tests": self.tests,
-                            "Decisions": self.decisions, "Files to imitate": self.files_to_imitate,
-                            "Suggested code": self.suggested_code}
-        parts = [self.title, self.goal, self.branch_and_reviewer,
-                 *[f"**{label}**\n\n{text}" for label, text in labeled_sections.items() if text]]
-        return "\n\n".join(parts)
+        return "\n\n".join(part for part in astuple(self) if part)
 
 
 def render_plan_markdown(plan: CodingAgentPlan) -> str:
-    """A coding plan as markdown, every section it has."""
+    """A coding plan as markdown: its header fields, then its description."""
     markdown = PlanMarkdown()
 
-    # Title, goal, base branch and reviewer: always present
+    # Always present
     markdown.title = f"### {plan.name}"
+    markdown.subagent_type = f"**Type:** {plan.subagent_type}"
     markdown.goal = f"**Goal:** {plan.goal}"
+    markdown.scope = f"**Scope:** {plan.scope}"
     markdown.branch_and_reviewer = f"**Base branch:** `{plan.base_branch}`, **Reviewer:** {'on' if plan.review else 'off'}"
 
-    # Requirements, constraints, tests and decisions: one line each
-    markdown.requirements = numbered_markdown_list(plan.requirements)
-    markdown.constraints = markdown_bullets(plan.constraints)
-    markdown.tests = markdown_bullets(plan.tests)
-    markdown.decisions = markdown_bullets(plan.decisions)
+    # Audience: dashboard plans only
+    markdown.audience = f"**Audience:** {plan.audience}" if plan.audience else ""
 
-    # Files to imitate: the path and what to follow in it
-    markdown.files_to_imitate = markdown_bullets([f"`{file.path}`: {file.what}" for file in plan.files_to_imitate])
-
-    # Suggested code: its purpose and target file, then the code in a block
-    markdown.suggested_code = "\n\n".join(
-        f"{item.purpose}{f' (`{item.file}`)' if item.file else ''}\n\n```\n{item.code}\n```" for item in plan.suggested_code)
+    markdown.description = plan.description
     return markdown.render()
 
 
@@ -240,20 +227,21 @@ def render_plan_markdown(plan: CodingAgentPlan) -> str:
 class PullRequestBody:
     """Every part of the pull request description, in the order it displays. A part left empty is left out."""
     summary: str = ""
-    requirements: str = ""
     changes: str = ""
     checks: str = ""
     reviewer_agent: str = ""
     coding_agent_report: str = ""
     assumptions: str = ""
     follow_up_questions: str = ""
+    plan_details: str = ""
     footer: str = ""
 
     def render(self) -> str:
-        headed_sections = {"Requirements": self.requirements, "Changes": self.changes, "Checks": self.checks, "Reviewer agent": self.reviewer_agent,
+        headed_sections = {"Changes": self.changes, "Checks": self.checks, "Reviewer agent": self.reviewer_agent,
                            "Coding agent's report": self.coding_agent_report, "Assumptions": self.assumptions,
                            "Follow-up questions": self.follow_up_questions}
-        parts = [self.summary, *[f"## {heading}\n{text.strip()}" for heading, text in headed_sections.items() if text], self.footer]
+        parts = [self.summary, *[f"## {heading}\n{text.strip()}" for heading, text in headed_sections.items() if text],
+                 self.plan_details, self.footer]
         return "\n\n".join(parts)
 
 
@@ -262,14 +250,12 @@ def build_pull_request_body(task: dict) -> str:
     result = task["coding_agent_result"]
     review = result["review"]
     passed_checks = sum(check["passed"] for check in result["checks"])
+    plan = task["plan"]
     body = PullRequestBody()
 
-    # Summary: the goal and the outcome, with no heading
-    body.summary = (f"**Goal:** {task['plan']['goal']}\n\n"
+    # Summary: the plan's goal, scope and type, and the outcome, with no heading
+    body.summary = (f"**Goal:** {plan['goal']}\n\n**Scope:** {plan['scope']}\n\n**Type:** {plan['subagent_type']}\n\n"
                     f"**Outcome:** {result['outcome']}, {passed_checks} of {len(result['checks'])} checks passed")
-
-    # Requirements: what the plan asked for, one line each
-    body.requirements = numbered_markdown_list(task["plan"]["requirements"])
 
     # Changes: one line per changed file
     body.changes = markdown_bullets([f"`{change['path']}` (+{change['added']} -{change['removed']})" for change in result["files"]])
@@ -294,6 +280,9 @@ def build_pull_request_body(task: dict) -> str:
     # Assumptions and follow-up questions: empty, and so left out, when there are none
     body.assumptions = markdown_bullets(result["assumptions"])
     body.follow_up_questions = markdown_bullets(result["follow_up_questions"])
+
+    # Plan details: the whole description, collapsed
+    body.plan_details = f"<details>\n<summary>Plan details</summary>\n\n{plan['description']}\n\n</details>"
 
     # Footer
     body.footer = f"---\nOpened from coding task `{task['task_id']}`."

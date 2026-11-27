@@ -4,9 +4,9 @@
 The plan you were given was settled with the user before this task started, so this mode interviews no one. It checks the plan against the real dashboard and model before you edit anything, so the build starts from facts.
 
 1. Check the plan for vagueness before anything else. For a new page or dashboard it is vague if audience, purpose, page count, or desired filters/slicers are missing; for an edit, if it does not say which page to change and how. If it is vague, stop and end the task with a blocking question.
-2. Inventory the published dashboard (`powerbi-report-author preview-pages` and `preview-visuals`) and the published model (`run_dax_query` with `INFO.VIEW.TABLES()`, `COLUMNS()`, `MEASURES()` and `RELATIONSHIPS()`), using the summary under *Model inventory*, and write that summary to `/tmp/model-inventory.md`. Then compare it with the files you start from: if the published dashboard or model does not match them (a page, table, column or measure in one and not the other), stop and end the task with a blocking question; publish over it only if the plan says the user knows about the mismatch and asked you to.
+2. Understand the current dashboard as far as the request needs. In the sandbox you have the files under `dashboard/pbip` and `powerbi-report-author preview-pages` and `preview-visuals`, which read them. For what is published you have `run_dax_query` for the model and `render_dashboard` for the report. If you notice a significant difference between the published version and the files, stop and end the task with a blocking question, unless the plan says to publish over it. Write what you learn to `/tmp/model-inventory.md`, using the headings under *Model inventory*.
 3. Check that every page, measure and field the plan names exists, or that you can build it from the model and the data in BigQuery, and that the plan covers what is listed under *Slicers and interactions*. If something it names does not exist and its meaning is not clear enough to build, or something essential cannot be done, stop and end the task with a blocking question. A smaller gap is a sensible choice that you list as an assumption.
-4. Write the todo list: model changes first, then each page's visuals, then `validate_dashboard`, `publish_dashboard` and `render_dashboard`.
+4. Write the todo list for the work, including the validation steps.
 
 **Deliverable:** the inventory and the todo list. Then read `design.md` for a new page or visual, or `authoring.md` for an edit.
 
@@ -63,20 +63,8 @@ These come from the design gotchas and the base theme, and apply unless the plan
 - Place detailed tables near the bottom of the page.
 - Keep report interactions predictable and consistent.
 
-## Validation Standards
-
-A report is not complete until:
-
-- Required PBIP/PBIR files exist.
-- All JSON parses.
-- Pages and visuals are generated in expected counts.
-- `validate_dashboard` passes.
-- The last `publish_dashboard` call is the final state of the files.
-- Every changed page renders without errors after that publish.
-
 ## Anti-Patterns and Pitfalls
 
-- Model changes must be published with `publish_dashboard` before a visual that uses them renders; otherwise it fails with `Missing_References`.
 - DAX filter direction can break dimension aggregations from fact-side flags.
 - High-cardinality slicers need search or prefix filtering.
 - Rendering catches issues that validation cannot.

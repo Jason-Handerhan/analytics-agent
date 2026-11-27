@@ -29,6 +29,14 @@ EXPECTED_AUDIENCE = "api://4b86032f-4507-4239-bf90-a9b1c33c571c"
 POWER_BI_DATASET_ID = "03fe95af-12af-4e00-bbd6-241e942f76bc"
 POWER_BI_WORKSPACE_ID = "8e20abd3-703e-46b8-9832-950249767864"
 
+# Power BI reports the render module can reach: the target name maps to these IDs, a caller never passes one
+POWER_BI_RENDER_TARGETS = {
+    "Instacart ML Model": {"workspace_id": POWER_BI_WORKSPACE_ID, "report_id": "16bcfb86-3246-4851-85cf-3d2bbff33171",
+                   "dataset_id": POWER_BI_DATASET_ID},
+    "Agent Sandbox": {"workspace_id": "120ad9fa-5af5-4113-a2e8-4a3870829cf6", "report_id": "b84e7228-9955-4f40-87df-b8fc3dac692d",
+                      "dataset_id": "71ea68dc-58ae-4bd8-a743-004c0ae332fb"},
+}
+
 # agent_safe (the only dataset agent-sa can read)
 AGENT_SAFE_DATASET = "agent_safe"
 PREDICTION_EXPLANATIONS_TABLE = "prediction_explanations"

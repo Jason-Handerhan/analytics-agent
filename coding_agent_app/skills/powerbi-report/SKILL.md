@@ -6,7 +6,7 @@ description: Edit this dashboard's Power BI report by hand in its PBIR files, in
 # Power BI Report
 
 This skill covers the dashboard's report in three modes: planning (check the plan against the dashboard and the model before building),
-design (decide how a new page or visual looks), and authoring (edit the PBIR files, validate, publish with `publish_dashboard` and render). A mode that does not
+design (decide how a new page or visual looks), and authoring (edit the PBIR files). A mode that does not
 apply is skipped. Model changes (measures, columns, tables) belong to the `semantic-model` skill; this skill covers the report only.
 
 It is a **mode dispatcher** and intentionally contains no detailed procedures.
@@ -20,7 +20,7 @@ payloads, templates, and failure rules.
 |---|---|---|
 | `planning` | starts a dashboard task: the plan is checked against the dashboard and the model, the model is inventoried, and anything vague is settled before building | [references/planning.md](references/planning.md) |
 | `design` | adds a new page, or a visual with nothing similar to copy: archetype, chart choice, layout, color, typography, theme, accessibility | [references/design.md](references/design.md) |
-| `authoring` | edits the PBIR files, validates them, publishes to the Agent Sandbox workspace with `publish_dashboard`, and renders the result: pages, visuals, filters, slicers, bookmarks, themes, formatting | [references/authoring.md](references/authoring.md) |
+| `authoring` | edits the PBIR files: pages, visuals, filters, slicers, bookmarks, themes, formatting | [references/authoring.md](references/authoring.md) |
 
 ## Mode Boundary Rules
 
@@ -31,8 +31,6 @@ payloads, templates, and failure rules.
 - Restyling or reformatting an existing local report is `authoring`, even when
   the request uses design language. Use `design` when the user wants advice or
   a design contract rather than a file change.
-- `authoring` edits the files, validates them, publishes to the Agent Sandbox workspace
-  with `publish_dashboard`, and renders the result.
 - `planning` checks the plan before any edit. It is short for a focused edit to an
   existing page, which then goes straight to `authoring` without `design`.
 
@@ -53,7 +51,7 @@ before starting that part.
 |---|---|
 | `planning` | The model inventory and the todo list. A plan that is vague, or missing something essential, ends the task with a blocking question instead. |
 | `design` | The design for each new page or visual: archetype and variant, chart choices, and the layout the plan gives, checked against the pre-flight list. Do not edit PBIR. |
-| `authoring` | The requested PBIR and model changes, validated after each batch, then published with `publish_dashboard`, the last publish being the final state of the files, and every changed page rendered and reviewed after it. |
+| `authoring` | The requested PBIR and model changes. |
 
 ## Rules
 

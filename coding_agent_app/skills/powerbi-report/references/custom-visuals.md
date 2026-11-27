@@ -270,6 +270,5 @@ valid but renders empty.
   `OrganizationalStoreCustomVisual` `_OrgStore` package (organizational) — the
   root `organizationCustomVisuals` array does **not** suppress the warning because
   it does not render. Also re-check the GUID/type for typos. Suppression is
-  registration-only: it proves the entry exists, not that the visual resolves —
-  always verify org visuals by rendering with `render_dashboard`, since validation cannot reach
+  registration-only: it proves the entry exists, not that the visual resolves, since validation cannot reach
   the tenant store.

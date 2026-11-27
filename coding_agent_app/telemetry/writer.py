@@ -46,6 +46,7 @@ def build_coding_task_row(task: dict, details: RunDetails) -> dict:
 
         "plan_name": plan["name"],
         "plan_goal": plan["goal"],
+        "subagent_type": plan["subagent_type"],
         "base_branch": plan["base_branch"],
         "is_revision": plan["base_branch"] != CODING_AGENT_DEFAULT_BASE_BRANCH,
         "review_requested": plan["review"],

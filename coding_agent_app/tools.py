@@ -6,12 +6,13 @@ import shlex
 from functools import lru_cache
 from typing import Literal
 
+import msal
 from google.api_core.exceptions import ClientError, NotFound
 from google.cloud import bigquery
 from langchain_core.tools import ToolException, tool
 from pydantic import BaseModel, Field
 
-from app.config import CODING_AGENT_DATASETS, GCP_PROJECT_ID
+from app.config import CODING_AGENT_DATASETS, GCP_PROJECT_ID, TENANT_ID, get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,28 @@ def bigquery_failure(error: Exception) -> ToolException:
     logger.error("BigQuery tool call failed", exc_info=error)
     return ToolException(f"BigQuery call failed ({type(error).__name__}: {error}). This is a problem with BigQuery or its "
                          "access, not with your request. Retry once, or carry on without this tool.")
+
+
+# --- Power BI access (shared by the dashboard tools) ----------------------------------------------------
+
+@lru_cache
+def get_power_bi_app() -> msal.ConfidentialClientApplication:
+    """The coding agent's own Power BI service principal. One instance per process, because it caches its tokens."""
+    return msal.ConfidentialClientApplication(
+        get_secret("coding-agent-power-bi-sp-client-id", GCP_PROJECT_ID),
+        authority=f"https://login.microsoftonline.com/{TENANT_ID}",
+        client_credential=get_secret("coding-agent-power-bi-sp-client-secret", GCP_PROJECT_ID))
+
+
+async def get_power_bi_token() -> str:
+    def acquire() -> dict:
+        return get_power_bi_app().acquire_token_for_client(scopes=["https://analysis.windows.net/powerbi/api/.default"])
+
+    result = await asyncio.to_thread(acquire)
+    if "access_token" not in result:
+        raise ToolException(f"Could not sign in to Power BI: {result.get('error_description', result)}. This is a credentials problem, "
+                            "not your request: report that you could not reach Power BI, and do not retry.")
+    return result["access_token"]
 
 
 # --- list_tables ----------------------------------------------------------------------------------------

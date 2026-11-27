@@ -35,9 +35,8 @@ SKILL_FILES = {"notebooks": ("SKILL.md", "read_notebook.py", "write_notebook.py"
 class SandboxSetupError(RuntimeError):
     """The sandbox could not be set up for a run: there is no ready snapshot, or the clone failed."""
 
-# Goes ahead of the plan, which is sent to the agent as JSON
-TASK_PREAMBLE = """The task below is a plan, as JSON. Build what its requirements list, and follow its decisions: choices the user already made.
-The suggested_code was drafted by another agent and never run or compiled; the repo is the source of truth, so if a snippet conflicts with the repo or with a decision, follow those and say so in your report. The files_to_imitate show the style to follow."""
+# Goes ahead of the plan's header and description
+TASK_PREAMBLE = """Build what the plan asks for. Follow the decisions the user made. Validate any suggested code yourself. If it conflicts with the repo or a decision, follow the repo or the decision, not the code, and say so in your report. If you see a clearly better approach, stop with a blocking question before building; for a small improvement, build it and list it under assumptions. Any files to imitate show the style to follow."""
 
 
 def sum_token_counts(usage_metadata_list: list[dict]) -> TokenCounts:
@@ -250,8 +249,11 @@ async def run_coding_task(task_id: str) -> None:
             new_branch = None
             is_revision = True
 
-        # the agent is sent the preamble, then the plan as JSON without review and base_branch, which only the service uses
-        task_text = f"{TASK_PREAMBLE}\n\n{plan.model_dump_json(indent=2, exclude={'review', 'base_branch'})}"
+        # the agent is sent the preamble, the plan's header fields, then its description; review and base_branch are only for the service
+        header = [f"Name: {plan.name}", f"Type: {plan.subagent_type}", f"Goal: {plan.goal}", f"Scope: {plan.scope}"]
+        if plan.audience:
+            header.append(f"Audience: {plan.audience}")
+        task_text = "\n".join([TASK_PREAMBLE, "", *header, "", plan.description])
         commit_message = f"agent: {plan.name} (task {task_id})\n\n{plan.goal}"
 
         result, run_details = await execute_coding_run(task_id=task_id, task_text=task_text, review=plan.review, base_branch=plan.base_branch,

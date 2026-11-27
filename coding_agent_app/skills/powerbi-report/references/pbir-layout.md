@@ -31,7 +31,7 @@ A PBIP project on disk looks like this:
 | `.platform` | Fabric/PBIP report item metadata | Keep it with the `.Report` folder |
 | `definition.pbir` | Report → semantic model binding via `byPath` or `byConnection` | Leave it alone; the publish tool sets the model binding |
 | `version.json` | PBIR format metadata | Preserve the full scaffolded file, including `$schema` |
-| `report.json` | Report-level settings, themes, resources | Edit through references and validate after changes |
+| `report.json` | Report-level settings, themes, resources | Edit through references |
 | `pages.json` | Page order and active page | Add every new page to `pageOrder`; preserve `activePageName` |
 | `page.json` | Page metadata, size, filters | Preserve dimensions unless resizing is approved |
 | `visual.json` | Visual type, position, query, formatting | Validate roles and formatting with CLI metadata |
@@ -57,7 +57,7 @@ releases (e.g. `visualContainer/2.9.0`, `page/2.1.0`, `report/3.3.0` at the
 time of writing — newer values may appear in any user's PBIP). When editing,
 **always preserve the existing `$schema` value**; when adding a new file, copy
 the `$schema` URL from an existing file of the same type in the same report.
-Do not bump versions on your own. Validate with `validate_dashboard`.
+Do not bump versions on your own.
 
 ### Greenfield: creating a brand-new report
 
@@ -82,8 +82,7 @@ powerbi-report-author scaffold <output-dir> --name <ReportName> \
 This writes a complete, valid PBIP shell — `.pbip`, `.platform`,
 `definition.pbir`, `version.json`, `report.json` (with a real Desktop base
 theme), `pages.json`, and one empty `page.json` — then self-validates the result
-offline. Use it for **every** new report, then author pages/visuals into it with
-the normal edit, `validate_dashboard`, `publish_dashboard`, `render_dashboard` loop.
+offline. Use it for **every** new report, then author pages/visuals into it.
 
 - **`--model-path`** — relative path (from the `.Report` dir) to a co-located
   semantic model, e.g. `Sales.SemanticModel`. Omit it to get a placeholder

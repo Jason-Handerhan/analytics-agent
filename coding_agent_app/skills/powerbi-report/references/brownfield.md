@@ -33,11 +33,8 @@ new), end with a blocking question instead of proceeding.
    visuals, themes, and chrome that change. Include rationale for each
    delta. Bookmarks and `visualLink` refs are preserved unless the redesign
    explicitly retires them; flag any that target ids that change.
-5. **Hand off to authoring** for the surgical edits. Authoring
-   runs `validate_dashboard` after each batch to catch theme
-   mismatches (`PBIR_THEME_*`), formatting drift (`PBIR_FORMATTING_*`), and
-   layout regressions before publishing — common brownfield-edit defects.
-6. **Final Audit** — render again AFTER. Verify the redesign delivered on the
+5. **Hand off to authoring** for the surgical edits.
+6. **Final Audit** — compare the final renders with the "before" ones. Verify the redesign delivered on the
    target tone without breaking what worked.
 
 ## How each Step changes in brownfield mode

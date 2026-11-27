@@ -95,8 +95,6 @@ Calculated columns are evaluated during data refresh for every row. Use them spa
 - Always set an appropriate `formatString` for the measure (see [Format String Reference](#format-string-reference)).
 - Add `description` to measures to explain business logic, especially for complex calculations.
 - Use `displayFolder` to organize measures into logical groups within each table.
-- When creating a measure, test it with a simple query using `run_dax_query`.
-- After publishing, check the measure with `INFO.VIEW.MEASURES()` and confirm its `State` is `Valid`.
 
 **DON'T:**
 - Store all measures in a single dedicated table.

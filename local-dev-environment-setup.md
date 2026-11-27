@@ -1697,12 +1697,12 @@ builder).
    gcloud builds submit --project=$project --config cloudbuild.coding-agent.yaml --substitutions "_IMAGE=$image" .
    ```
 
-2. **Deploy it, private.** Runs as `coding-agent-sa`, one request at a time, one instance, a 30-minute request timeout. Memory is a starting
-   point to size from what a run uses.
+2. **Deploy it, private.** Runs as `coding-agent-sa`, one request at a time, one instance, a 30-minute request timeout. 2 vCPU and 2 GiB are what the
+   dashboard renders need (`docs/dashboard-editing.md`, build step 4).
    ```powershell
    gcloud run deploy coding-agent --project=$project --region=$region --image=$image `
      --service-account="coding-agent-sa@$project.iam.gserviceaccount.com" --no-allow-unauthenticated `
-     --memory=1Gi --cpu=1 --timeout=1800 --concurrency=1 --min-instances=0 --max-instances=1
+     --memory=2Gi --cpu=2 --timeout=1800 --concurrency=1 --min-instances=0 --max-instances=1
    ```
    Then Step 20, part B (`run.invoker` for the invoker account).
 
